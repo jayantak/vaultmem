@@ -1,0 +1,3 @@
+# nothing tracked-but-generated yet; keep the tree clean of local scratch
+*.tmp
+.DS_Store

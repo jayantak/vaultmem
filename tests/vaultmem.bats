@@ -1,0 +1,696 @@
+#!/usr/bin/env bats
+
+# Unit tests for the vaultmem registry/router/session/graph subcommands.
+# Run: bats tests/
+
+setup() {
+  ROOT="$(cd "$BATS_TEST_DIRNAME/.." && pwd)"
+  OM="$ROOT/vaultmem"
+  # Isolated fake vaults so tests never touch a real vault. The OBS_* exports are
+  # path handles the tests use to build fixtures; the tool itself routes via the
+  # registry config seeded in VAULTMEM_CONFIG below.
+  export OBS_FLO="$BATS_TEST_TMPDIR/flo"
+  export OBS_JAY="$BATS_TEST_TMPDIR/jay"
+  export DEV_DIR="$BATS_TEST_TMPDIR/src"
+  mkdir -p "$OBS_FLO" "$OBS_JAY"
+  # The vault registry the tool consumes. Two vaults flo/jay with labels + owner
+  # routing, so the suite exercises the config path a real user hits.
+  export VAULTMEM_CONFIG="$BATS_TEST_TMPDIR/config.toml"
+  cat >"$VAULTMEM_CONFIG" <<EOF
+[defaults]
+vault = "jay"
+
+[vault.flo]
+label = "Flo"
+path = "$OBS_FLO"
+match_owners = "flocasts,flo*"
+match_paths = "$DEV_DIR/github.com/flocasts/**"
+
+[vault.jay]
+label = "Personal"
+path = "$OBS_JAY"
+EOF
+}
+
+# Print a frontmatter `updated:` timestamp N days in the past, in the
+# "YYYY-MM-DD HH:MM" form the session skill stamps. Handles BSD and GNU date.
+days_ago() {
+  if date -v-1d >/dev/null 2>&1; then
+    date -v-"$1"d +"%Y-%m-%d %H:%M"
+  else date -d "$1 days ago" +"%Y-%m-%d %H:%M"; fi
+}
+
+@test "vaults lists the paths from the registry config" {
+  run "$OM" vaults
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"$BATS_TEST_TMPDIR/flo"* ]]
+  [[ "$output" == *"$BATS_TEST_TMPDIR/jay"* ]]
+}
+
+@test "vaults lists flo with id/path/Sessions/Home.md fields" {
+  run "$OM" vaults
+  [ "$status" -eq 0 ]
+  # Tab-safe field checks (field 1=id, 2=path, 3=sessions root, 4=default MOC).
+  echo "$output" | awk -F'\t' '$1=="flo"{ok = ($3=="Sessions" && $4=="Home.md")} END{exit !ok}'
+}
+
+@test "vaults marks jay as default with Sessions/Home.md fields" {
+  run "$OM" vaults
+  echo "$output" | awk -F'\t' '$1=="jay"{ok = ($3=="Sessions" && $4=="Home.md" && $5=="default")} END{exit !ok}'
+}
+
+@test "vaults renders the flo routing rules from config (owners + globs)" {
+  run "$OM" vaults
+  [ "$status" -eq 0 ]
+  echo "$output" | awk -F'\t' '$1=="flo"{ok = ($5=="owners=flocasts,flo* globs='"$DEV_DIR"'/github.com/flocasts/**")} END{exit !ok}'
+}
+
+@test "registry: vault ids/labels are config-driven, not hardcoded" {
+  # A registry with an arbitrary id + label must surface that label and route
+  # `path <id>` to its root — proving nothing is pinned to flo/jay.
+  cat >"$VAULTMEM_CONFIG" <<EOF
+[vault.work]
+label = "Werk"
+path = "$OBS_FLO"
+
+[vault.jay]
+label = "Personal"
+path = "$OBS_JAY"
+EOF
+  mkdir -p "$OBS_FLO/Sessions/task-1"
+  printf -- '---\nstatus: active\n---\n# task-1\n' >"$OBS_FLO/Sessions/task-1/_index.md"
+  run "$OM" sessions
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"Werk:"* ]]
+  run "$OM" path work
+  [ "$status" -eq 0 ]
+  [ "$output" = "$OBS_FLO" ]
+}
+
+@test "legacy fallback: no config → OBS_FLO/OBS_JAY synthesize the registry" {
+  # Point the config at a nonexistent file so the tool takes the legacy path.
+  export VAULTMEM_CONFIG="$BATS_TEST_TMPDIR/absent.toml"
+  run "$OM" vaults
+  [ "$status" -eq 0 ]
+  # flo/jay rows come straight from the env vars; jay is the default vault.
+  echo "$output" | awk -F'\t' '
+    $1=="flo"{ f = ($2=="'"$OBS_FLO"'" && $3=="Sessions" && $4=="Home.md") }
+    $1=="jay"{ j = ($2=="'"$OBS_JAY"'" && $5=="default") }
+    END{ exit !(f && j) }'
+  # routing still works with the synthesized flocasts rule
+  d="$DEV_DIR/github.com/flocasts/x"
+  mkdir -p "$d"
+  run "$OM" which "$d"
+  [ "$output" = "flo" ]
+}
+
+@test "which → flo for a flocasts git remote" {
+  repo="$BATS_TEST_TMPDIR/work"
+  mkdir -p "$repo"
+  git -C "$repo" init -q
+  git -C "$repo" remote add origin git@github.com:flocasts/ofp-drs.git
+  run "$OM" which "$repo"
+  [ "$status" -eq 0 ]
+  [ "$output" = "flo" ]
+}
+
+@test "which → flo for a https flocasts remote" {
+  repo="$BATS_TEST_TMPDIR/work2"
+  mkdir -p "$repo"
+  git -C "$repo" init -q
+  git -C "$repo" remote add origin https://github.com/flocasts/flo360.git
+  run "$OM" which "$repo"
+  [ "$output" = "flo" ]
+}
+
+@test "which → flo for cwd under DEV_DIR flocasts path (no git)" {
+  d="$DEV_DIR/github.com/flocasts/some-repo"
+  mkdir -p "$d"
+  run "$OM" which "$d"
+  [ "$output" = "flo" ]
+}
+
+@test "which → jay for a non-flo remote" {
+  repo="$BATS_TEST_TMPDIR/personal"
+  mkdir -p "$repo"
+  git -C "$repo" init -q
+  git -C "$repo" remote add origin git@github.com:jayantak/dotfiles.git
+  run "$OM" which "$repo"
+  # stdout is the id; the low-confidence note goes to stderr
+  [ "${lines[0]}" = "jay" ]
+}
+
+@test "which → jay (default) outside any repo" {
+  d="$BATS_TEST_TMPDIR/nowhere"
+  mkdir -p "$d"
+  run "$OM" which "$d"
+  [ "${lines[0]}" = "jay" ]
+}
+
+@test "sessions lists threads from both vaults, newest first" {
+  mkdir -p "$OBS_FLO/Sessions/old-thread" "$OBS_FLO/Sessions/new-thread" "$OBS_JAY/Sessions/home-lab"
+  printf '# old\n' >"$OBS_FLO/Sessions/old-thread/_index.md"
+  printf '# new\n' >"$OBS_FLO/Sessions/new-thread/_index.md"
+  printf '# lab\n' >"$OBS_JAY/Sessions/home-lab/_index.md"
+  # Control mtimes: old-thread older, new-thread newest.
+  touch -t 202601010000 "$OBS_FLO/Sessions/old-thread/_index.md"
+  touch -t 202606010000 "$OBS_FLO/Sessions/new-thread/_index.md"
+  run "$OM" sessions
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"Flo:"* ]]
+  [[ "$output" == *"Personal:"* ]]
+  [[ "$output" == *"home-lab"* ]]
+  # Newest first: new-thread is position 1, old-thread is position 2.
+  [[ "$output" == *"1 new-thread"* ]]
+  [[ "$output" == *"2 old-thread"* ]]
+  # Each thread is annotated with its age in days, e.g. "new-thread(11d·active)".
+  [[ "$output" =~ new-thread\([0-9]+d ]]
+}
+
+@test "sessions always prints the picker + agent directive, even with no Sessions dirs" {
+  run "$OM" sessions
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"none yet"* ]]
+  [[ "$output" == *"AGENT DIRECTIVE"* ]]
+}
+
+@test "sessions appends the agent directive after the thread list" {
+  mkdir -p "$OBS_JAY/Sessions/home-lab"
+  printf '# lab\n' >"$OBS_JAY/Sessions/home-lab/_index.md"
+  run "$OM" sessions
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"home-lab"* ]]
+  [[ "$output" == *"AGENT DIRECTIVE"* ]]
+}
+
+@test "sessions uses a custom directive_file when configured" {
+  cat >"$VAULTMEM_CONFIG" <<EOF
+[defaults]
+vault = "jay"
+directive_file = "$BATS_TEST_TMPDIR/directive.txt"
+
+[vault.jay]
+label = "Personal"
+path = "$OBS_JAY"
+EOF
+  printf 'CUSTOM DIRECTIVE LINE\n' >"$BATS_TEST_TMPDIR/directive.txt"
+  run "$OM" sessions
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"CUSTOM DIRECTIVE LINE"* ]]
+  [[ "$output" != *"AGENT DIRECTIVE: resume"* ]]
+}
+
+@test "sessions groups threads under their project, active first" {
+  mkdir -p "$OBS_JAY/Sessions/add-obs" "$OBS_JAY/Sessions/fix-500" "$OBS_JAY/Sessions/loner"
+  cat >"$OBS_JAY/Sessions/add-obs/_index.md" <<'EOF'
+---
+project: drs-v2
+status: active
+---
+# add-obs
+EOF
+  cat >"$OBS_JAY/Sessions/fix-500/_index.md" <<'EOF'
+---
+project: drs-v2
+status: done
+---
+# fix-500
+EOF
+  printf -- '---\nstatus: active\n---\n# loner\n' >"$OBS_JAY/Sessions/loner/_index.md"
+  run "$OM" sessions
+  [ "$status" -eq 0 ]
+  # project header present, orphan bucket present
+  [[ "$output" == *"drs-v2:"* ]]
+  [[ "$output" == *"(no project)"* ]]
+  # status suffix rendered, e.g. add-obs(0d·active)
+  [[ "$output" =~ add-obs\([0-9]+d·active\) ]]
+  # still prints the directive
+  [[ "$output" == *"AGENT DIRECTIVE"* ]]
+}
+
+@test "sessions orders active-containing projects before all-inactive; (no project) last" {
+  # Seed two projects in one vault: alphabetically later proj has active, earlier
+  # is all-parked. (All-done projects no longer render — done is hidden — so the
+  # all-inactive case is now 'all-parked', which the picker still shows.)
+  mkdir -p "$OBS_JAY/Sessions/proj-a-task" "$OBS_JAY/Sessions/proj-a-done" "$OBS_JAY/Sessions/proj-z-active"
+  cat >"$OBS_JAY/Sessions/proj-a-task/_index.md" <<'EOF'
+---
+project: proj-a
+status: parked
+---
+# proj-a-task
+EOF
+  cat >"$OBS_JAY/Sessions/proj-a-done/_index.md" <<'EOF'
+---
+project: proj-a
+status: parked
+---
+# proj-a-done
+EOF
+  cat >"$OBS_JAY/Sessions/proj-z-active/_index.md" <<'EOF'
+---
+project: proj-z
+status: active
+---
+# proj-z-active
+EOF
+  # Also add an orphan with active status.
+  mkdir -p "$OBS_JAY/Sessions/orphan-active"
+  printf -- '---\nstatus: active\n---\n# orphan-active\n' >"$OBS_JAY/Sessions/orphan-active/_index.md"
+
+  run "$OM" sessions
+  [ "$status" -eq 0 ]
+
+  # All content is there
+  [[ "$output" == *"proj-z-active"* ]]
+  [[ "$output" == *"proj-a-task"* ]]
+  [[ "$output" == *"orphan-active"* ]]
+
+  # Extract just the project headers line to verify order
+  # proj-z (has active) should appear before proj-a (all-parked), and (no project) last
+  line=$(echo "$output" | grep "Personal:" | head -1)
+  [[ "$line" == *"proj-z:"*"proj-a:"*"(no project):"* ]]
+}
+
+# --- wikilink graph subcommands (resolve / links / backlinks / dangling) -------
+
+# Build a tiny linked vault: a MOC (with alias), two notes, one dangling link.
+seed_graph() {
+  mkdir -p "$OBS_FLO/MOCs" "$OBS_FLO/Architecture" "$OBS_FLO/People"
+  cat >"$OBS_FLO/MOCs/MOC - Demo.md" <<'EOF'
+---
+title: MOC - Demo
+aliases:
+  - Demo
+type: moc
+---
+# MOC — Demo
+- [[Architecture/Widget]] orientation line
+- [[People/Ada]] the owner
+- [[Architecture/Ghost]] not created yet
+EOF
+  printf -- '---\ntitle: Widget\n---\n# Widget\nSee [[People/Ada]] and [[MOC - Demo]].\n' >"$OBS_FLO/Architecture/Widget.md"
+  printf -- '---\ntitle: Ada\n---\n# Ada\nOwns [[Architecture/Widget]].\n' >"$OBS_FLO/People/Ada.md"
+}
+
+@test "resolve finds a note by alias" {
+  seed_graph
+  run "$OM" -v flo resolve "Demo"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"MOCs/MOC - Demo.md" ]]
+}
+
+@test "resolve finds a note by bare basename" {
+  seed_graph
+  run "$OM" -v flo resolve "Widget"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"Architecture/Widget.md" ]]
+}
+
+@test "resolve fails (non-zero) on a dangling target" {
+  seed_graph
+  run "$OM" -v flo resolve "Ghost"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"DANGLING"* ]]
+}
+
+@test "links lists outbound links and flags the dangling one" {
+  seed_graph
+  run "$OM" -v flo links "Demo"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"✓ [[Architecture/Widget]]"* ]]
+  [[ "$output" == *"✗ [[Architecture/Ghost]]"* ]]
+}
+
+@test "backlinks finds notes that link to a target (alias-aware)" {
+  seed_graph
+  run "$OM" -v flo backlinks "Widget"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"MOCs/MOC - Demo.md"* ]]
+  [[ "$output" == *"People/Ada.md"* ]]
+}
+
+@test "dangling surfaces only the unresolved link" {
+  seed_graph
+  run "$OM" -v flo dangling
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"[[Architecture/Ghost]]"* ]]
+  [[ "$output" != *"[[Architecture/Widget]]"* ]]
+}
+
+@test "dangling ignores shell-snippet false positives" {
+  mkdir -p "$OBS_FLO"
+  printf -- '# Notes\n```bash\nif [[ -d "$HOME/x" ]]; then echo hi; fi\n```\n' >"$OBS_FLO/snippet.md"
+  run "$OM" -v flo dangling
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"none"* ]]
+}
+
+# --- project tier: projects / project verbs --------------------------------
+
+# Seed a vault with one Project note and three sessions (2 under it, 1 orphan).
+seed_projects() {
+  mkdir -p "$OBS_JAY/Projects" \
+    "$OBS_JAY/Sessions/add-obs" "$OBS_JAY/Sessions/fix-500" "$OBS_JAY/Sessions/loner"
+  cat >"$OBS_JAY/Projects/drs-v2.md" <<'EOF'
+---
+type: project
+status: active
+repos: [ofp-drs]
+---
+# drs-v2
+EOF
+  cat >"$OBS_JAY/Sessions/add-obs/_index.md" <<'EOF'
+---
+thread: add-obs
+project: drs-v2
+status: active
+---
+# add-obs
+EOF
+  cat >"$OBS_JAY/Sessions/fix-500/_index.md" <<'EOF'
+---
+thread: fix-500
+project: drs-v2
+status: done
+---
+# fix-500
+EOF
+  printf -- '---\nthread: loner\nstatus: active\n---\n# loner\n' >"$OBS_JAY/Sessions/loner/_index.md"
+}
+
+@test "projects lists a project with active/total session counts" {
+  seed_projects
+  run "$OM" -v jay projects
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"drs-v2"* ]]
+  [[ "$output" == *"[active]"* ]]
+  # 1 active (add-obs) of 2 total (add-obs + fix-500)
+  [[ "$output" == *"1/2 sessions"* ]]
+}
+
+@test "projects strips YAML inline comments on frontmatter values" {
+  # The shipped Templates/Project.md carries inline comments like
+  # `status: active   # active | parked | done`. _fm_field must not leak them
+  # into the status, or the [status] display and the active-count both break.
+  mkdir -p "$OBS_JAY/Projects" "$OBS_JAY/Sessions/s1"
+  cat >"$OBS_JAY/Projects/tmpl.md" <<'EOF'
+---
+type: project
+status: active        # active | parked | done
+repos: []             # sessions inherit this
+---
+# tmpl
+EOF
+  cat >"$OBS_JAY/Sessions/s1/_index.md" <<'EOF'
+---
+project: tmpl
+status: active        # active | parked | done
+---
+# s1
+EOF
+  run "$OM" -v jay projects
+  [ "$status" -eq 0 ]
+  # status renders clean, not "active   # active | parked | done"
+  [[ "$output" == *"tmpl  [active]"* ]]
+  [[ "$output" != *"# active"* ]]
+  # the commented session status still counts as active
+  [[ "$output" == *"1/1 sessions"* ]]
+}
+
+@test "project <name> shows repos and groups sessions by status" {
+  seed_projects
+  run "$OM" -v jay project drs-v2
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"ofp-drs"* ]]
+  [[ "$output" == *"add-obs"* ]]
+  [[ "$output" == *"fix-500"* ]]
+  # add-obs is active, fix-500 is done — both listed under their status
+  [[ "$output" == *"active"* ]]
+  [[ "$output" == *"done"* ]]
+}
+
+@test "project <name> fails on an unknown project" {
+  seed_projects
+  run "$OM" -v jay project nope
+  [ "$status" -ne 0 ]
+}
+
+# --- lifecycle grooming (archive / hide done / cold-parked / nudge) ------------
+
+@test "sessions hides done sessions, keeps active and parked" {
+  mkdir -p "$OBS_JAY/Sessions/live" "$OBS_JAY/Sessions/paused" "$OBS_JAY/Sessions/closed"
+  printf -- '---\nstatus: active\n---\n# live\n' >"$OBS_JAY/Sessions/live/_index.md"
+  printf -- '---\nstatus: parked\n---\n# paused\n' >"$OBS_JAY/Sessions/paused/_index.md"
+  printf -- '---\nstatus: done\n---\n# closed\n' >"$OBS_JAY/Sessions/closed/_index.md"
+  run "$OM" sessions
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"live"* ]]
+  [[ "$output" == *"paused"* ]]
+  [[ "$output" != *"closed"* ]]
+}
+
+@test "sessions excludes archived sessions under _archive/" {
+  mkdir -p "$OBS_JAY/Sessions/live" "$OBS_JAY/Sessions/_archive/oldie"
+  printf -- '---\nstatus: active\n---\n# live\n' >"$OBS_JAY/Sessions/live/_index.md"
+  printf -- '---\nstatus: done\n---\n# oldie\n' >"$OBS_JAY/Sessions/_archive/oldie/_index.md"
+  run "$OM" sessions
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"live"* ]]
+  [[ "$output" != *"oldie"* ]]
+}
+
+@test "groom archives done sessions into _archive and flips the Project status" {
+  mkdir -p "$OBS_JAY/Projects" "$OBS_JAY/Sessions/keep-me" "$OBS_JAY/Sessions/wrap-up"
+  cat >"$OBS_JAY/Projects/proj.md" <<'EOF'
+---
+type: project
+status: active
+---
+# proj
+## Sessions
+- [[keep-me]] — ongoing (status: active)
+- [[wrap-up]] — shipped (status: done)
+EOF
+  printf -- '---\nproject: proj\nstatus: active\n---\n# keep-me\n' >"$OBS_JAY/Sessions/keep-me/_index.md"
+  printf -- '---\nproject: proj\nstatus: done\n---\n# wrap-up\n' >"$OBS_JAY/Sessions/wrap-up/_index.md"
+  run "$OM" -v jay groom
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"wrap-up"* ]]
+  # done session moved under _archive/, active one untouched
+  [ -f "$OBS_JAY/Sessions/_archive/wrap-up/_index.md" ]
+  [ ! -e "$OBS_JAY/Sessions/wrap-up" ]
+  [ -f "$OBS_JAY/Sessions/keep-me/_index.md" ]
+  # Project index line for the archived thread flipped to archived
+  grep -q '\[\[wrap-up\]\].*archived)' "$OBS_JAY/Projects/proj.md"
+  # the active thread's status is left alone
+  grep -q '\[\[keep-me\]\].*active)' "$OBS_JAY/Projects/proj.md"
+}
+
+@test "groom reports parked sessions older than the cold threshold via updated:" {
+  mkdir -p "$OBS_JAY/Sessions/cold-one" "$OBS_JAY/Sessions/fresh-one"
+  printf -- '---\nstatus: parked\nupdated: %s\n---\n# cold-one\n' "$(days_ago 40)" >"$OBS_JAY/Sessions/cold-one/_index.md"
+  printf -- '---\nstatus: parked\nupdated: %s\n---\n# fresh-one\n' "$(days_ago 2)" >"$OBS_JAY/Sessions/fresh-one/_index.md"
+  run "$OM" -v jay groom
+  [ "$status" -eq 0 ]
+  # 40d-old parked is flagged cold; 2d-old is not
+  [[ "$output" == *"cold-one"* ]]
+  [[ "$output" != *"fresh-one"* ]]
+}
+
+@test "groom cold threshold honors VAULTMEM_COLD_DAYS" {
+  mkdir -p "$OBS_JAY/Sessions/p10"
+  printf -- '---\nstatus: parked\nupdated: %s\n---\n# p10\n' "$(days_ago 10)" >"$OBS_JAY/Sessions/p10/_index.md"
+  # default 21 → not cold
+  run "$OM" -v jay groom
+  [[ "$output" != *"p10"* ]]
+  # threshold 7 → now cold
+  VAULTMEM_COLD_DAYS=7 run "$OM" -v jay groom
+  [[ "$output" == *"p10"* ]]
+}
+
+@test "groom cold threshold reads cold_days from the config default" {
+  cat >"$VAULTMEM_CONFIG" <<EOF
+[defaults]
+vault = "jay"
+cold_days = 7
+
+[vault.jay]
+label = "Personal"
+path = "$OBS_JAY"
+EOF
+  mkdir -p "$OBS_JAY/Sessions/p10"
+  printf -- '---\nstatus: parked\nupdated: %s\n---\n# p10\n' "$(days_ago 10)" >"$OBS_JAY/Sessions/p10/_index.md"
+  run "$OM" -v jay groom
+  # 10d old with a config cold_days=7 → flagged cold
+  [[ "$output" == *"p10"* ]]
+}
+
+@test "sessions nudges when grooming is due, silent otherwise" {
+  mkdir -p "$OBS_JAY/Sessions/live"
+  printf -- '---\nstatus: active\n---\n# live\n' >"$OBS_JAY/Sessions/live/_index.md"
+  run "$OM" sessions
+  [[ "$output" != *"groom"* ]]
+  # add a done session → nudge appears pointing at groom
+  mkdir -p "$OBS_JAY/Sessions/closed"
+  printf -- '---\nstatus: done\n---\n# closed\n' >"$OBS_JAY/Sessions/closed/_index.md"
+  run "$OM" sessions
+  [[ "$output" == *"groom"* ]]
+}
+
+@test "path prints the flo vault root" {
+  run "$OM" path flo
+  [ "$status" -eq 0 ]
+  [ "$output" = "$BATS_TEST_TMPDIR/flo" ]
+}
+
+@test "path prints the jay vault root and accepts the personal alias" {
+  run "$OM" path jay
+  [ "$status" -eq 0 ]
+  [ "$output" = "$BATS_TEST_TMPDIR/jay" ]
+  run "$OM" path personal
+  [ "$output" = "$BATS_TEST_TMPDIR/jay" ]
+}
+
+@test "path errors with usage on a bad vault id" {
+  run "$OM" path nope
+  [ "$status" -eq 2 ]
+  [[ "$output" == *"usage: vaultmem path"* ]]
+}
+
+# --- status-glyph filenames (sidebar sorting) ---------------------------------
+# A project file may carry a leading status glyph in its name ("🟢 <name>.md")
+# so Obsidian's sidebar self-sorts by state. Sessions still reference the plain
+# `project:` name, so name-matching must strip the glyph.
+
+@test "projects matches sessions to a glyph-prefixed project file" {
+  mkdir -p "$OBS_JAY/Projects" "$OBS_JAY/Sessions/build-it"
+  cat >"$OBS_JAY/Projects/🟢 Widget Pipeline.md" <<'EOF'
+---
+aliases: ["Widget Pipeline"]
+type: project
+status: active
+---
+# 🟢 Widget Pipeline
+EOF
+  printf -- '---\nproject: Widget Pipeline\nstatus: active\nupdated: %s\n---\n# build-it\n' \
+    "$(days_ago 0)" >"$OBS_JAY/Sessions/build-it/_index.md"
+  run "$OM" -v jay projects
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"🟢 Widget Pipeline"* ]]
+  # the plain-named session still counts under the glyphed project
+  [[ "$output" == *"1/1 sessions"* ]]
+}
+
+@test "groom flips the Sessions index in a glyph-prefixed project file" {
+  mkdir -p "$OBS_JAY/Projects" "$OBS_JAY/Sessions/wrap-up"
+  cat >"$OBS_JAY/Projects/✅ Widget Pipeline.md" <<'EOF'
+---
+aliases: ["Widget Pipeline"]
+type: project
+status: done
+---
+# ✅ Widget Pipeline
+## Sessions
+- [[wrap-up]] — shipped (status: done)
+EOF
+  printf -- '---\nproject: Widget Pipeline\nstatus: done\n---\n# wrap-up\n' \
+    >"$OBS_JAY/Sessions/wrap-up/_index.md"
+  run "$OM" -v jay groom
+  [ "$status" -eq 0 ]
+  [ -f "$OBS_JAY/Sessions/_archive/wrap-up/_index.md" ]
+  # the index line in the GLYPHED project file flipped to archived
+  grep -q '\[\[wrap-up\]\].*archived)' "$OBS_JAY/Projects/✅ Widget Pipeline.md"
+}
+
+# --- init (scaffold config + vault skeleton) -----------------------------------
+
+@test "init --config writes a starter config to VAULTMEM_CONFIG" {
+  export VAULTMEM_CONFIG="$BATS_TEST_TMPDIR/fresh/config.toml"
+  run "$OM" init --config
+  [ "$status" -eq 0 ]
+  [ -f "$VAULTMEM_CONFIG" ]
+  # the starter config parses clean under the doctor lint
+  run "$OM" doctor
+  [ "$status" -eq 0 ]
+}
+
+@test "init --config refuses to clobber an existing config" {
+  # setup() already wrote a config at VAULTMEM_CONFIG
+  run "$OM" init --config
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"already exists"* ]]
+}
+
+@test "init scaffolds a SCHEMA-compliant vault skeleton" {
+  run "$OM" init --vault jay
+  [ "$status" -eq 0 ]
+  [ -f "$OBS_JAY/Home.md" ]
+  [ -d "$OBS_JAY/MOCs" ]
+  [ -d "$OBS_JAY/Projects" ]
+  [ -d "$OBS_JAY/Sessions" ]
+  [ -f "$OBS_JAY/Templates/Project.md" ]
+  [ -f "$OBS_JAY/Templates/Session _index.md" ]
+  # Home carries the empty Agent-Index markers and the schema marker
+  grep -q 'AGENT-INDEX:START' "$OBS_JAY/Home.md"
+  grep -q 'AGENT-INDEX:END' "$OBS_JAY/Home.md"
+  grep -q '^schema: 1' "$OBS_JAY/Home.md"
+}
+
+@test "init on an already-scaffolded vault does not clobber Home.md" {
+  printf -- '---\nschema: 1\n---\n# Home\nMY NOTES\n<!-- AGENT-INDEX:START -->\n<!-- AGENT-INDEX:END -->\n' >"$OBS_JAY/Home.md"
+  run "$OM" init --vault jay
+  [ "$status" -eq 0 ]
+  grep -q 'MY NOTES' "$OBS_JAY/Home.md"
+}
+
+# --- doctor config lint (mis-parse fails loudly) -------------------------------
+
+@test "doctor is clean on the seeded config" {
+  run "$OM" doctor
+  [ "$status" -eq 0 ]
+}
+
+@test "doctor hard-errors on an unknown config key" {
+  cat >"$VAULTMEM_CONFIG" <<EOF
+[vault.jay]
+label = "Personal"
+path = "$OBS_JAY"
+bogus = "nope"
+EOF
+  run "$OM" doctor
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"unknown key"* ]]
+  [[ "$output" == *"bogus"* ]]
+}
+
+@test "doctor hard-errors on an unquoted string value" {
+  cat >"$VAULTMEM_CONFIG" <<EOF
+[vault.jay]
+label = Personal
+path = "$OBS_JAY"
+EOF
+  run "$OM" doctor
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"unquoted string value"* ]]
+}
+
+@test "doctor hard-errors on an array-of-tables" {
+  cat >"$VAULTMEM_CONFIG" <<EOF
+[[vault.jay]]
+path = "$OBS_JAY"
+EOF
+  run "$OM" doctor
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"array-of-tables"* ]]
+}
+
+@test "doctor hard-errors on a nested table" {
+  cat >"$VAULTMEM_CONFIG" <<EOF
+[vault.jay.sub]
+path = "$OBS_JAY"
+EOF
+  run "$OM" doctor
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"nested section"* ]]
+}

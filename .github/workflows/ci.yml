@@ -1,0 +1,53 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  lint:
+    name: shellcheck + shfmt
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install shellcheck and shfmt
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y shellcheck
+          curl -fsSL -o /usr/local/bin/shfmt \
+            https://github.com/mvdan/sh/releases/download/v3.10.0/shfmt_v3.10.0_linux_amd64
+          sudo chmod +x /usr/local/bin/shfmt
+      - name: shellcheck
+        run: shellcheck vaultmem install.sh tests/subcommand-lint.sh
+      - name: shfmt --diff
+        run: shfmt --diff vaultmem install.sh tests/subcommand-lint.sh
+
+  test:
+    name: bats (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install ripgrep + bats (Linux)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y ripgrep bats
+      - name: Install ripgrep + bats (macOS)
+        if: runner.os == 'macOS'
+        run: brew install ripgrep bats-core
+      - name: Run tests
+        run: bats tests/vaultmem.bats
+
+  subcommand-lint:
+    name: skills ↔ dispatch-table lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Lint skill subcommand references
+        run: ./tests/subcommand-lint.sh
