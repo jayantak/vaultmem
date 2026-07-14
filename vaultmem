@@ -214,12 +214,16 @@ _load_registry() {
 		DEF_DIRECTIVE_FILE=$(_expand_path "$(_cfg defaults directive_file)")
 		unset -f _cfg
 	else
+		# No config file: thin zero-config escape hatch. Register a single
+		# generic vault (no org routing) from the first env var that points
+		# somewhere; OBS_FLO/OBS_JAY are read for legacy back-compat. Empty
+		# path leaves the registry pathless so the dispatch guard dies with
+		# "no vault configured".
 		OBS_ENV="${OBS_ENV_FILE:-${XDG_CONFIG_HOME:-$HOME/.config}/vaultmem/env}"
 		# shellcheck source=/dev/null
 		[ -r "$OBS_ENV" ] && . "$OBS_ENV"
-		_reg_add flo "${OBS_FLO:-}" Flo Sessions Home.md MOCs "flocasts,flo*" "$DEV_DIR/github.com/flocasts/**"
-		_reg_add jay "${OBS_JAY:-}" Personal Sessions Home.md MOCs "" ""
-		DEF_VAULT=jay
+		_reg_add main "${VAULTMEM_VAULT:-${OBS_FLO:-${OBS_JAY:-}}}" Vault Sessions Home.md MOCs "" ""
+		DEF_VAULT=main
 	fi
 
 	# Router fallback + the primary (agent-index) vault: the first registry vault.
