@@ -67,7 +67,8 @@ the session picker (Claude Code example):
 ```
 
 `status`/`sessions` are **fail-quiet**: if the vault isn't mounted they print
-nothing and exit 0, so the hook can never break a session start.
+nothing and exit 0, so the hook can never break a session start. The Codex
+equivalent and directive customization are in [docs/hooks.md](docs/hooks.md).
 
 ## Concepts
 
@@ -137,22 +138,19 @@ vaultmem init --config      write a starter config.toml
 
 ## Config reference
 
-`${XDG_CONFIG_HOME:-~/.config}/vaultmem/config.toml`, overridable with
-`VAULTMEM_CONFIG=<path>`. It is a **strict subset of TOML** parsed by a small awk
-function — **the subset is enforced, and `vaultmem doctor` hard-errors on
-anything outside it** so a bad config fails loudly instead of mis-routing
-silently (`groom` moves files — silent mis-routing is the failure mode to avoid).
+The vault registry lives at
+`${XDG_CONFIG_HOME:-~/.config}/vaultmem/config.toml` (override with
+`VAULTMEM_CONFIG=<path>`; scaffold with `vaultmem init --config`). It is a
+**strict subset of TOML** parsed by a small awk function — **the subset is
+enforced, and `vaultmem doctor` hard-errors on anything outside it** so a bad
+config fails loudly instead of mis-routing silently (`groom` moves files —
+silent mis-routing is the failure mode to avoid).
 
-Accepted:
-
-- Headers: `[defaults]` and `[vault.<id>]` only.
-- Values: a quoted string `"..."`, a bare `true`/`false`, a bare integer, or a
-  bare comma-list token. **Quote every string value.**
-- `#` comments.
-
-**Rejected** (all hard-error under `doctor`): arrays (`["a","b"]`), inline tables
-(`{...}`), array-of-tables (`[[...]]`), nested tables (`[a.b.c]`), unknown keys,
-and unquoted string values.
+Accepted: `[defaults]` and `[vault.<id>]` headers; values are a quoted string
+`"..."`, a bare `true`/`false`, a bare integer, or a bare comma list; `#`
+comments. **Quote every string value.** **Rejected** (all hard-error under
+`doctor`): arrays, inline tables, array-of-tables (`[[…]]`), nested tables,
+multiline strings, unknown keys, and unquoted strings.
 
 ```toml
 [defaults]
@@ -164,44 +162,51 @@ directive_file = ""       # optional: path to custom AGENT DIRECTIVE text
 [vault.personal]
 label = "Personal"
 path = "~/Obsidian/Personal"
-# sessions = "Sessions"                       # optional, default "Sessions"
-# home = "Home.md"                            # optional, default; gates index/doctor/status
-# mocs = "MOCs"                               # optional, default "MOCs"
 # match_owners = "myorg,my*"                  # git-remote owner globs that route here
 # match_paths = "~/src/github.com/myorg/**"   # cwd globs that route here
 ```
 
-Env overrides: `VAULTMEM_COLD_DAYS` beats `cold_days`. With no config file at
-all, the legacy `OBS_FLO`/`OBS_JAY` env vars synthesize a two-vault registry
-(kept for backward compatibility; prefer the config).
+Every vault field, the `which` routing algorithm, and the per-vault Agent-Index
+gating are documented in the **[Config reference](docs/config.md)**. Env
+override: `VAULTMEM_COLD_DAYS` beats `cold_days`.
 
 ## Agent skills
 
-vaultmem bundles a set of agent skills that drive the session/memory workflow —
-`session` (the resume/park picker), `obsidian-vault` (read/capture), and
-`remember-project` (onboard a repo into memory). They reference `vaultmem`
-subcommands and [SCHEMA.md](SCHEMA.md) rather than restating the contract, and
-CI lints that every subcommand a skill names actually exists in the tool.
+vaultmem bundles three agent skills in `skills/` that drive the memory workflow:
 
-> The `skills/` directory ships in a later release. Until then the tool stands
-> alone; the sections below describe how they'll install.
+- **`session`** — the resume/park/skip picker. Reads `vaultmem sessions`,
+  routes work to the right vault, and rolls durable insights up into Project
+  notes and MOCs at stopping points.
+- **`obsidian-vault`** — read and capture. Looks up prior decisions, root
+  causes, and people/project context before you re-derive them, and writes new
+  knowledge back into the vault.
+- **`remember-project`** — onboard a repo into memory: interviews you, then
+  writes a pointer-based Map of Content so future sessions route to where truth
+  lives instead of re-deriving it.
 
-**Claude Code** — add the repo as a plugin marketplace:
+The skills reference `vaultmem` subcommands and [SCHEMA.md](SCHEMA.md) rather
+than restating the contract, and CI lints that every subcommand a skill names
+actually exists in the tool — so the skills stay version-locked to the binary
+they document.
+
+**Claude Code** — add the repo as a plugin marketplace, then enable the plugin;
+the skills appear namespaced (e.g. `vaultmem:session`):
 
 ```
 /plugin marketplace add jayantak/vaultmem
 ```
 
-then enable the plugin; the skills appear namespaced (e.g. `vaultmem:session`).
-
-**Codex / others** — clone and symlink, or use the installer:
+**Codex / others** — no marketplace, so symlink the skills into your harness's
+skills directory. The installer automates it:
 
 ```bash
-./install.sh --skills ~/.codex/skills
+./install.sh --skills ~/.codex/skills   # symlinks skills/<name> into the target
 ```
 
-The `session` skill assumes the SessionStart hook (see [Quickstart](#quickstart))
-is wired — skill install and hook install are one step, not two.
+> **The `session` skill assumes the SessionStart hook is wired** — it acts on the
+> picker that `vaultmem sessions` prints at session start. Install the skill and
+> the hook together; see [docs/hooks.md](docs/hooks.md). Skill install and hook
+> install are one step, not two.
 
 ## Design notes
 
