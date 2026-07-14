@@ -87,21 +87,21 @@ EOF
   [ "$output" = "$OBS_FLO" ]
 }
 
-@test "legacy fallback: no config → OBS_FLO/OBS_JAY synthesize the registry" {
+@test "legacy fallback: no config → env var synthesizes one generic vault" {
   # Point the config at a nonexistent file so the tool takes the legacy path.
   export VAULTMEM_CONFIG="$BATS_TEST_TMPDIR/absent.toml"
   run "$OM" vaults
   [ "$status" -eq 0 ]
-  # flo/jay rows come straight from the env vars; jay is the default vault.
+  # A single generic `main` vault, path from the legacy env var, no org routing.
   echo "$output" | awk -F'\t' '
-    $1=="flo"{ f = ($2=="'"$OBS_FLO"'" && $3=="Sessions" && $4=="Home.md") }
-    $1=="jay"{ j = ($2=="'"$OBS_JAY"'" && $5=="default") }
-    END{ exit !(f && j) }'
-  # routing still works with the synthesized flocasts rule
+    $1=="main"{ m = ($2=="'"$OBS_FLO"'" && $3=="Sessions" && $4=="Home.md" && $5=="default") }
+    END{ exit !m }'
+  # No org routing in the fallback: unknown cwd resolves to the default vault.
   d="$DEV_DIR/github.com/flocasts/x"
   mkdir -p "$d"
   run "$OM" which "$d"
-  [ "$output" = "flo" ]
+  # stdout is the id; the low-confidence note goes to stderr
+  [ "${lines[0]}" = "main" ]
 }
 
 @test "which → flo for a flocasts git remote" {
