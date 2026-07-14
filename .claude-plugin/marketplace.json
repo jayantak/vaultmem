@@ -1,0 +1,21 @@
+{
+  "name": "vaultmem",
+  "owner": {
+    "name": "jayantak",
+    "url": "https://github.com/jayantak"
+  },
+  "plugins": [
+    {
+      "name": "vaultmem",
+      "source": "./",
+      "description": "The session, obsidian-vault, and remember-project skills (namespaced vaultmem:session, vaultmem:obsidian-vault, vaultmem:remember-project). Pairs with the vaultmem CLI.",
+      "version": "0.1.0",
+      "license": "MIT",
+      "keywords": [
+        "obsidian",
+        "agent-memory",
+        "skills"
+      ]
+    }
+  ]
+}
