@@ -208,6 +208,10 @@ skills directory. The installer automates it:
 > the hook together; see [docs/hooks.md](docs/hooks.md). Skill install and hook
 > install are one step, not two.
 
+How `skills/` becomes an installable plugin (the `.claude-plugin/` manifests,
+skill discovery, the skills↔CLI drift lint) is documented in
+[docs/plugin.md](docs/plugin.md).
+
 ## Design notes
 
 - **Fail-quiet where it counts.** `status`/`sessions` never break a session
