@@ -268,12 +268,18 @@ and when a **Project's own** status changes, re-`mv` its file to the new glyph
 (💤 when parked, ✅ when shipped) and fix its H1, keeping the plain-name alias.
 
 The SessionStart picker appends a `⚠ … run vaultmem groom` nudge when a
-vault has `done` sessions (ready to archive) or `parked` sessions untouched past
-`OBSIDIAN_SESSION_COLD_DAYS` (default 21). When you see it:
+vault has `done` sessions (ready to archive), `parked` sessions untouched past
+`OBSIDIAN_SESSION_COLD_DAYS` (default 21), or `active` sessions untouched past
+`VAULTMEM_STALE_ACTIVE_DAYS` (default 7). `vaultmem status` surfaces the same
+nudge in short form. When you see it:
 
 - **`vaultmem groom`** mechanically moves every `done` session into
   `_archive/` and flips its parent Project's `## Sessions` line to `archived`.
   Safe to run anytime (done was already distilled at park). Scope with `-v <vault>`.
+  It also archives every `done` **Project** into `Projects/_archive/` — unless a
+  session outside `_archive/` still points at it, in which case `groom` prints a
+  warning naming the blocking session(s) instead of moving it. Clear those first
+  (archive or reassign the session) and re-run `groom`.
 - It also **lists cold-parked sessions for triage** — it never auto-retires them.
   For each, drive the decision with the user: **resume** (open it, status back to
   `active`), or **retire**. To retire: confirm it was distilled at its last park
@@ -281,6 +287,10 @@ vault has `done` sessions (ready to archive) or `parked` sessions untouched past
   since park, so normally yes); if not, run the distill loop
   ([references/distill.md](references/distill.md)) first; then set `status: done`
   so the next `groom` archives it.
+- It also **lists stale-active sessions for triage** — an `active` session that
+  has gone untouched this long likely stalled. Drive the same decision with the
+  user: **park** it (if paused but not abandoned), or if the bookmark shows the
+  work actually finished, set `status: done` so the next `groom` archives it.
 
 ## Frugality rule
 

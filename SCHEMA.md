@@ -15,6 +15,7 @@ future tool can warn on an unknown version.
   Home.md                 # the Agent-Index hub (gates index/doctor/status/curated search)
   MOCs/                   # Maps of Content — one "MOC - <Topic>.md" per domain hub
   Projects/               # one <name>.md per project (epic); type: project
+    _archive/             # groomed (done) projects move here; excluded from every listing
   Sessions/               # one <thread>/_index.md per session (task)
     _archive/             # groomed (done) sessions move here; excluded from every listing
   Templates/              # excluded from search + resolution
@@ -50,11 +51,19 @@ inline ` # comment`. It never parses nested YAML.
 Sessions and Projects carry a `status:`. The live states the picker and
 counters use:
 
-- `active` — in progress; shown in the picker, counts toward a project's active tally.
+- `active` — in progress; shown in the picker, counts toward a project's active
+  tally. If a session's `active` status goes untouched past
+  `stale_active_days` (`VAULTMEM_STALE_ACTIVE_DAYS`, default 7), `groom`
+  reports it as stale-active: it likely stalled and should be parked or
+  retired — or flipped to `done` if the work actually finished.
 - `parked` — paused; shown in the picker; if untouched past `cold_days` it is
   flagged cold by `groom`.
 - `done` — finished; hidden from the picker, and archived to `Sessions/_archive/`
-  by `groom`.
+  by `groom`. A Project with `status: done` is archived the same way, into
+  `Projects/_archive/`, **unless** a session still points at it (`project:`
+  field matches, glyph-stripped) from outside `Sessions/_archive/` — that
+  blocks the move and `groom` prints a warning naming the blocking session(s)
+  instead, so a project never disappears out from under work still in flight.
 
 `doctor` additionally treats these frontmatter statuses as **dead** when
 checking whether an Agent-Index row has gone stale (a row still asserting a live

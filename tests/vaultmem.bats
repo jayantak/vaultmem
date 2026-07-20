@@ -526,6 +526,117 @@ EOF
   [[ "$output" == *"p10"* ]]
 }
 
+@test "groom archives a done project with no live sessions into Projects/_archive/" {
+  mkdir -p "$OBS_JAY/Projects" "$OBS_JAY/Sessions/_archive/old-thread"
+  cat >"$OBS_JAY/Projects/finished.md" <<'EOF'
+---
+type: project
+status: done
+---
+# finished
+EOF
+  # its only session is already archived — nothing live blocks the project
+  printf -- '---\nproject: finished\nstatus: done\n---\n# old-thread\n' \
+    >"$OBS_JAY/Sessions/_archive/old-thread/_index.md"
+  run "$OM" -v jay groom
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"archived project finished"* ]]
+  [ -f "$OBS_JAY/Projects/_archive/finished.md" ]
+  [ ! -e "$OBS_JAY/Projects/finished.md" ]
+}
+
+@test "groom does not archive a done project blocked by a live (non-archived) session" {
+  mkdir -p "$OBS_JAY/Projects" "$OBS_JAY/Sessions/still-going"
+  cat >"$OBS_JAY/Projects/half-done.md" <<'EOF'
+---
+type: project
+status: done
+---
+# half-done
+EOF
+  printf -- '---\nproject: half-done\nstatus: parked\n---\n# still-going\n' \
+    >"$OBS_JAY/Sessions/still-going/_index.md"
+  run "$OM" -v jay groom
+  [ "$status" -eq 0 ]
+  # warning names the blocking session, project file untouched
+  [[ "$output" == *"NOT archiving half-done"* ]]
+  [[ "$output" == *"still-going"* ]]
+  [ -f "$OBS_JAY/Projects/half-done.md" ]
+  [ ! -e "$OBS_JAY/Projects/_archive/half-done.md" ]
+}
+
+@test "archived projects are excluded from the projects listing" {
+  mkdir -p "$OBS_JAY/Projects/_archive"
+  cat >"$OBS_JAY/Projects/live-one.md" <<'EOF'
+---
+type: project
+status: active
+---
+# live-one
+EOF
+  cat >"$OBS_JAY/Projects/_archive/gone.md" <<'EOF'
+---
+type: project
+status: done
+---
+# gone
+EOF
+  run "$OM" -v jay projects
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"live-one"* ]]
+  [[ "$output" != *"gone"* ]]
+}
+
+@test "archived projects are excluded from project <name> lookup" {
+  mkdir -p "$OBS_JAY/Projects/_archive"
+  cat >"$OBS_JAY/Projects/_archive/gone.md" <<'EOF'
+---
+type: project
+status: done
+---
+# gone
+EOF
+  run "$OM" -v jay project gone
+  [ "$status" -ne 0 ]
+}
+
+@test "groom reports active sessions stale past the default 7-day threshold" {
+  mkdir -p "$OBS_JAY/Sessions/stale-one" "$OBS_JAY/Sessions/fresh-active"
+  printf -- '---\nproject: p\nstatus: active\nupdated: %s\n---\n# stale-one\n' \
+    "$(days_ago 10)" >"$OBS_JAY/Sessions/stale-one/_index.md"
+  printf -- '---\nstatus: active\nupdated: %s\n---\n# fresh-active\n' \
+    "$(days_ago 1)" >"$OBS_JAY/Sessions/fresh-active/_index.md"
+  run "$OM" -v jay groom
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"Stale active"* ]]
+  [[ "$output" == *"stale-one"* ]]
+  [[ "$output" == *"p"* ]]
+  [[ "$output" != *"fresh-active"* ]]
+}
+
+@test "groom stale-active threshold honors VAULTMEM_STALE_ACTIVE_DAYS" {
+  mkdir -p "$OBS_JAY/Sessions/a3"
+  printf -- '---\nstatus: active\nupdated: %s\n---\n# a3\n' "$(days_ago 3)" >"$OBS_JAY/Sessions/a3/_index.md"
+  # default 7 → not stale
+  run "$OM" -v jay groom
+  [[ "$output" != *"a3"* ]]
+  # threshold 2 → now stale
+  VAULTMEM_STALE_ACTIVE_DAYS=2 run "$OM" -v jay groom
+  [[ "$output" == *"a3"* ]]
+}
+
+@test "status surfaces a short groom-nudge count including stale-active" {
+  # status gates on the PRIMARY vault's Home.md (first vault in the registry,
+  # "flo" here); the nudge itself scans every vault, so the stale session can
+  # live in jay as long as flo's Home.md exists to pass the fail-quiet gate.
+  printf -- '---\nschema: 1\n---\n# Home\n<!-- AGENT-INDEX:START -->\n<!-- AGENT-INDEX:END -->\n' >"$OBS_FLO/Home.md"
+  mkdir -p "$OBS_JAY/Sessions/stale-two"
+  printf -- '---\nstatus: active\nupdated: %s\n---\n# stale-two\n' "$(days_ago 10)" >"$OBS_JAY/Sessions/stale-two/_index.md"
+  run "$OM" status
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"active stale"* ]]
+}
+
 @test "sessions nudges when grooming is due, silent otherwise" {
   mkdir -p "$OBS_JAY/Sessions/live"
   printf -- '---\nstatus: active\n---\n# live\n' >"$OBS_JAY/Sessions/live/_index.md"
@@ -599,8 +710,11 @@ EOF
   run "$OM" -v jay groom
   [ "$status" -eq 0 ]
   [ -f "$OBS_JAY/Sessions/_archive/wrap-up/_index.md" ]
-  # the index line in the GLYPHED project file flipped to archived
-  grep -q '\[\[wrap-up\]\].*archived)' "$OBS_JAY/Projects/✅ Widget Pipeline.md"
+  # the project was `done` with no remaining live sessions once wrap-up archived,
+  # so it is archived too in the same groom pass — flip happened before the move.
+  [ -f "$OBS_JAY/Projects/_archive/✅ Widget Pipeline.md" ]
+  [ ! -e "$OBS_JAY/Projects/✅ Widget Pipeline.md" ]
+  grep -q '\[\[wrap-up\]\].*archived)' "$OBS_JAY/Projects/_archive/✅ Widget Pipeline.md"
 }
 
 # --- init (scaffold config + vault skeleton) -----------------------------------

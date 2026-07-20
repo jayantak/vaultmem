@@ -24,9 +24,12 @@
 #   vaultmem sessions           picker line of recent sessions (all vaults)
 #   vaultmem projects           list Project notes (epics) + session counts
 #   vaultmem project <name>     one project: repos, linear, MOC, its sessions by status
-#   vaultmem groom              archive done sessions → Sessions/_archive/; list cold-parked
-#                               (cold = parked, no `updated:` touch in VAULTMEM_COLD_DAYS=21)
-#   vaultmem status             one-line summary (used by the SessionStart hook)
+#   vaultmem groom              archive done sessions/projects; list cold-parked + stale-active
+#                               (cold = parked, no `updated:` touch in VAULTMEM_COLD_DAYS=21;
+#                               stale-active = active, no touch in VAULTMEM_STALE_ACTIVE_DAYS=7;
+#                               a `done` Project moves to Projects/_archive/ unless a live
+#                               (non-archived) session still points at it)
+#   vaultmem status             one-line summary + groom-nudge count (used by the SessionStart hook)
 #   vaultmem init [--vault <id>]  scaffold a compliant vault skeleton (see SCHEMA.md)
 #   vaultmem init --config      write a starter config.toml
 #
@@ -262,6 +265,9 @@ cmd_status() {
 	mocs=$(ls "$PRIMARY_MOCS/" 2>/dev/null | sed -E 's/^MOC - //; s/\.md$//' | paste -sd ', ' - 2>/dev/null)
 	printf 'vaultmem: %s indexed notes · MOCs: %s\n' "${n:-?}" "${mocs:-none}"
 	printf '  reflex: before re-deriving a past decision/root-cause/why, run `vaultmem <q>` first (~60ms, ~700 tok) · shape: `vaultmem index`\n'
+	local nudge
+	nudge=$(_groom_nudge 2>/dev/null)
+	[ -n "$nudge" ] && printf '  %s\n' "$nudge"
 }
 
 # --- subcommand: index (browse the Agent Index) --------------------------------
@@ -552,10 +558,11 @@ cmd_sessions() {
 	return 0
 }
 
-# Count grooming-due sessions per vault: `done` (ready to archive) and `parked`
-# older than COLD_DAYS (triage). Emits one ⚠ line, or nothing when nothing's due.
+# Count grooming-due sessions per vault: `done` (ready to archive), `parked`
+# older than COLD_DAYS, and `active` older than STALE_ACTIVE_DAYS (triage).
+# Emits one ⚠ line, or nothing when nothing's due.
 _groom_nudge() {
-	local now part out="" rows done_n cold_n
+	local now part out="" rows done_n cold_n stale_n
 	now=$(date +%s)
 	_count() { # $1 = vault root, $2 = label
 		rows=$(_session_rows "$1")
@@ -563,10 +570,13 @@ _groom_nudge() {
 		done_n=$(printf '%s\n' "$rows" | awk -F'\t' '$4=="done"{c++} END{print c+0}')
 		cold_n=$(printf '%s\n' "$rows" | awk -F'\t' -v now="$now" -v cd="$COLD_DAYS" \
 			'$4=="parked" && (now-$1)/86400 >= cd {c++} END{print c+0}')
-		[ "$done_n" -eq 0 ] && [ "$cold_n" -eq 0 ] && return 0
+		stale_n=$(printf '%s\n' "$rows" | awk -F'\t' -v now="$now" -v sd="$STALE_ACTIVE_DAYS" \
+			'$4=="active" && (now-$1)/86400 >= sd {c++} END{print c+0}')
+		[ "$done_n" -eq 0 ] && [ "$cold_n" -eq 0 ] && [ "$stale_n" -eq 0 ] && return 0
 		local parts=""
 		[ "$done_n" -gt 0 ] && parts="${done_n} done to archive"
 		[ "$cold_n" -gt 0 ] && parts="${parts:+$parts, }${cold_n} parked cold >${COLD_DAYS}d"
+		[ "$stale_n" -gt 0 ] && parts="${parts:+$parts, }${stale_n} active stale >${STALE_ACTIVE_DAYS}d"
 		out="${out:+$out · }$2: $parts"
 	}
 	local _vid _vpath _vlabel
@@ -602,7 +612,7 @@ _flip_project_status() { # $1 = Project .md path, $2 = thread
 # `parked` sessions untouched > COLD_DAYS as resume-or-retire triage candidates
 # (never auto-retired — that judgment lives in the session skill).
 cmd_groom() {
-	local now did=0 cold_lines=""
+	local now did=0 cold_lines="" stale_lines=""
 	now=$(date +%s)
 	_groom_vault() { # $1 = vault root, $2 = label
 		local root="$1/Sessions" label="$2" arc f name st proj upd ts age
@@ -645,19 +655,72 @@ cmd_groom() {
 "
 				fi
 				;;
+			active)
+				upd=$(_fm_field "$f" updated)
+				ts=$(_to_epoch "$upd")
+				if [ -z "$ts" ]; then
+					if [ "$(uname)" = Darwin ]; then ts=$(stat -f '%m' "$f"); else ts=$(stat -c '%Y' "$f"); fi
+				fi
+				age=$(((now - ts) / 86400))
+				if [ "$age" -ge "$STALE_ACTIVE_DAYS" ]; then
+					proj=$(_fm_field "$f" project)
+					stale_lines="${stale_lines}  ${label}: ${name} (${age}d, ${proj:-no project})
+"
+				fi
+				;;
 			esac
 		done < <(find "$root" -maxdepth 2 -name "_index.md" -type f 2>/dev/null)
+	}
+	# Archive every `done` Project into Projects/_archive/, unless it still has
+	# live (non-archived) sessions pointing at it — those must be groomed first
+	# so a project doesn't disappear out from under work still in flight.
+	_groom_projects() { # $1 = vault root, $2 = label
+		local root="$1/Projects" label="$2" pf name st match blockers rows proj sst sname arc
+		[ -d "$root" ] || return 0
+		arc="$root/_archive"
+		for pf in "$root"/*.md; do
+			[ -e "$pf" ] || continue
+			[ "$(_fm_field "$pf" type)" = project ] || continue
+			st=$(_fm_field "$pf" status)
+			[ "$st" = "done" ] || continue
+			name=$(basename "${pf%.md}")
+			match=$(_strip_status_glyph "$name")
+			blockers=""
+			rows=$(_session_rows "$1")
+			while IFS=$'\t' read -r _ sname proj sst; do
+				[ "$(_strip_status_glyph "$proj")" = "$match" ] || continue
+				blockers="${blockers}    ${sname} (${sst})
+"
+			done <<<"$rows"
+			if [ -n "$blockers" ]; then
+				printf '%s: NOT archiving %s (done) — live sessions still reference it:\n%s' "$label" "$name" "$blockers" >&2
+				continue
+			fi
+			mkdir -p "$arc"
+			if [ -e "$arc/$(basename "$pf")" ]; then
+				printf '%s: skip %s (already in Projects/_archive/)\n' "$label" "$name" >&2
+				continue
+			fi
+			mv "$pf" "$arc/$(basename "$pf")" || continue
+			printf '%s: archived project %s → Projects/_archive/\n' "$label" "$name"
+			did=$((did + 1))
+		done
 	}
 	local _vid _vpath _vlabel
 	while IFS=$'\t' read -r _vid _vpath _vlabel _ _ _ _ _; do
 		[ -n "$_vid" ] || continue
 		case "$SEL" in both) ;; "$_vid") ;; *) continue ;; esac
 		_groom_vault "$_vpath" "$_vlabel"
+		_groom_projects "$_vpath" "$_vlabel"
 	done <<<"$_REG"
 	[ "$did" -eq 0 ] && printf 'Nothing to archive.\n'
 	if [ -n "$cold_lines" ]; then
 		printf 'Cold parked (>%dd — resume or retire via the session skill):\n' "$COLD_DAYS"
 		printf '%s' "$cold_lines"
+	fi
+	if [ -n "$stale_lines" ]; then
+		printf 'Stale active (>%dd untouched — park or retire via the session skill; if the bookmark says the task is done, flip status: done):\n' "$STALE_ACTIVE_DAYS"
+		printf '%s' "$stale_lines"
 	fi
 	# Grooming is the deliberate cleanup moment — also flag Agent-Index drift here
 	# (broken/stale rows) so it gets triaged alongside session archiving.
@@ -785,7 +848,7 @@ _resolve_path() {
 		} ;; esac # attachment w/ ext
 	done
 	for r in "${roots[@]}"; do # 2) basename (case-insensitive)
-		hit=$(find "$r" -type f -iname "$base.md" -not -path '*/Templates/*' 2>/dev/null | head -1)
+		hit=$(find "$r" -type f -iname "$base.md" -not -path '*/Templates/*' -not -path '*/Projects/_archive/*' 2>/dev/null | head -1)
 		[ -n "$hit" ] && {
 			printf '%s\n' "$hit"
 			return 0
@@ -887,6 +950,11 @@ _session_rows() { # $1 = vault root
 # grooming/triage candidate). Env override wins over the config default. The
 # legacy OBSIDIAN_SESSION_COLD_DAYS name is still honored for compatibility.
 COLD_DAYS="${VAULTMEM_COLD_DAYS:-${OBSIDIAN_SESSION_COLD_DAYS:-${DEF_COLD_DAYS:-21}}}"
+
+# Stale-active threshold in days (an `active` session untouched this long
+# likely stalled — either park it or flip it to `done` if the work actually
+# finished). No config-file key yet, env override only.
+STALE_ACTIVE_DAYS="${VAULTMEM_STALE_ACTIVE_DAYS:-7}"
 
 # --- subcommand: projects (list Project notes + session counts) ----------------
 cmd_projects() {
@@ -1158,7 +1226,7 @@ while [ $# -gt 0 ]; do
 		shift 2
 		;;
 	-h | --help)
-		sed -n '4,49p' "$0"
+		sed -n '4,52p' "$0"
 		exit 0
 		;;
 	*)
@@ -1183,7 +1251,7 @@ status | sessions | which | init | doctor | "") ;;
 esac
 
 case "${ARGS[0]:-}" in
-"") sed -n '4,49p' "$0" ;; # no args → print usage
+"") sed -n '4,52p' "$0" ;; # no args → print usage
 status) cmd_status ;;
 index) cmd_index "${ARGS[1]:-}" ;;
 doctor) cmd_doctor ;;
