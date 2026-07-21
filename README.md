@@ -90,8 +90,10 @@ equivalent and directive customization are in [docs/hooks.md](docs/hooks.md).
   stamp. `projects` / `project <name>` roll them up; `sessions` renders the
   picker.
 - **Grooming** — `groom` archives `done` sessions into `Sessions/_archive/` and
-  flags `parked` sessions gone cold (untouched past `cold_days`). Hygiene, on
-  demand.
+  `done` Projects into `Projects/_archive/` (skipping a project still blocked by
+  a live session, with a warning), flags `parked` sessions gone cold (untouched
+  past `cold_days`), and flags `active` sessions gone stale (untouched past
+  `stale_active_days`, default 7). Hygiene, on demand.
 
 ## Command reference
 
@@ -125,12 +127,12 @@ vaultmem which [dir]        guess which vault a dir belongs to; id on stdout
 vaultmem sessions           the grouped picker (for the SessionStart hook)
 vaultmem projects           Project notes + active/total session counts
 vaultmem project <name>     one project: repos, linear, MOC, sessions by status
-vaultmem status             one-line index summary (fail-quiet)
+vaultmem status             one-line index summary + groom-nudge count (fail-quiet)
 ```
 
 **hygiene · setup**
 ```
-vaultmem groom              archive done sessions; report cold-parked
+vaultmem groom              archive done sessions + done projects; report cold-parked + stale-active
 vaultmem doctor             lint the config + flag drifted index rows
 vaultmem init [--vault <id>]  scaffold a compliant vault skeleton
 vaultmem init --config      write a starter config.toml

@@ -64,6 +64,11 @@ Applies across all vaults.
 Environment overrides: `VAULTMEM_COLD_DAYS` beats `cold_days`. If `vault` is
 unset, the first vault declared in the file is used as the fallback.
 
+`groom` also flags **stale-active** sessions — `status: active` untouched past
+`VAULTMEM_STALE_ACTIVE_DAYS` (default `7`) — as a parallel triage report next to
+cold-parked. There is no `stale_active_days` config key yet; the env var is the
+only override.
+
 ## `[vault.<id>]`
 
 One block per vault. Only `path` is required.
