@@ -698,7 +698,13 @@ _deep_scan() { # $1 = vault root, $2 = 1 if this is the primary (agent-index) va
 	# Index-membership set: Agent Index row targets (primary vault only) ∪ every
 	# MOC's outbound wikilink targets — both keyed by resolved file path so
 	# comparison is exact regardless of how the link text was written.
-	local -A indexed=()
+	#
+	# A newline-delimited string, not an associative array: macOS ships bash 3.2,
+	# where `local -A` is a hard error — and the fallout was silent, since the
+	# following `indexed[...]=1` then parsed as arithmetic on a file path and
+	# `doctor --deep` still exited 0. File paths cannot contain newlines, so
+	# exact whole-line matching is a faithful set. See docs/development.md.
+	local indexed=$'\n'
 	if [ "$is_primary" = 1 ] && [ -f "$home" ]; then
 		local t s tp
 		while IFS=$'\t' read -r t s; do
@@ -711,7 +717,10 @@ _deep_scan() { # $1 = vault root, $2 = 1 if this is the primary (agent-index) va
 				g=$(_first_glob "$dir/"*" $base.md") || true
 				[ -n "$g" ] && tp="$g"
 			}
-			[ -f "$tp" ] && indexed["$tp"]=1
+			[ -f "$tp" ] && case "$indexed" in
+			*$'\n'"$tp"$'\n'*) ;;
+			*) indexed="$indexed$tp"$'\n' ;;
+			esac
 		done < <(_index_row_targets)
 	fi
 	if [ -d "$mocs_dir" ]; then
@@ -721,7 +730,10 @@ _deep_scan() { # $1 = vault root, $2 = 1 if this is the primary (agent-index) va
 			while IFS= read -r mt; do
 				[ -n "$mt" ] || continue
 				mtp=$(_resolve_path "$mt") || continue
-				indexed["$mtp"]=1
+				case "$indexed" in
+				*$'\n'"$mtp"$'\n'*) ;;
+				*) indexed="$indexed$mtp"$'\n' ;;
+				esac
 			done < <(_outbound_targets "$mf")
 		done
 	fi
@@ -755,9 +767,10 @@ _deep_scan() { # $1 = vault root, $2 = 1 if this is the primary (agent-index) va
 		if [ "$found" -eq 0 ]; then
 			printf 'ORPHAN\t%s\tzero inbound [[wikilinks]] from anywhere else in the vault\n' "${f#"$root"/}"
 		fi
-		if [ -z "${indexed["$f"]:-}" ]; then
-			printf 'UNINDEXED\t%s\tnot in the Agent Index and not linked from any MOC\n' "${f#"$root"/}"
-		fi
+		case "$indexed" in
+		*$'\n'"$f"$'\n'*) ;;
+		*) printf 'UNINDEXED\t%s\tnot in the Agent Index and not linked from any MOC\n' "${f#"$root"/}" ;;
+		esac
 	done
 }
 
