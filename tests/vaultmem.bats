@@ -1439,3 +1439,235 @@ EOF
   [[ "$output" != *"ORPHAN"* ]]
   [[ "$output" != *"UNINDEXED"* ]]
 }
+
+# --- verify (A1: single-file verify-on-write) -----------------------------------
+
+@test "verify exits 0 silently on a path outside any configured vault" {
+  run "$OM" verify "$BATS_TEST_TMPDIR/not-a-vault-file.md"
+  [ "$status" -eq 0 ]
+  [ -z "$output" ]
+}
+
+@test "verify exits 0 silently on a real repo source file (non-markdown, non-vault)" {
+  run "$OM" verify "$ROOT/vaultmem"
+  [ "$status" -eq 0 ]
+  [ -z "$output" ]
+}
+
+@test "verify exits 0 silently on a nonexistent path" {
+  run "$OM" verify "$OBS_JAY/Sessions/does-not-exist/_index.md"
+  [ "$status" -eq 0 ]
+  [ -z "$output" ]
+}
+
+@test "verify exits 0 silently when no file argument is given" {
+  run "$OM" verify
+  [ "$status" -eq 0 ]
+  [ -z "$output" ]
+}
+
+@test "verify is clean (exit 0, silent) on a healthy session note" {
+  write_healthy_session verify-good-thread
+  run "$OM" verify "$OBS_JAY/Sessions/verify-good-thread/_index.md"
+  [ "$status" -eq 0 ]
+  [ -z "$output" ]
+}
+
+@test "verify fires the same NOALIAS schema lint doctor would, scoped to one file" {
+  write_healthy_session verify-noalias-thread
+  sed -i.bak '/^aliases:/d' "$OBS_JAY/Sessions/verify-noalias-thread/_index.md"
+  run "$OM" verify "$OBS_JAY/Sessions/verify-noalias-thread/_index.md"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"NOALIAS"* ]]
+  [[ "$output" == *"verify-noalias-thread"* ]]
+}
+
+@test "verify does not report an unrelated broken session elsewhere in the vault" {
+  write_healthy_session verify-scope-good
+  mkdir -p "$OBS_JAY/Sessions/verify-scope-bad"
+  printf -- '---\nstatus: active\n---\n# verify-scope-bad\n' >"$OBS_JAY/Sessions/verify-scope-bad/_index.md"
+  run "$OM" verify "$OBS_JAY/Sessions/verify-scope-good/_index.md"
+  [ "$status" -eq 0 ]
+  [[ "$output" != *"verify-scope-bad"* ]]
+}
+
+@test "verify flags a dangling wikilink in the given note" {
+  mkdir -p "$OBS_JAY/Projects"
+  cat >"$OBS_JAY/Projects/dangling-note.md" <<'EOF'
+---
+type: project
+status: active
+---
+# dangling-note
+
+See [[Nowhere At All]] for context.
+EOF
+  run "$OM" verify "$OBS_JAY/Projects/dangling-note.md"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"DANGLING"* ]]
+  [[ "$output" == *"Nowhere At All"* ]]
+}
+
+@test "verify flags a project GLYPH-DESYNC scoped to that project note" {
+  mkdir -p "$OBS_JAY/Projects"
+  cat >"$OBS_JAY/Projects/Desynced.md" <<'EOF'
+---
+type: project
+status: active
+---
+# 💤 Desynced
+EOF
+  run "$OM" verify "$OBS_JAY/Projects/Desynced.md"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"GLYPH-DESYNC"* ]]
+}
+
+# --- groom --dry-run (A5) --------------------------------------------------------
+
+@test "groom --dry-run previews the would-move list without touching the filesystem" {
+  mkdir -p "$OBS_JAY/Projects" "$OBS_JAY/Sessions/keep-me" "$OBS_JAY/Sessions/wrap-up"
+  cat >"$OBS_JAY/Projects/proj.md" <<'EOF'
+---
+type: project
+status: active
+---
+# proj
+## Sessions
+- [[keep-me]] — ongoing (status: active)
+- [[wrap-up]] — shipped (status: done)
+EOF
+  printf -- '---\nproject: proj\nstatus: active\n---\n# keep-me\n' >"$OBS_JAY/Sessions/keep-me/_index.md"
+  printf -- '---\nproject: proj\nstatus: done\n---\n# wrap-up\n' >"$OBS_JAY/Sessions/wrap-up/_index.md"
+
+  # snapshot mtimes/content before, to prove --dry-run left everything untouched
+  before_proj=$(cat "$OBS_JAY/Projects/proj.md")
+  # whole-tree checksum: proves --dry-run writes NOTHING anywhere in the fixture
+  # vault, not just the one file this test happens to inspect by name.
+  before_tree=$(find "$OBS_JAY" -type f -exec shasum {} + | sort)
+
+  run "$OM" -v jay groom --dry-run
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"Sessions/wrap-up"* ]]
+  [[ "$output" == *"Sessions/_archive/wrap-up"* ]]
+  [[ "$output" == *"would flip"* ]]
+  [[ "$output" == *"dry run"* ]]
+
+  # no mv: both original session dirs still present, no _archive/ created
+  [ -d "$OBS_JAY/Sessions/keep-me" ]
+  [ -d "$OBS_JAY/Sessions/wrap-up" ]
+  [ ! -e "$OBS_JAY/Sessions/_archive" ]
+  # no write: project file byte-for-byte unchanged (status line NOT flipped)
+  after_proj=$(cat "$OBS_JAY/Projects/proj.md")
+  [ "$before_proj" = "$after_proj" ]
+  grep -q '\[\[wrap-up\]\].*status: done)' "$OBS_JAY/Projects/proj.md"
+
+  after_tree=$(find "$OBS_JAY" -type f -exec shasum {} + | sort)
+  [ "$before_tree" = "$after_tree" ]
+}
+
+@test "groom --dry-run does not claim a flip for a Sessions line with no trailing status token" {
+  # The `## Sessions` line links [[wrap-up]] but has no trailing
+  # (active|parked|done) before its closing paren — _flip_project_status's
+  # awk match requires that token, so real groom leaves this line untouched.
+  # The --dry-run preview must not claim a flip it will not perform.
+  mkdir -p "$OBS_JAY/Projects" "$OBS_JAY/Sessions/wrap-up"
+  cat >"$OBS_JAY/Projects/proj.md" <<'EOF'
+---
+type: project
+status: active
+---
+# proj
+## Sessions
+- [[wrap-up]] — shipped, no status token here
+EOF
+  printf -- '---\nproject: proj\nstatus: done\n---\n# wrap-up\n' >"$OBS_JAY/Sessions/wrap-up/_index.md"
+  before_proj=$(cat "$OBS_JAY/Projects/proj.md")
+
+  run "$OM" -v jay groom --dry-run
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"Sessions/wrap-up"* ]]
+  [[ "$output" != *"would flip"* ]]
+
+  # confirm real groom agrees: the line is truly untouched by the mutation path
+  run "$OM" -v jay groom
+  [ "$status" -eq 0 ]
+  after_proj=$(cat "$OBS_JAY/Projects/proj.md")
+  [ "$before_proj" = "$after_proj" ]
+}
+
+@test "groom --dry-run claims a flip only for a Sessions line that carries the trailing status token" {
+  mkdir -p "$OBS_JAY/Projects" "$OBS_JAY/Sessions/wrap-up"
+  cat >"$OBS_JAY/Projects/proj.md" <<'EOF'
+---
+type: project
+status: active
+---
+# proj
+## Sessions
+- [[wrap-up]] — shipped (status: done)
+EOF
+  printf -- '---\nproject: proj\nstatus: done\n---\n# wrap-up\n' >"$OBS_JAY/Sessions/wrap-up/_index.md"
+
+  run "$OM" -v jay groom --dry-run
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"would flip Projects/proj session line [[wrap-up]]"* ]]
+
+  # confirm real groom agrees: the preview's promise matches the mutation
+  run "$OM" -v jay groom
+  [ "$status" -eq 0 ]
+  grep -q '\[\[wrap-up\]\].*status: archived)' "$OBS_JAY/Projects/proj.md"
+}
+
+@test "groom --dry-run previews a done-project archive without moving it" {
+  mkdir -p "$OBS_JAY/Projects" "$OBS_JAY/Sessions/_archive/old-thread"
+  cat >"$OBS_JAY/Projects/finished.md" <<'EOF'
+---
+type: project
+status: done
+---
+# finished
+## Sessions
+- [[old-thread]] — done (status: archived)
+EOF
+  run "$OM" -v jay groom --dry-run
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"Projects/finished.md"* ]]
+  [[ "$output" == *"Projects/_archive/finished.md"* ]]
+  [ -f "$OBS_JAY/Projects/finished.md" ]
+  [ ! -e "$OBS_JAY/Projects/_archive" ]
+}
+
+@test "groom --dry-run does not archive a project blocked by a live session (same as real groom)" {
+  mkdir -p "$OBS_JAY/Projects" "$OBS_JAY/Sessions/live-one"
+  cat >"$OBS_JAY/Projects/blocked.md" <<'EOF'
+---
+type: project
+status: done
+---
+# blocked
+## Sessions
+- [[live-one]] — still going (status: active)
+EOF
+  printf -- '---\nproject: blocked\nstatus: active\n---\n# live-one\n' >"$OBS_JAY/Sessions/live-one/_index.md"
+  run "$OM" -v jay groom --dry-run
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"NOT archiving blocked"* ]]
+  [ -f "$OBS_JAY/Projects/blocked.md" ]
+}
+
+@test "groom --dry-run reports 'Nothing to archive' just like real groom when nothing is due" {
+  mkdir -p "$OBS_JAY/Sessions/active-one"
+  printf -- '---\nstatus: active\nupdated: %s\n---\n# active-one\n' "$(days_ago 0)" >"$OBS_JAY/Sessions/active-one/_index.md"
+  run "$OM" -v jay groom --dry-run
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"Nothing to archive"* ]]
+}
+
+@test "real groom (no flag) still archives normally after --dry-run is introduced" {
+  mkdir -p "$OBS_JAY/Projects" "$OBS_JAY/Sessions/wrap-up2"
+  printf -- '---\nproject: proj2\nstatus: done\n---\n# wrap-up2\n' >"$OBS_JAY/Sessions/wrap-up2/_index.md"
+  run "$OM" -v jay groom
+  [ "$status" -eq 0 ]
+  [ -d "$OBS_JAY/Sessions/_archive/wrap-up2" ]
+  [ ! -e "$OBS_JAY/Sessions/wrap-up2" ]
+}

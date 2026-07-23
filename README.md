@@ -68,7 +68,9 @@ the session picker (Claude Code example):
 
 `status`/`sessions` are **fail-quiet**: if the vault isn't mounted they print
 nothing and exit 0, so the hook can never break a session start. The Codex
-equivalent and directive customization are in [docs/hooks.md](docs/hooks.md).
+equivalent and directive customization are in [docs/hooks.md](docs/hooks.md),
+which also covers wiring `vaultmem verify` to a PostToolUse `Write|Edit` hook
+for verify-on-write.
 
 ## Concepts
 
@@ -94,7 +96,12 @@ equivalent and directive customization are in [docs/hooks.md](docs/hooks.md).
   `done` Projects into `Projects/_archive/` (skipping a project still blocked by
   a live session, with a warning), flags `parked` sessions gone cold (untouched
   past `cold_days`), and flags `active` sessions gone stale (untouched past
-  `stale_active_days`, default 7). Hygiene, on demand.
+  `stale_active_days`, default 7). Hygiene, on demand. `groom --dry-run` previews
+  the exact would-move / would-flip list with no `mv` and no writes.
+- **Verify-on-write** — `verify <file>` is `doctor`'s schema lints plus a
+  dangling-wikilink check, scoped to one note, fast enough for a PostToolUse
+  hook. Fail-quiet outside a configured vault, so an agent editing an ordinary
+  repo never trips it. See [docs/hooks.md](docs/hooks.md).
 
 ## Command reference
 
@@ -117,6 +124,13 @@ vaultmem dangling [note]    broken [[links]] — one note, or the whole vault
 vaultmem dangling --by-target  same scan, aggregated by missing target + inbound count
 ```
 
+**verify-on-write**
+```
+vaultmem verify <file>      single-file lint: dangling links + doctor's schema
+                             lints, scoped to that note. Fail-quiet outside a
+                             configured vault. For a PostToolUse Write|Edit hook.
+```
+
 **router**
 ```
 vaultmem vaults             the registry: id, path, sessions root, home, routing
@@ -136,6 +150,7 @@ vaultmem bookmark <thread>  print only ## Bookmark + ## Pinned from a session's 
 **hygiene · setup**
 ```
 vaultmem groom              archive done sessions + done projects; report cold-parked + stale-active
+vaultmem groom --dry-run    preview groom: would-move list + would-flip project lines; no writes
 vaultmem doctor             lint the config + flag drifted index rows + vault schema lints
 vaultmem doctor --deep      + vault-wide orphan/unindexed scan (slower; not run by base doctor/groom)
 vaultmem init [--vault <id>]  scaffold a compliant vault skeleton
