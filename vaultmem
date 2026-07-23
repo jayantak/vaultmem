@@ -1674,12 +1674,16 @@ cmd_dangling() {
 		else
 			# Group by case-folded target (matches _resolve_path's case-insensitive
 			# lookup) so e.g. [[Widget]] and [[widget]] count as one missing note
-			# instead of splintering into two diluted rows. Displays the
-			# first-seen original-case spelling as the representative.
-			printf '%s\n' "$missing" | awk '
-				{ key = tolower($0); count[key]++; if (!(key in rep)) rep[key] = $0 }
+			# instead of splintering into two diluted rows. The representative
+			# spelling is the smallest variant under C collation, NOT the first
+			# seen: `rg -lN` file order differs between platforms, and awk's `<`
+			# follows the locale (en_US puts "ghost" before "Ghost"; C is the
+			# reverse), so both must be pinned or the displayed casing varies by
+			# machine. LC_ALL=C also keeps the sort byte-stable.
+			printf '%s\n' "$missing" | LC_ALL=C awk '
+				{ key = tolower($0); count[key]++; if (!(key in rep) || $0 < rep[key]) rep[key] = $0 }
 				END { for (k in count) printf "%d\t%s\n", count[k], rep[k] }
-			' | sort -t $'\t' -k1,1rn -k2,2f | while IFS=$'\t' read -r count target; do
+			' | LC_ALL=C sort -t $'\t' -k1,1rn -k2,2f | while IFS=$'\t' read -r count target; do
 				printf '  %3d  [[%s]]\n' "$count" "$target"
 			done
 		fi
