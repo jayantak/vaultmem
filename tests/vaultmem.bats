@@ -479,6 +479,74 @@ EOF
   [ "$status" -ne 0 ]
 }
 
+# --- frontier (knowledge-frontier ranking: (out-in) * exp(-days/30)) -----------
+
+@test "frontier ranks a high-fanout recently-updated hub above its low-fanout leaves" {
+  seed_graph
+  # Widget points at Ada + the MOC (out=2); Ada points at Widget (out=1). Both
+  # untouched (no updated: → mtime fallback, effectively 0d old since just
+  # written), so ranking is driven by (out - in): Widget/MOC out-rank Ada.
+  run "$OM" -v flo frontier
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"Knowledge frontier"* ]]
+  [[ "$output" == *"Architecture/Widget.md"* ]]
+  [[ "$output" == *"People/Ada.md"* ]]
+  # Widget (out=2, has both an outbound to Ada and to the MOC) ranks above Ada
+  # (out=1, in=1) in the printed order.
+  widget_line=$(echo "$output" | grep -n "Architecture/Widget.md" | head -1 | cut -d: -f1)
+  ada_line=$(echo "$output" | grep -n "People/Ada.md" | head -1 | cut -d: -f1)
+  [ "$widget_line" -lt "$ada_line" ]
+}
+
+@test "frontier excludes Home.md, MOCs/, Templates/, and _archive/" {
+  seed_graph
+  mkdir -p "$OBS_FLO/Templates" "$OBS_FLO/Sessions/_archive/old"
+  printf -- '---\nschema: 1\n---\n# Home\n<!-- AGENT-INDEX:START -->\n<!-- AGENT-INDEX:END -->\n' >"$OBS_FLO/Home.md"
+  printf -- '---\ntype: project\n---\n# Template\n' >"$OBS_FLO/Templates/Project.md"
+  printf -- '---\nthread: old\nstatus: done\nupdated: 2020-01-01\n---\n# old\n' >"$OBS_FLO/Sessions/_archive/old/_index.md"
+  run "$OM" -v flo frontier
+  [ "$status" -eq 0 ]
+  [[ "$output" != *"Home.md"* ]]
+  [[ "$output" != *"MOCs/MOC - Demo.md"* ]]
+  [[ "$output" != *"Templates/Project.md"* ]]
+  [[ "$output" != *"_archive/old"* ]]
+  # The non-excluded notes are still ranked.
+  [[ "$output" == *"Architecture/Widget.md"* ]]
+}
+
+@test "frontier scores a recently-updated high-fanout note above an old low-fanout one" {
+  mkdir -p "$OBS_FLO/Notes"
+  printf -- '---\nupdated: %s\n---\n# Hub\n[[Notes/A]] [[Notes/B]] [[Notes/C]]\n' "$(days_ago 1)" >"$OBS_FLO/Notes/Hub.md"
+  printf -- '---\nupdated: %s\n---\n# A\n' "$(days_ago 90)" >"$OBS_FLO/Notes/A.md"
+  printf -- '---\nupdated: %s\n---\n# B\n' "$(days_ago 90)" >"$OBS_FLO/Notes/B.md"
+  printf -- '---\nupdated: %s\n---\n# C\n' "$(days_ago 90)" >"$OBS_FLO/Notes/C.md"
+  run "$OM" -v flo frontier
+  [ "$status" -eq 0 ]
+  first_line=$(echo "$output" | sed -n '2p')
+  [[ "$first_line" == *"Notes/Hub.md"* ]]
+}
+
+@test "frontier -n caps the result count" {
+  mkdir -p "$OBS_FLO/Notes"
+  printf -- '# One\n' >"$OBS_FLO/Notes/One.md"
+  printf -- '# Two\n' >"$OBS_FLO/Notes/Two.md"
+  printf -- '# Three\n' >"$OBS_FLO/Notes/Three.md"
+  run "$OM" -v flo -n 1 frontier
+  [ "$status" -eq 0 ]
+  # header line + exactly one ranked row
+  [ "$(echo "$output" | wc -l | tr -d ' ')" -eq 2 ]
+}
+
+@test "frontier falls back to file mtime when updated: is missing" {
+  mkdir -p "$OBS_FLO/Notes"
+  printf -- '# NoUpdated\nplain note, no frontmatter\n' >"$OBS_FLO/Notes/NoUpdated.md"
+  run "$OM" -v flo frontier
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"Notes/NoUpdated.md"* ]]
+  # a freshly-written file's mtime is "now" → 0d in the printed row
+  [[ "$output" == *"  0d  "*"Notes/NoUpdated.md"* ]]
+}
+
 # --- project tier: projects / project verbs --------------------------------
 
 # Seed a vault with one Project note and three sessions (2 under it, 1 orphan).
@@ -758,6 +826,88 @@ EOF
   [[ "$output" == *"a3"* ]]
 }
 
+# Print $1 lines of filler text (for building an over-threshold _index.md).
+filler_lines() {
+  local i
+  for ((i = 0; i < "$1"; i++)); do printf 'line %d\n' "$i"; done
+}
+
+@test "groom reports active/parked sessions past the default 150-line bloat threshold" {
+  mkdir -p "$OBS_JAY/Sessions/big-active" "$OBS_JAY/Sessions/small-active"
+  {
+    printf -- '---\nproject: p\nstatus: active\nupdated: %s\n---\n# big-active\n' "$(days_ago 1)"
+    filler_lines 200
+  } >"$OBS_JAY/Sessions/big-active/_index.md"
+  printf -- '---\nstatus: active\nupdated: %s\n---\n# small-active\n' "$(days_ago 1)" \
+    >"$OBS_JAY/Sessions/small-active/_index.md"
+  run "$OM" -v jay groom
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"Checkpoint due"* ]]
+  [[ "$output" == *"big-active"* ]]
+  [[ "$output" == *"p"* ]]
+  [[ "$output" != *"small-active"* ]]
+}
+
+@test "groom bloat threshold honors VAULTMEM_BLOAT_LINES" {
+  mkdir -p "$OBS_JAY/Sessions/mid-parked"
+  {
+    printf -- '---\nstatus: parked\nupdated: %s\n---\n# mid-parked\n' "$(days_ago 1)"
+    filler_lines 60
+  } >"$OBS_JAY/Sessions/mid-parked/_index.md"
+  # default 150 → not over threshold
+  run "$OM" -v jay groom
+  [[ "$output" != *"mid-parked"* ]]
+  # threshold 50 → now over
+  VAULTMEM_BLOAT_LINES=50 run "$OM" -v jay groom
+  [[ "$output" == *"mid-parked"* ]]
+}
+
+@test "groom bloat threshold reads bloat_lines from the config default" {
+  cat >"$VAULTMEM_CONFIG" <<EOF
+[defaults]
+vault = "jay"
+bloat_lines = 50
+
+[vault.jay]
+label = "Personal"
+path = "$OBS_JAY"
+EOF
+  mkdir -p "$OBS_JAY/Sessions/mid-parked2"
+  {
+    printf -- '---\nstatus: parked\nupdated: %s\n---\n# mid-parked2\n' "$(days_ago 1)"
+    filler_lines 60
+  } >"$OBS_JAY/Sessions/mid-parked2/_index.md"
+  run "$OM" -v jay groom
+  [[ "$output" == *"mid-parked2"* ]]
+}
+
+@test "groom bloat check ignores done sessions and sessions under _archive/" {
+  mkdir -p "$OBS_JAY/Sessions/big-done" "$OBS_JAY/Sessions/_archive/big-archived"
+  {
+    printf -- '---\nstatus: done\nupdated: %s\n---\n# big-done\n' "$(days_ago 1)"
+    filler_lines 200
+  } >"$OBS_JAY/Sessions/big-done/_index.md"
+  {
+    printf -- '---\nstatus: active\nupdated: %s\n---\n# big-archived\n' "$(days_ago 1)"
+    filler_lines 200
+  } >"$OBS_JAY/Sessions/_archive/big-archived/_index.md"
+  run "$OM" -v jay groom
+  [ "$status" -eq 0 ]
+  [[ "$output" != *"Checkpoint due"* ]]
+}
+
+@test "status surfaces a checkpoint-due nudge when a session exceeds the bloat threshold" {
+  printf -- '---\nschema: 1\n---\n# Home\n<!-- AGENT-INDEX:START -->\n<!-- AGENT-INDEX:END -->\n' >"$OBS_FLO/Home.md"
+  mkdir -p "$OBS_JAY/Sessions/bloaty"
+  {
+    printf -- '---\nstatus: active\nupdated: %s\n---\n# bloaty\n' "$(days_ago 1)"
+    filler_lines 200
+  } >"$OBS_JAY/Sessions/bloaty/_index.md"
+  run "$OM" status
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"checkpoint due"* ]]
+}
+
 @test "status surfaces a short groom-nudge count including stale-active" {
   # status gates on the PRIMARY vault's Home.md (first vault in the registry,
   # "flo" here); the nudge itself scans every vault, so the stale session can
@@ -894,6 +1044,20 @@ EOF
 # --- doctor config lint (mis-parse fails loudly) -------------------------------
 
 @test "doctor is clean on the seeded config" {
+  run "$OM" doctor
+  [ "$status" -eq 0 ]
+}
+
+@test "doctor accepts a config carrying the bloat_lines default key" {
+  cat >"$VAULTMEM_CONFIG" <<EOF
+[defaults]
+vault = "jay"
+bloat_lines = 200
+
+[vault.jay]
+label = "Personal"
+path = "$OBS_JAY"
+EOF
   run "$OM" doctor
   [ "$status" -eq 0 ]
 }

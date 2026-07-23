@@ -95,13 +95,21 @@ for verify-on-write.
 - **Grooming** — `groom` archives `done` sessions into `Sessions/_archive/` and
   `done` Projects into `Projects/_archive/` (skipping a project still blocked by
   a live session, with a warning), flags `parked` sessions gone cold (untouched
-  past `cold_days`), and flags `active` sessions gone stale (untouched past
-  `stale_active_days`, default 7). Hygiene, on demand. `groom --dry-run` previews
-  the exact would-move / would-flip list with no `mv` and no writes.
+  past `cold_days`), flags `active` sessions gone stale (untouched past
+  `stale_active_days`, default 7), and flags `active`/`parked` sessions whose
+  `_index.md` has grown past `bloat_lines` (default 150) as checkpoint-due.
+  Hygiene, on demand. `groom --dry-run` previews the exact would-move /
+  would-flip list with no `mv` and no writes.
 - **Verify-on-write** — `verify <file>` is `doctor`'s schema lints plus a
   dangling-wikilink check, scoped to one note, fast enough for a PostToolUse
   hook. Fail-quiet outside a configured vault, so an agent editing an ordinary
   repo never trips it. See [docs/hooks.md](docs/hooks.md).
+- **Knowledge frontier** — `frontier` ranks notes by
+  `(outbound - inbound links) * exp(-days_since_updated / 30)`: a note that
+  points at much, is pointed at little, and was touched recently sits on the
+  active edge of the graph — usually the best place to write next. `-n` caps
+  the ranking; `Home.md`, `MOCs/`, `Templates/`, and `_archive/` are excluded
+  as hubs/scaffolding/retired, not candidate write targets.
 
 ## Command reference
 
@@ -122,6 +130,7 @@ vaultmem backlinks <note>   notes that link TO this one (alias-aware)
 vaultmem neighbors <note>   outbound + backlinks together (one-hop view)
 vaultmem dangling [note]    broken [[links]] — one note, or the whole vault
 vaultmem dangling --by-target  same scan, aggregated by missing target + inbound count
+vaultmem frontier           rank notes by knowledge-frontier score (best place to write next)
 ```
 
 **verify-on-write**
@@ -149,7 +158,7 @@ vaultmem bookmark <thread>  print only ## Bookmark + ## Pinned from a session's 
 
 **hygiene · setup**
 ```
-vaultmem groom              archive done sessions + done projects; report cold-parked + stale-active
+vaultmem groom              archive done sessions + done projects; report cold-parked + stale-active + checkpoint-due
 vaultmem groom --dry-run    preview groom: would-move list + would-flip project lines; no writes
 vaultmem doctor             lint the config + flag drifted index rows + vault schema lints
 vaultmem doctor --deep      + vault-wide orphan/unindexed scan (slower; not run by base doctor/groom)
@@ -239,6 +248,7 @@ multiline strings, unknown keys, and unquoted strings.
 vault = "personal"        # fallback vault when routing finds no signal
 limit = 20                # default result cap
 cold_days = 21            # a parked session untouched this long is grooming-due
+bloat_lines = 150         # an active/parked _index.md over this many lines is checkpoint-due
 directive_file = ""       # optional: path to custom AGENT DIRECTIVE text
 
 [vault.personal]
@@ -250,7 +260,8 @@ path = "~/Obsidian/Personal"
 
 Every vault field, the `which` routing algorithm, and the per-vault Agent-Index
 gating are documented in the **[Config reference](docs/config.md)**. Env
-override: `VAULTMEM_COLD_DAYS` beats `cold_days`.
+overrides: `VAULTMEM_COLD_DAYS` beats `cold_days`, `VAULTMEM_BLOAT_LINES` beats
+`bloat_lines`.
 
 ## Agent skills
 

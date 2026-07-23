@@ -30,9 +30,10 @@
 #   vaultmem sessions           picker line of recent sessions (all vaults)
 #   vaultmem projects           list Project notes (epics) + session counts
 #   vaultmem project <name>     one project: repos, linear, MOC, its sessions by status
-#   vaultmem groom              archive done sessions/projects; list cold-parked + stale-active
+#   vaultmem groom              archive done sessions/projects; list cold-parked + stale-active + checkpoint-due
 #                               (cold = parked, no `updated:` touch in VAULTMEM_COLD_DAYS=21;
 #                               stale-active = active, no touch in VAULTMEM_STALE_ACTIVE_DAYS=7;
+#                               checkpoint-due = active/parked _index.md over VAULTMEM_BLOAT_LINES=150 lines;
 #                               a `done` Project moves to Projects/_archive/ unless a live
 #                               (non-archived) session still points at it)
 #   vaultmem groom --dry-run    preview groom: print the would-move list + would-flip
@@ -49,6 +50,8 @@
 #   vaultmem dangling [note]    broken [[links]] — one note, or the whole vault
 #   vaultmem dangling --by-target  same scan, aggregated by missing target + inbound count
 #                               (most-wanted missing notes — what to write next)
+#   vaultmem frontier           rank notes by knowledge-frontier score (best place to write next)
+#                               score = (outbound - inbound) * exp(-days_since_updated / 30); -n caps results
 #     <name>/<note> = a wikilink target (basename, Folder/Name, or alias) or a file path.
 #     Traversal protocol: start at a MOC/Home hub → `links` to fan out → read the
 #     1–2 most relevant → `backlinks` to climb back / find related. Stop at ~2 hops.
@@ -146,6 +149,7 @@ _lint_config() { # $1 = config path
     BEGIN {
       ok_defaults["vault"]=1; ok_defaults["limit"]=1
       ok_defaults["cold_days"]=1; ok_defaults["directive_file"]=1
+      ok_defaults["bloat_lines"]=1
       ok_vault["label"]=1; ok_vault["path"]=1; ok_vault["sessions"]=1
       ok_vault["home"]=1; ok_vault["mocs"]=1
       ok_vault["match_owners"]=1; ok_vault["match_paths"]=1
@@ -212,6 +216,7 @@ _load_registry() {
 	DEF_LIMIT=""
 	DEF_COLD_DAYS=""
 	DEF_DIRECTIVE_FILE=""
+	DEF_BLOAT_LINES=""
 	if [ -r "$VAULTMEM_CONFIG" ]; then
 		local parsed ids id path label sess home mocs mo mp
 		parsed=$(_parse_config "$VAULTMEM_CONFIG")
@@ -237,6 +242,7 @@ _load_registry() {
 		DEF_LIMIT=$(_cfg defaults limit)
 		DEF_COLD_DAYS=$(_cfg defaults cold_days)
 		DEF_DIRECTIVE_FILE=$(_expand_path "$(_cfg defaults directive_file)")
+		DEF_BLOAT_LINES=$(_cfg defaults bloat_lines)
 		unset -f _cfg
 	else
 		# No config file: thin zero-config escape hatch. Register a single
@@ -957,22 +963,45 @@ cmd_sessions() {
 # Count grooming-due sessions per vault: `done` (ready to archive), `parked`
 # older than COLD_DAYS, and `active` older than STALE_ACTIVE_DAYS (triage).
 # Emits one ⚠ line, or nothing when nothing's due.
+# Count active/parked sessions whose _index.md exceeds BLOAT_LINES. A wc -l per
+# session is cheap (no full-text scan), so this stays fail-quiet/hook-safe.
+_bloat_count() { # $1 = vault root
+	local root="$1/Sessions" f st lines n=0
+	[ -d "$root" ] || {
+		printf 0
+		return 0
+	}
+	while IFS= read -r f; do
+		[ -n "$f" ] || continue
+		case "$f" in "$root"/_archive/*) continue ;; esac
+		st=$(_fm_field "$f" status)
+		case "$st" in active | parked) ;; *) continue ;; esac
+		lines=$(wc -l <"$f" 2>/dev/null) || continue
+		lines="${lines// /}"
+		[ "${lines:-0}" -gt "$BLOAT_LINES" ] && n=$((n + 1))
+	done < <(find "$root" -maxdepth 2 -name "_index.md" -type f 2>/dev/null)
+	printf '%s' "$n"
+}
 _groom_nudge() {
-	local now part out="" rows done_n cold_n stale_n
+	local now part out="" rows done_n cold_n stale_n bloat_n
 	now=$(date +%s)
 	_count() { # $1 = vault root, $2 = label
 		rows=$(_session_rows "$1")
-		[ -n "$rows" ] || return 0
+		bloat_n=$(_bloat_count "$1")
+		[ -n "$rows" ] || {
+			[ "${bloat_n:-0}" -eq 0 ] && return 0
+		}
 		done_n=$(printf '%s\n' "$rows" | awk -F'\t' '$4=="done"{c++} END{print c+0}')
 		cold_n=$(printf '%s\n' "$rows" | awk -F'\t' -v now="$now" -v cd="$COLD_DAYS" \
 			'$4=="parked" && (now-$1)/86400 >= cd {c++} END{print c+0}')
 		stale_n=$(printf '%s\n' "$rows" | awk -F'\t' -v now="$now" -v sd="$STALE_ACTIVE_DAYS" \
 			'$4=="active" && (now-$1)/86400 >= sd {c++} END{print c+0}')
-		[ "$done_n" -eq 0 ] && [ "$cold_n" -eq 0 ] && [ "$stale_n" -eq 0 ] && return 0
+		[ "$done_n" -eq 0 ] && [ "$cold_n" -eq 0 ] && [ "$stale_n" -eq 0 ] && [ "${bloat_n:-0}" -eq 0 ] && return 0
 		local parts=""
 		[ "$done_n" -gt 0 ] && parts="${done_n} done to archive"
 		[ "$cold_n" -gt 0 ] && parts="${parts:+$parts, }${cold_n} parked cold >${COLD_DAYS}d"
 		[ "$stale_n" -gt 0 ] && parts="${parts:+$parts, }${stale_n} active stale >${STALE_ACTIVE_DAYS}d"
+		[ "${bloat_n:-0}" -gt 0 ] && parts="${parts:+$parts, }${bloat_n} checkpoint due >${BLOAT_LINES}L"
 		out="${out:+$out · }$2: $parts"
 	}
 	local _vid _vpath _vlabel
@@ -1031,10 +1060,10 @@ _flip_project_status() { # $1 = Project .md path, $2 = thread
 cmd_groom() {
 	local dry=0
 	[ "${1:-}" = "--dry-run" ] && dry=1
-	local now did=0 cold_lines="" stale_lines=""
+	local now did=0 cold_lines="" stale_lines="" bloat_lines=""
 	now=$(date +%s)
 	_groom_vault() { # $1 = vault root, $2 = label
-		local root="$1/Sessions" label="$2" arc f name st proj upd ts age
+		local root="$1/Sessions" label="$2" arc f name st proj upd ts age lines
 		[ -d "$root" ] || return 0
 		arc="$root/_archive"
 		while IFS= read -r f; do
@@ -1043,6 +1072,19 @@ cmd_groom() {
 			name=$(basename "$(dirname "$f")")
 			[ "$name" = "Sessions" ] && continue
 			st=$(_fm_field "$f" status)
+			# checkpoint-due: active/parked sessions past BLOAT_LINES — a wc -l per
+			# session is cheap, no full-text scan.
+			case "$st" in
+			active | parked)
+				lines=$(wc -l <"$f" 2>/dev/null) || lines=0
+				lines="${lines// /}"
+				if [ "${lines:-0}" -gt "$BLOAT_LINES" ]; then
+					proj=$(_fm_field "$f" project)
+					bloat_lines="${bloat_lines}  ${label}: ${name} (${lines}L, ${proj:-no project})
+"
+				fi
+				;;
+			esac
 			case "$st" in
 			done)
 				if [ "$dry" -eq 1 ]; then
@@ -1170,6 +1212,10 @@ cmd_groom() {
 	if [ -n "$stale_lines" ]; then
 		printf 'Stale active (>%dd untouched — park or retire via the session skill; if the bookmark says the task is done, flip status: done):\n' "$STALE_ACTIVE_DAYS"
 		printf '%s' "$stale_lines"
+	fi
+	if [ -n "$bloat_lines" ]; then
+		printf 'Checkpoint due (>%dL — distill via the session skill and trim _index.md):\n' "$BLOAT_LINES"
+		printf '%s' "$bloat_lines"
 	fi
 	# Grooming is the deliberate cleanup moment — also flag Agent-Index drift here
 	# (broken/stale rows) so it gets triaged alongside session archiving.
@@ -1404,6 +1450,11 @@ COLD_DAYS="${VAULTMEM_COLD_DAYS:-${OBSIDIAN_SESSION_COLD_DAYS:-${DEF_COLD_DAYS:-
 # likely stalled — either park it or flip it to `done` if the work actually
 # finished). No config-file key yet, env override only.
 STALE_ACTIVE_DAYS="${VAULTMEM_STALE_ACTIVE_DAYS:-7}"
+
+# Bloat threshold in lines (an active/parked session's _index.md past this many
+# lines is due for a checkpoint/distill per the session skill). Env override
+# wins over the config default, same pattern as COLD_DAYS.
+BLOAT_LINES="${VAULTMEM_BLOAT_LINES:-${DEF_BLOAT_LINES:-150}}"
 
 # --- subcommand: projects (list Project notes + session counts) ----------------
 cmd_projects() {
@@ -1745,6 +1796,94 @@ cmd_verify() {
 	return 1
 }
 
+# --- subcommand: frontier (rank notes by knowledge-frontier score) -------------
+# score = (outbound - inbound) * exp(-days_since_updated / 30). A note that
+# points at much but is pointed at little, and was touched recently, sits on
+# the active edge of the graph — the best place to write next. Recency reads
+# `updated:` frontmatter (NOT file mtime — cloud-drive re-sync rewrites mtime
+# and would corrupt this), falling back to mtime only when `updated:` is
+# missing/unparseable, same as `_session_rows`. Home.md, MOCs/, Templates/, and
+# any `_archive/` folder are skipped: they are hubs/scaffolding/retired notes,
+# not candidate write targets.
+_frontier_scan() { # prints "note\tout\tin\tepoch" rows (tab-sep) over $(_link_roots)
+	local -a roots=()
+	local r
+	while IFS= read -r r; do roots+=("$r"); done < <(_link_roots)
+	[ "${#roots[@]}" -gt 0 ] || return 0
+
+	# List every .md file per root, then filter in bash rather than lean on rg
+	# --glob anchoring (which anchors to cwd, not to a path argument, when a
+	# root is passed explicitly — so `--glob '!Templates/**'` silently fails to
+	# exclude here). basename/root-relative checks below are the reliable form.
+	local -a files=()
+	local f rel home
+	for r in "${roots[@]}"; do
+		[ -d "$r" ] || continue
+		home="$r/Home.md"
+		while IFS= read -r f; do
+			[ -n "$f" ] || continue
+			[ "$f" = "$home" ] && continue
+			rel="${f#"$r"/}"
+			case "$rel" in
+			Templates/* | MOCs/* | */_archive/* | _archive/*) continue ;;
+			esac
+			files+=("$f")
+		done < <(rg -lN '' --glob '*.md' "$r" 2>/dev/null)
+	done
+	[ "${#files[@]}" -gt 0 ] || return 0
+
+	# Pass 1: outbound count per note + resolved target list (for pass 2 tally).
+	local tmp_out tmp_in
+	tmp_out=$(mktemp) && tmp_in=$(mktemp) || return 0
+	local t tp outc
+	for f in "${files[@]}"; do
+		outc=0
+		while IFS= read -r t; do
+			[ -n "$t" ] || continue
+			outc=$((outc + 1))
+			if tp=$(_resolve_path "$t" 2>/dev/null); then
+				printf '%s\n' "$tp" >>"$tmp_in"
+			fi
+		done < <(_outbound_targets "$f")
+		printf '%s\t%s\n' "$f" "$outc" >>"$tmp_out"
+	done
+
+	# Pass 2: inbound = how often each resolved path appears as a target.
+	local upd ts
+	while IFS=$'\t' read -r f outc; do
+		[ -n "$f" ] || continue
+		local inc
+		inc=$(grep -Fxc "$f" "$tmp_in" 2>/dev/null || true)
+		upd=$(_fm_field "$f" updated)
+		ts=$(_to_epoch "$upd")
+		if [ -z "$ts" ]; then
+			if [ "$(uname)" = Darwin ]; then ts=$(stat -f '%m' "$f"); else ts=$(stat -c '%Y' "$f"); fi
+		fi
+		printf '%s\t%s\t%s\t%s\n' "$f" "$outc" "${inc:-0}" "$ts"
+	done <"$tmp_out"
+	rm -f "$tmp_out" "$tmp_in"
+}
+cmd_frontier() {
+	local now cap="$LIMIT" rows
+	now=$(date +%s)
+	rows=$(_frontier_scan)
+	if [ -z "$rows" ]; then
+		printf '(no notes to rank — check vault path / -v selection)\n'
+		return 0
+	fi
+	printf '%s▸ Knowledge frontier — score = (out - in) · exp(-days/30); high score = active edge, write here next%s\n' "$B" "$R"
+	printf '%s\n' "$rows" | awk -F'\t' -v now="$now" -v cap="$cap" '
+    {
+      f=$1; out=$2; inn=$3; ts=$4
+      days = (now - ts) / 86400
+      if (days < 0) days = 0
+      score = (out - inn) * exp(-days / 30)
+      printf "%.4f\t%s\t%d\t%d\t%d\n", score, f, out, inn, days
+    }' | sort -t$'\t' -k1,1gr | head -n "$cap" |
+		awk -F'\t' '{ rel=$2; sub(/.*\/Obsidian\//, "", rel); printf "  %7.4f  out=%-3d in=%-3d  %3dd  %s\n", $1, $3, $4, $5, rel }'
+	return 0
+}
+
 # --- subcommand: init (scaffold config or a compliant vault skeleton) ----------
 # `init --config` writes a starter config.toml; `init [--vault <id>]` scaffolds a
 # SCHEMA.md-compliant vault skeleton into a configured vault root.
@@ -1763,6 +1902,7 @@ _init_config() {
 vault = "personal"        # fallback vault when routing finds no signal
 limit = 20                # default result cap
 cold_days = 21            # a parked session untouched this long is grooming-due
+bloat_lines = 150         # an active/parked _index.md over this many lines is checkpoint-due
 directive_file = ""       # optional: path to custom AGENT DIRECTIVE text
 
 [vault.personal]
@@ -1902,5 +2042,6 @@ neighbors) cmd_neighbors "${ARGS[*]:1}" ;;
 dangling) cmd_dangling "${ARGS[*]:1}" ;;
 bookmark) cmd_bookmark "${ARGS[*]:1}" ;;
 verify) cmd_verify "${ARGS[1]:-}" ;;
+frontier) cmd_frontier ;;
 *) cmd_search "${ARGS[*]}" ;;
 esac

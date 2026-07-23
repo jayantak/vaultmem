@@ -88,6 +88,12 @@ checking whether an Agent-Index row has gone stale (a row still asserting a live
 verdict for a note whose status says it was retracted):
 `reverted`, `superseded`, `deprecated`, `done`, `archived`, `cancelled`/`canceled`.
 
+Independent of status, an `active` or `parked` session's `_index.md` that has
+grown past `bloat_lines` (`VAULTMEM_BLOAT_LINES`, default 150) is flagged
+checkpoint-due by `groom`: the session skill's convention is that an `_index.md`
+past ~150 lines should be checkpointed/distilled rather than left to grow
+unbounded.
+
 ## Status-glyph invariants
 
 Obsidian sorts a folder's sidebar by filename, so a Project (and optionally a
