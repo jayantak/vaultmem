@@ -549,6 +549,78 @@ EOF
   [[ "$output" == *"  0d  "*"Notes/NoUpdated.md"* ]]
 }
 
+# frontier resolves links through a per-invocation cache (_build_resolve_cache)
+# instead of calling _resolve_path per wikilink. These pin the cache to the same
+# precedence _resolve_path uses — a divergence silently corrupts inbound counts.
+
+@test "frontier inbound count matches case-insensitive basename resolution" {
+  mkdir -p "$OBS_FLO/Notes"
+  printf -- '---\nupdated: %s\n---\n# Target\n' "$(days_ago 1)" >"$OBS_FLO/Notes/Target.md"
+  # Three linkers spelling the basename with different casing; _resolve_path
+  # matches case-insensitively, so Target must count in=3, not in=1.
+  printf -- '---\nupdated: %s\n---\n# L1\n[[Target]]\n' "$(days_ago 1)" >"$OBS_FLO/Notes/L1.md"
+  printf -- '---\nupdated: %s\n---\n# L2\n[[target]]\n' "$(days_ago 1)" >"$OBS_FLO/Notes/L2.md"
+  printf -- '---\nupdated: %s\n---\n# L3\n[[TARGET]]\n' "$(days_ago 1)" >"$OBS_FLO/Notes/L3.md"
+  run "$OM" -v flo frontier
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"in=3"*"Notes/Target.md"* ]]
+}
+
+@test "frontier resolves a link that only matches via a frontmatter alias" {
+  mkdir -p "$OBS_FLO/Notes"
+  printf -- '---\nupdated: %s\naliases: ["Nickname"]\n---\n# RealName\n' "$(days_ago 1)" >"$OBS_FLO/Notes/RealName.md"
+  printf -- '---\nupdated: %s\n---\n# Linker\n[[Nickname]]\n' "$(days_ago 1)" >"$OBS_FLO/Notes/Linker.md"
+  run "$OM" -v flo frontier
+  [ "$status" -eq 0 ]
+  # The alias link must land on RealName (in=1); if the cache missed the alias
+  # table the link would resolve nowhere and RealName would show in=0.
+  [[ "$output" == *"in=1"*"Notes/RealName.md"* ]]
+}
+
+@test "frontier resolves a list-form frontmatter alias" {
+  mkdir -p "$OBS_FLO/Notes"
+  printf -- '---\nupdated: %s\naliases:\n  - Moniker\n---\n# Formal\n' "$(days_ago 1)" >"$OBS_FLO/Notes/Formal.md"
+  printf -- '---\nupdated: %s\n---\n# Ref\n[[Moniker]]\n' "$(days_ago 1)" >"$OBS_FLO/Notes/Ref.md"
+  run "$OM" -v flo frontier
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"in=1"*"Notes/Formal.md"* ]]
+}
+
+@test "frontier prefers an exact relative-path link over a same-basename note elsewhere" {
+  mkdir -p "$OBS_FLO/Notes/Deep" "$OBS_FLO/Other"
+  printf -- '---\nupdated: %s\n---\n# Deep dupe\n' "$(days_ago 1)" >"$OBS_FLO/Notes/Deep/Dupe.md"
+  printf -- '---\nupdated: %s\n---\n# Other dupe\n' "$(days_ago 1)" >"$OBS_FLO/Other/Dupe.md"
+  printf -- '---\nupdated: %s\n---\n# Pointer\n[[Notes/Deep/Dupe]]\n' "$(days_ago 1)" >"$OBS_FLO/Notes/Pointer.md"
+  run "$OM" -v flo frontier
+  [ "$status" -eq 0 ]
+  # The path-qualified link must hit Notes/Deep/Dupe (in=1) and leave the
+  # same-basename Other/Dupe untouched (in=0).
+  [[ "$output" == *"in=1"*"Notes/Deep/Dupe.md"* ]]
+  [[ "$output" == *"in=0"*"Other/Dupe.md"* ]]
+}
+
+@test "frontier counts repeated links to one target once per linking note" {
+  mkdir -p "$OBS_FLO/Notes"
+  printf -- '---\nupdated: %s\n---\n# Popular\n' "$(days_ago 1)" >"$OBS_FLO/Notes/Popular.md"
+  # _outbound_targets dedupes within a note, so three mentions in one file is
+  # still a single edge — the cache must not change that.
+  printf -- '---\nupdated: %s\n---\n# Spammy\n[[Popular]] [[Popular]] [[Popular]]\n' "$(days_ago 1)" >"$OBS_FLO/Notes/Spammy.md"
+  run "$OM" -v flo frontier
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"in=1"*"Notes/Popular.md"* ]]
+  [[ "$output" == *"out=1"*"Notes/Spammy.md"* ]]
+}
+
+@test "frontier leaves a dangling link uncounted" {
+  mkdir -p "$OBS_FLO/Notes"
+  printf -- '---\nupdated: %s\n---\n# Hopeful\n[[NoSuchNote]]\n' "$(days_ago 1)" >"$OBS_FLO/Notes/Hopeful.md"
+  run "$OM" -v flo frontier
+  [ "$status" -eq 0 ]
+  # out counts the wikilink even though it resolves nowhere; nothing gains in.
+  [[ "$output" == *"out=1"*"Notes/Hopeful.md"* ]]
+  [[ "$output" != *"NoSuchNote"* ]]
+}
+
 # --- project tier: projects / project verbs --------------------------------
 
 # Seed a vault with one Project note and three sessions (2 under it, 1 orphan).
