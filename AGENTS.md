@@ -29,14 +29,27 @@ No build step (bash script, nothing to compile). Before committing:
 
 ```bash
 bats tests/vaultmem.bats            # unit tests over the CLI (registry, search, graph, lifecycle)
+BASH=/bin/bash bats tests/vaultmem.bats   # …again under macOS system bash 3.2 (see below)
 ./tests/subcommand-lint.sh          # every `vaultmem <cmd>` referenced in skills/**/*.md must exist in the dispatch table
-shellcheck vaultmem install.sh tests/subcommand-lint.sh
-shfmt --diff vaultmem install.sh tests/subcommand-lint.sh   # must produce no diff
+./tests/bash32-lint.sh              # no bash-4-only constructs (shellcheck cannot see these)
+shellcheck vaultmem install.sh tests/subcommand-lint.sh tests/bash32-lint.sh
+shfmt --diff vaultmem install.sh tests/subcommand-lint.sh tests/bash32-lint.sh   # must produce no diff
 ```
 
-This is exactly what CI (`.github/workflows/ci.yml`) runs, split into three
-jobs: `lint` (shellcheck + shfmt), `test` (bats, on Ubuntu + macOS), and
-`subcommand-lint`. All three must pass before merge.
+This is exactly what CI (`.github/workflows/ci.yml`) runs, split into four jobs:
+`lint` (shellcheck + shfmt + the bash-3.2 construct lint), `test` (bats, on
+Ubuntu + macOS), `bash32` (bats under macOS `/bin/bash` 3.2), and
+`subcommand-lint`. All four must pass before merge.
+
+**Write for bash 3.2, not for the bash on your `$PATH`.** macOS ships bash
+3.2.57 as `/bin/bash` (frozen 2007; bash 4+ is GPLv3) and that is what the
+`SessionStart` hooks run under, but most contributors have Homebrew bash 5.x —
+so `declare -A`/`local -A`, `mapfile`/`readarray`, `${x^^}`, `|&`, `&>>`, and
+`coproc` pass locally and break on macOS. Both instances that reached `main`
+failed *silently* (a `doctor --deep` that exited 0 finding nothing; a lint that
+passed vacuously). `shellcheck` cannot detect this — it targets a dialect, not a
+bash version. Full rationale, the banned list, and portable (faster) substitutes:
+[docs/development.md](docs/development.md).
 
 Tests never touch a real vault — `tests/vaultmem.bats` builds a throwaway
 two-vault registry per test via `VAULTMEM_CONFIG` pointed at a `bats`
@@ -105,6 +118,14 @@ version-locked to the CLI: [docs/plugin.md](docs/plugin.md).
 
 ## Non-obvious gotchas
 
+- **The bash floor is 3.2 (macOS), and violations fail SILENTLY.** bash 3.2
+  errors on `local -A`, then parses the next `arr[$path]=1` as an *indexed*
+  assignment with an arithmetic subscript — so `doctor --deep` sprayed syntax
+  errors per note and still exited 0. `mapfile` inside a process substitution
+  doesn't trip `set -e`, which left `subcommand-lint.sh` passing on an empty
+  list. Neither is visible on Homebrew bash 5, and neither is detectable by
+  `shellcheck`. Run `BASH=/bin/bash bats tests/vaultmem.bats` +
+  `./tests/bash32-lint.sh`; see [docs/development.md](docs/development.md).
 - **`shellcheck` disables at the top of `vaultmem` are load-bearing, not
   boilerplate** — SC2016 (backticks in the usage/help text are literal, not
   command substitution) and SC2012 (the MOC listing intentionally uses `ls`
@@ -138,3 +159,4 @@ version-locked to the CLI: [docs/plugin.md](docs/plugin.md).
 | Claude Code plugin packaging, skill discovery, version sync | [docs/plugin.md](docs/plugin.md) |
 | Install paths, quickstart, full command reference, design rationale | [README.md](README.md) |
 | Skill content itself (workflows, conventions each skill teaches) | `skills/<name>/SKILL.md` |
+| bash 3.2 floor, banned constructs, portable substitutes, test conventions | [docs/development.md](docs/development.md) |

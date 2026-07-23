@@ -22,9 +22,14 @@ jobs:
             https://github.com/mvdan/sh/releases/download/v3.10.0/shfmt_v3.10.0_linux_amd64
           sudo chmod +x /usr/local/bin/shfmt
       - name: shellcheck
-        run: shellcheck vaultmem install.sh tests/subcommand-lint.sh
+        run: shellcheck vaultmem install.sh tests/subcommand-lint.sh tests/bash32-lint.sh
       - name: shfmt --diff
-        run: shfmt --diff vaultmem install.sh tests/subcommand-lint.sh
+        run: shfmt --diff vaultmem install.sh tests/subcommand-lint.sh tests/bash32-lint.sh
+      # shellcheck has no bash-version target (only a dialect), so it cannot see
+      # bash-4-only constructs. This names them explicitly; the bash-3.2 bats job
+      # below is the broader net.
+      - name: bash 3.2 floor lint
+        run: ./tests/bash32-lint.sh
 
   test:
     name: bats (${{ matrix.os }})
@@ -43,6 +48,29 @@ jobs:
         run: brew install ripgrep bats-core
       - name: Run tests
         run: bats tests/vaultmem.bats
+
+  bash32:
+    name: bats under macOS system bash 3.2
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install ripgrep + bats
+        run: brew install ripgrep bats-core
+      # The matrix job above runs whatever bash bats picks, which on macOS is
+      # Homebrew's bash 5 (pulled in by bats-core) — so it does NOT exercise the
+      # 3.2 floor. /bin/bash is the shell real users and the SessionStart hooks
+      # get. A bash-4 construct that only breaks a specific code path (rather
+      # than erroring at load time) is invisible to every other job.
+      - name: Confirm /bin/bash really is 3.2
+        run: /bin/bash --version | head -1 | grep -q 'version 3\.2' || exit 1
+      - name: Run tests under bash 3.2
+        env:
+          BASH: /bin/bash
+        run: bats tests/vaultmem.bats
+      - name: Run the shipped lints under bash 3.2
+        run: |
+          /bin/bash ./tests/subcommand-lint.sh
+          /bin/bash ./tests/bash32-lint.sh
 
   subcommand-lint:
     name: skills ↔ dispatch-table lint

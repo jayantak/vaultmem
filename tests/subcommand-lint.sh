@@ -16,11 +16,24 @@ SKILLS="$ROOT/skills"
 
 # The set of dispatch-table subcommands: the case labels in the SECOND
 # `case "${ARGS[0]:-}" in` block (the first is the vault-guard exemption list).
-mapfile -t KNOWN < <(
+#
+# Built with a read loop, not `mapfile`: macOS ships bash 3.2, which has no
+# mapfile. It failed silently here (inside a process substitution, so `set -e`
+# never fired) leaving KNOWN empty — which made this lint PASS vacuously on the
+# platform it most needed to run on. See docs/development.md § bash 3.2.
+KNOWN=()
+while IFS= read -r _k; do
+	[ -n "$_k" ] || continue
+	KNOWN+=("$_k")
+done < <(
 	awk '/^case "\$\{ARGS\[0\]:-\}" in/{n++} n==2{print}' "$SCRIPT" |
 		grep -oE '^[[:space:]]*[a-z][a-z|]*\)' | tr -d ' )' | tr '|' '\n' |
 		grep -vE '^$' | sort -u
 )
+if [ "${#KNOWN[@]}" -eq 0 ]; then
+	printf 'subcommand-lint: FAIL — parsed 0 subcommands from the dispatch table.\n' >&2
+	exit 1
+fi
 is_known() {
 	local w="$1" k
 	for k in "${KNOWN[@]}"; do [ "$k" = "$w" ] && return 0; done
