@@ -154,6 +154,7 @@ vaultmem projects           Project notes + active/total session counts
 vaultmem project <name>     one project: repos, linear, MOC, sessions by status
 vaultmem status             one-line index summary + groom-nudge count (fail-quiet)
 vaultmem bookmark <thread>  print only ## Bookmark + ## Pinned from a session's _index.md
+vaultmem nudge              Stop-hook check: notes changed but the session's _index.md wasn't (fail-quiet)
 ```
 
 **hygiene · setup**
@@ -304,6 +305,41 @@ skills directory. The installer automates it:
 How `skills/` becomes an installable plugin (the `.claude-plugin/` manifests,
 skill discovery, the skills↔CLI drift lint) is documented in
 [docs/plugin.md](docs/plugin.md).
+
+## Cross-project routing snippet
+
+Any repo that wants its agents to consult the vault — not just this one — can
+paste the block below into its own `CLAUDE.md`/`AGENTS.md`. It teaches the
+reflex (check before you re-derive), the cost anchor (a miss is nearly free),
+and the negative trigger (current code lives in the repo, never in memory):
+
+```markdown
+## Agent memory: the vault is the default
+
+- **Reflex — check before you re-derive.** Before investigating a past
+  decision, root cause, or incident, or explaining "why is it built this
+  way," run `vaultmem <query>` first. It costs ~60ms and ~700 tokens —
+  cheaper than reading two files — so a miss is nearly free and the default
+  is to check, not to skip. Grepping the repo tells you *what* the code
+  does; the vault tells you *why*, and the history the code can't show.
+  Don't trust "I already sort of know this" for a past decision — that is
+  how a stale or invented answer ships.
+- **Current code or behavior? Read the repo, not the vault.** Never trust
+  memory for live code — it goes stale the moment the code changes. `rg`
+  and direct file reads are the source of truth for *what the code does
+  right now*.
+- **Prior decision, root cause, or project/people context? The vault.**
+  `vaultmem <query>` to search, `vaultmem index` to see the shape, the
+  `obsidian-vault` skill (if installed) to read or capture a note.
+- Capture durable knowledge back into the vault at logical stopping
+  points — decisions, root causes, and generalizable patterns — so the
+  next session gets the ~60ms answer instead of re-deriving it.
+```
+
+This is intentionally generic (no vault id, no skill assumed installed) so it
+drops into any repo's memory file as-is; adjust the skill name or add a
+`vaultmem which`/`vaultmem vaults` pointer if the repo has a specific vault it
+should route to.
 
 ## Design notes
 

@@ -39,6 +39,7 @@
 #   vaultmem groom --dry-run    preview groom: print the would-move list + would-flip
 #                               project-index lines; no mv, no writes
 #   vaultmem status             one-line summary + groom-nudge count (used by the SessionStart hook)
+#   vaultmem nudge              fail-quiet Stop-hook check: vault touched but session note not updated
 #   vaultmem init [--vault <id>]  scaffold a compliant vault skeleton (see SCHEMA.md)
 #   vaultmem init --config      write a starter config.toml
 #
@@ -296,6 +297,49 @@ cmd_status() {
 	local nudge
 	nudge=$(_groom_nudge 2>/dev/null)
 	[ -n "$nudge" ] && printf '  %s\n' "$nudge"
+}
+
+# --- subcommand: nudge (fail-quiet; for a Stop hook) ----------------------------
+# Report-only "did work happen without the session note being maintained?" check.
+# No daemon, no DB: a stamp file under the cache dir (never the vault) marks the
+# start of the window; `find -newer` diffs vault mtimes against it. Same
+# fail-quiet contract as status/sessions — a missing vault, an unwritable cache
+# dir, or (most commonly) a first-ever call with no stamp yet all print nothing
+# and exit 0, so a Stop hook wired to this can never fail a turn.
+#
+# The stamp is meant to be planted at SessionStart and consumed at Stop (see
+# docs/hooks.md); if only wired at Stop, the first call in a session plants the
+# stamp and stays silent, and later Stops in that session compare against it —
+# degraded but still safe, never noisy on a cold start.
+_nudge_stamp_dir() { printf '%s/vaultmem' "${XDG_CACHE_HOME:-$HOME/.cache}"; }
+_nudge_stamp_file() { printf '%s/nudge-stamp' "$(_nudge_stamp_dir)"; }
+cmd_nudge() {
+	[ -f "$PRIMARY_HOME" ] || exit 0
+	local dir stamp
+	dir=$(_nudge_stamp_dir)
+	stamp=$(_nudge_stamp_file)
+	mkdir -p "$dir" 2>/dev/null || exit 0
+	if [ ! -e "$stamp" ]; then
+		touch "$stamp" 2>/dev/null
+		exit 0
+	fi
+	local -a roots=()
+	local r
+	while IFS= read -r r; do roots+=("$r"); done < <(_link_roots)
+	[ "${#roots[@]}" -gt 0 ] || exit 0
+	# Any note touched since the stamp, anywhere in a registered vault.
+	local touched
+	touched=$(find "${roots[@]}" -type f -name '*.md' -newer "$stamp" -not -path '*/Templates/*' 2>/dev/null | head -1)
+	if [ -n "$touched" ]; then
+		# Was a session's own _index.md among the touched notes?
+		local idx_touched
+		idx_touched=$(find "${roots[@]}" -type f -name '_index.md' -newer "$stamp" 2>/dev/null | head -1)
+		if [ -z "$idx_touched" ]; then
+			printf '⚠ vaultmem: notes changed this session but no Sessions/*/_index.md was updated — capture the work log / `updated:` before you stop.\n'
+		fi
+	fi
+	touch "$stamp" 2>/dev/null
+	return 0
 }
 
 # --- subcommand: index (browse the Agent Index) --------------------------------
@@ -1997,7 +2041,7 @@ while [ $# -gt 0 ]; do
 		shift 2
 		;;
 	-h | --help)
-		sed -n '4,58p' "$0"
+		sed -n '4,78p' "$0"
 		exit 0
 		;;
 	*)
@@ -2012,18 +2056,20 @@ case "$VAULT" in flosports) VAULT=flo ;; personal) VAULT=jay ;; esac # historica
 SEL=both
 [ "$VAULT" != both ] && _vault_known "$VAULT" && SEL="$VAULT"
 
-# Require a configured vault for commands that read one. status/sessions/verify
-# stay fail-quiet (the hook path); which/init/usage are vault-independent or
-# scaffold; doctor must run its config-lint even when the config is too broken
-# to register a vault (that is exactly what it exists to report).
+# Require a configured vault for commands that read one. status/sessions/
+# verify/nudge stay fail-quiet (the hook path); which/init/usage are
+# vault-independent or scaffold; doctor must run its config-lint even when the
+# config is too broken to register a vault (that is exactly what it exists to
+# report).
 case "${ARGS[0]:-}" in
-status | sessions | verify | which | init | doctor | "") ;;
+status | sessions | verify | nudge | which | init | doctor | "") ;;
 *) [ "${REG_HAVE_PATH:-0}" = 1 ] || die "no vault configured — create $VAULTMEM_CONFIG (run 'vaultmem init --config') or set OBS_FLO/OBS_JAY (legacy)" ;;
 esac
 
 case "${ARGS[0]:-}" in
-"") sed -n '4,58p' "$0" ;; # no args → print usage
+"") sed -n '4,78p' "$0" ;; # no args → print usage
 status) cmd_status ;;
+nudge) cmd_nudge ;;
 index) cmd_index "${ARGS[1]:-}" ;;
 doctor) cmd_doctor "${ARGS[1]:-}" ;;
 mocs) cmd_mocs ;;

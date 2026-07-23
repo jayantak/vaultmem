@@ -12,6 +12,8 @@ setup() {
   export OBS_FLO="$BATS_TEST_TMPDIR/flo"
   export OBS_JAY="$BATS_TEST_TMPDIR/jay"
   export DEV_DIR="$BATS_TEST_TMPDIR/src"
+  # Isolated cache dir so `nudge`'s stamp file never touches a real ~/.cache.
+  export XDG_CACHE_HOME="$BATS_TEST_TMPDIR/cache"
   mkdir -p "$OBS_FLO" "$OBS_JAY"
   # The vault registry the tool consumes. Two vaults flo/jay with labels + owner
   # routing, so the suite exercises the config path a real user hits.
@@ -930,6 +932,59 @@ EOF
   printf -- '---\nstatus: done\n---\n# closed\n' >"$OBS_JAY/Sessions/closed/_index.md"
   run "$OM" sessions
   [[ "$output" == *"groom"* ]]
+}
+
+@test "nudge is silent with no vault configured (fail-quiet)" {
+  export VAULTMEM_CONFIG="$BATS_TEST_TMPDIR/absent.toml"
+  unset OBS_FLO OBS_JAY
+  run "$OM" nudge
+  [ "$status" -eq 0 ]
+  [ -z "$output" ]
+}
+
+@test "nudge is silent on first-ever call and plants the stamp" {
+  printf -- '---\nschema: 1\n---\n# Home\n<!-- AGENT-INDEX:START -->\n<!-- AGENT-INDEX:END -->\n' >"$OBS_FLO/Home.md"
+  [ ! -e "$XDG_CACHE_HOME/vaultmem/nudge-stamp" ]
+  run "$OM" nudge
+  [ "$status" -eq 0 ]
+  [ -z "$output" ]
+  [ -e "$XDG_CACHE_HOME/vaultmem/nudge-stamp" ]
+}
+
+@test "nudge stays silent when no note changed since the stamp" {
+  printf -- '---\nschema: 1\n---\n# Home\n<!-- AGENT-INDEX:START -->\n<!-- AGENT-INDEX:END -->\n' >"$OBS_FLO/Home.md"
+  run "$OM" nudge # plants the stamp
+  [ "$status" -eq 0 ]
+  run "$OM" nudge # nothing touched since → still silent
+  [ "$status" -eq 0 ]
+  [ -z "$output" ]
+}
+
+@test "nudge stays silent when the touched note is the session's own _index.md" {
+  printf -- '---\nschema: 1\n---\n# Home\n<!-- AGENT-INDEX:START -->\n<!-- AGENT-INDEX:END -->\n' >"$OBS_FLO/Home.md"
+  mkdir -p "$OBS_JAY/Sessions/live"
+  printf -- '---\nstatus: active\n---\n# live\n' >"$OBS_JAY/Sessions/live/_index.md"
+  run "$OM" nudge # plants the stamp
+  [ "$status" -eq 0 ]
+  sleep 1
+  printf -- '---\nstatus: active\nupdated: %s\n---\n# live\n## Work log\n- did stuff\n' \
+    "$(date +"%Y-%m-%d %H:%M")" >"$OBS_JAY/Sessions/live/_index.md"
+  run "$OM" nudge
+  [ "$status" -eq 0 ]
+  [ -z "$output" ]
+}
+
+@test "nudge fires when a vault note changed but no _index.md was touched" {
+  printf -- '---\nschema: 1\n---\n# Home\n<!-- AGENT-INDEX:START -->\n<!-- AGENT-INDEX:END -->\n' >"$OBS_FLO/Home.md"
+  mkdir -p "$OBS_JAY/Sessions/live" "$OBS_JAY/Projects"
+  printf -- '---\nstatus: active\n---\n# live\n' >"$OBS_JAY/Sessions/live/_index.md"
+  run "$OM" nudge # plants the stamp
+  [ "$status" -eq 0 ]
+  sleep 1
+  printf -- '---\ntype: project\nstatus: active\n---\n# Notes\nsome content\n' >"$OBS_JAY/Projects/Notes.md"
+  run "$OM" nudge
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"_index.md"* ]]
 }
 
 @test "path prints the flo vault root" {
