@@ -1,0 +1,5 @@
+- [ ] `bats tests/vaultmem.bats` passes
+- [ ] `shellcheck vaultmem install.sh tests/subcommand-lint.sh` clean
+- [ ] `shfmt --diff vaultmem install.sh tests/subcommand-lint.sh` clean (or ran `shfmt -w`)
+- [ ] `./tests/subcommand-lint.sh` passes (only relevant if you touched `skills/**/*.md` or the dispatch table)
+- [ ] Docs updated if this changes CLI surface, config schema, or vault schema (README / docs/*.md / SCHEMA.md)
