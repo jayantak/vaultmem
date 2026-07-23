@@ -71,9 +71,9 @@
 #   - Curated hits (Home.md Agent Index + MOCs/) come first: they are
 #     human/agent-curated summaries, the highest-signal entry points.
 #   - Content hits are raw ripgrep over note bodies, capped for frugality.
-#   - `status`/`sessions`/`verify` are fail-quiet: an unmounted/unconfigured
-#     vault (or a non-vault path for `verify`) prints nothing and exits 0, so
-#     they can never break a hook.
+#   - `status`/`sessions`/`verify`/`nudge` are fail-quiet: an unmounted/
+#     unconfigured vault (or a non-vault path for `verify`) prints nothing and
+#     exits 0, so they can never break a hook.
 #   - Link resolution mirrors Obsidian: strip `|display`/`#heading`/`^block`, then
 #     match relative-path → unique basename (case-insensitive) → frontmatter alias.
 
