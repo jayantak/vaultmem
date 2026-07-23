@@ -135,6 +135,7 @@ vaultmem status             one-line index summary + groom-nudge count (fail-qui
 ```
 vaultmem groom              archive done sessions + done projects; report cold-parked + stale-active
 vaultmem doctor             lint the config + flag drifted index rows + vault schema lints
+vaultmem doctor --deep      + vault-wide orphan/unindexed scan (slower; not run by base doctor/groom)
 vaultmem init [--vault <id>]  scaffold a compliant vault skeleton
 vaultmem init --config      write a starter config.toml
 ```
@@ -161,10 +162,35 @@ vaultmem init --config      write a starter config.toml
    | `NO-UPDATED` | a session `_index.md` with missing/unparseable `updated:` | staleness/cold-parked math falls back to file mtime, which cloud-drive re-sync rewrites |
    | `MISSING-FM` | required frontmatter absent — session: `thread`, `status`, `updated`; project: `type`, `status` | downstream commands read these fields directly and treat absence as silently-empty |
    | `EMPTY-BOOKMARK` | an **active** session whose `## Bookmark` section has no content | only `Bookmark` is linted (and only when active) — every other template heading (`Pinned`/`Work log`/`Decisions`/`Git state`) ships intentionally empty on a fresh session |
+   | `INDEX-DRIFT` | a Project's `## Sessions` row status token (`(status: active)`, `(PROJ-123, active)`, or bare `(active)`) disagrees with the linked session's own `status:` frontmatter | the row is a human/agent-maintained summary of the session, not a live read — it rots the same way the Agent Index does. Rows reading `archived` are never flagged: that word marks the session's location (`Sessions/_archive/`), not a live status. Read-only — `doctor` never rewrites the Project file. |
 
    Schema lints are O(sessions), a couple of `awk` passes per note — fast
    enough to run on every `doctor` call (including the one `groom` makes
    internally); no vault-wide full-text scan.
+
+### `doctor --deep`
+
+An opt-in fourth check, off by default: a vault-wide scan for notes with no
+inbound links or no index membership. **Never runs as part of base `doctor`**
+(or the `doctor`-adjacent scan `groom` makes internally) — it walks every note
+in the vault with an `rg` pass each, so it does not hold to the "couple of
+`awk` passes per note" budget the other lints do.
+
+| Class | Fires on | Why it matters |
+|---|---|---|
+| `ORPHAN` | a note with zero inbound `[[wikilinks]]` from anywhere else in the vault | nothing in the graph leads here — it's unreachable by `links`/`backlinks`/`neighbors` traversal |
+| `UNINDEXED` | a note absent from **both** the Agent Index and every MOC's outbound links | it has no curated entry point — an agent can only find it via full-text search, never via the triage surfaces |
+
+`Home.md`, `MOCs/`, `Templates/`, `Sessions/`, `Projects/`, and anything
+under `_archive/` are skipped as candidates (hubs, retired notes, and
+templates are meant to be unlinked/unindexed; flagging them would be a false
+positive). Sessions and Projects are excluded for the same reason: they're
+discovered through the lifecycle tier (`sessions`/`projects`/`project
+<name>`), not the wikilink graph or the Agent Index/MOC system, so
+`--deep` would otherwise flag every schema-legal Session and Project note.
+`UNINDEXED`'s Agent-Index check only applies to the primary vault's
+`Home.md` (the vault `doctor` also checks for `BROKEN`/`STALE`); MOC
+membership is checked per-vault.
 
 **Exit codes** (bitwise, so they compose):
 

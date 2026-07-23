@@ -19,8 +19,10 @@
 #   vaultmem doctor             flag drifted index rows + vault schema lints; also lint the config
 #                               index drift: BROKEN (missing/0-byte note) + STALE (note reverted/done but row reads live)
 #                               schema lints (walk Sessions/Projects): NOALIAS, GLYPH-DESYNC,
-#                               GLYPHED-FOLDER, NO-UPDATED, MISSING-FM, EMPTY-BOOKMARK (see SCHEMA.md)
+#                               GLYPHED-FOLDER, NO-UPDATED, MISSING-FM, EMPTY-BOOKMARK, INDEX-DRIFT (see SCHEMA.md)
 #                               exit codes: 0=clean 1=config errors 2=drift/lint findings 3=both
+#   vaultmem doctor --deep      + vault-wide ORPHAN (no inbound links) and UNINDEXED (not in
+#                               Agent Index or any MOC) scan; slower, not run by base doctor/groom
 #   vaultmem mocs               list Maps of Content (the domain hubs)
 #   vaultmem vaults             print vault registry (id, path, MOC, routing rules)
 #   vaultmem path <id>          print the vault root path (for V="$(…)" in scripts)
@@ -395,6 +397,28 @@ _h1_glyph() {
 	[ "$stripped" != "$h1" ] && printf '%s' "${h1%% *}"
 }
 
+# Emit each `## Sessions` index line in a Project note as "thread\ttoken" (tab-
+# sep): thread = the [[wikilink]] target, token = the trailing status word in
+# the line's last (...) group. Matches all three documented row shapes —
+# "(status: active)", "(PROJ-123, active)", "(active)" — by reusing the same
+# trailing-token regex shape as `_flip_project_status` (archived included, so
+# callers can recognize and skip already-archived rows).
+_project_session_tokens() { # $1 = Project .md path
+	awk '
+    /^## Sessions[[:space:]]*$/{f=1; next}
+    f && /^## /{f=0}
+    f && /\[\[[^]]+\]\].*\([^)]*(active|parked|done|archived)\)/ {
+      line=$0
+      t=line; sub(/.*\[\[/,"",t); sub(/\]\].*/,"",t); sub(/#.*/,"",t); sub(/\|.*/,"",t)
+      gsub(/^[[:space:]]+|[[:space:]]+$/,"",t)
+      tok=line; sub(/\)[^)]*$/,"",tok); sub(/.*\(/,"",tok)
+      sub(/.*,[[:space:]]*/,"",tok); sub(/^status:[[:space:]]*/,"",tok)
+      gsub(/^[[:space:]]+|[[:space:]]+$/,"",tok)
+      if (t != "" && tok != "") print t "\t" tok
+    }
+  ' "$1"
+}
+
 # Schema lints — walk Sessions/ and Projects/ directly (not the Agent Index),
 # so they catch structural corruption an index row would never mention. Kept
 # to a couple of awk passes per note: no vault-wide full-text scan (that is a
@@ -514,12 +538,141 @@ _schema_scan() { # $1=vault root; prints "CLASS\tnote\tdetail" lines
 				fi
 			fi
 		fi
+
+		# INDEX-DRIFT — a `## Sessions` row's status token disagrees with the
+		# linked session's own frontmatter `status:`. Read-only: never rewrites
+		# the Project file. Rows reading "archived" are skipped — that word marks
+		# a session's location (Sessions/_archive/), not a live status, and is
+		# correct by definition once `groom` has moved the session there.
+		local sthread stok sfile sstatus
+		while IFS=$'\t' read -r sthread stok; do
+			[ -n "$sthread" ] || continue
+			stok=$(printf '%s' "$stok" | tr '[:upper:]' '[:lower:]')
+			[ "$stok" = archived ] && continue
+			sfile="$root/Sessions/$sthread/_index.md"
+			if [ ! -f "$sfile" ]; then
+				local sdir sg
+				sdir="$root/Sessions"
+				sg=$(_first_glob "$sdir/"*" $sthread/_index.md") || true
+				[ -n "$sg" ] && sfile="$sg"
+			fi
+			[ -f "$sfile" ] || continue
+			sstatus=$(_fm_field "$sfile" status | tr '[:upper:]' '[:lower:]')
+			[ -n "$sstatus" ] || continue
+			if [ "$sstatus" != "$stok" ]; then
+				printf 'INDEX-DRIFT\tProjects/%s\t## Sessions row for [[%s]] reads (%s) but Sessions/%s status: is %s\n' "$name" "$sthread" "$stok" "$sthread" "$sstatus"
+			fi
+		done < <(_project_session_tokens "$f")
 	done < <(printf '%s\n' "$root/Projects"/*.md)
+}
+
+# Deep scan (--deep only; NOT run by base `doctor`/`groom` — vault-wide, so it
+# does not stay within the "couple of awk passes per note" budget the other
+# lints hold to). Two checks per vault:
+#   ORPHAN     — zero inbound [[wikilinks]] from anywhere else in the vault.
+#   UNINDEXED  — absent from BOTH the Agent Index (primary vault only) and
+#                every MOC's outbound links.
+# Home.md, MOCs/, Templates/, and anything under _archive/ are skipped as
+# candidates: they are hubs/retired, not content notes, and flagging them
+# would be a false positive (Home/MOCs are meant to have no inbound links of
+# their own; Templates/_archive are intentionally unlinked). Sessions/ and
+# Projects/ are skipped too: those notes are discovered through the
+# Project→Session lifecycle tier (`sessions`/`projects`/`project <name>`,
+# keyed off folder basename and the `## Sessions` index), never through the
+# wikilink graph or the Agent Index/MOC system — nothing in SCHEMA.md or the
+# README requires a Session or Project to be MOC-linked or Agent-Index-listed,
+# so flagging them here would be a false positive on schema-legal notes.
+_deep_scan() { # $1 = vault root, $2 = 1 if this is the primary (agent-index) vault
+	local root="$1" is_primary="$2"
+	local home="$root/Home.md" mocs_dir="$root/MOCs"
+	local sessions_dir="$root/Sessions" projects_dir="$root/Projects"
+	local -a candidates=()
+	local f
+	while IFS= read -r f; do
+		[ -n "$f" ] || continue
+		case "$f" in
+		"$home") continue ;;
+		"$mocs_dir"/*) continue ;;
+		"$root/Templates"/*) continue ;;
+		"$sessions_dir"/*) continue ;;
+		"$projects_dir"/*) continue ;;
+		*/_archive/*) continue ;;
+		esac
+		candidates+=("$f")
+	done < <(find "$root" -type f -name '*.md' 2>/dev/null | sort)
+	[ "${#candidates[@]}" -gt 0 ] || return 0
+
+	# Index-membership set: Agent Index row targets (primary vault only) ∪ every
+	# MOC's outbound wikilink targets — both keyed by resolved file path so
+	# comparison is exact regardless of how the link text was written.
+	local -A indexed=()
+	if [ "$is_primary" = 1 ] && [ -f "$home" ]; then
+		local t s tp
+		while IFS=$'\t' read -r t s; do
+			[ -n "$t" ] || continue
+			tp="$root/$t.md"
+			[ -f "$tp" ] || {
+				local dir base g
+				dir=$(dirname "$tp")
+				base=$(basename "$t")
+				g=$(_first_glob "$dir/"*" $base.md") || true
+				[ -n "$g" ] && tp="$g"
+			}
+			[ -f "$tp" ] && indexed["$tp"]=1
+		done < <(_index_row_targets)
+	fi
+	if [ -d "$mocs_dir" ]; then
+		local mf mt mtp
+		for mf in "$mocs_dir"/*.md; do
+			[ -e "$mf" ] || continue
+			while IFS= read -r mt; do
+				[ -n "$mt" ] || continue
+				mtp=$(_resolve_path "$mt") || continue
+				indexed["$mtp"]=1
+			done < <(_outbound_targets "$mf")
+		done
+	fi
+
+	# Inbound-edge set: invert cmd_backlinks — one rg pass per candidate over
+	# every note in the vault, matching basename or any frontmatter alias.
+	local base alt pat hf found
+	for f in "${candidates[@]}"; do
+		base="$(basename "${f%.md}")"
+		local -a term_list=("$base")
+		while IFS= read -r a; do [ -n "$a" ] && term_list+=("$a"); done < <(
+			awk 'NR==1 && $0!="---"{exit} NR==1{next} $0=="---"{exit}
+           /^aliases:[[:space:]]*\[/{s=$0; sub(/^aliases:[[:space:]]*\[/,"",s); sub(/\].*/,"",s);
+             n=split(s,a,","); for(i=1;i<=n;i++){gsub(/^[[:space:]"'"'"']+|[[:space:]"'"'"']+$/,"",a[i]); if(a[i]!="")print a[i]}
+             next}
+           /^aliases:[[:space:]]*$/{al=1; next}
+           al && /^[[:space:]]*-[[:space:]]*/{v=$0; sub(/^[[:space:]]*-[[:space:]]*/,"",v);
+             gsub(/^["'"'"']+|["'"'"']+$/,"",v); gsub(/[[:space:]]+$/,"",v); print v; next}
+           al && /^[^[:space:]-]/{al=0}' "$f"
+		)
+		alt=$(printf '%s|' "${term_list[@]}")
+		alt="${alt%|}"
+		pat="\\[\\[([^]]*/)?(${alt})([|#^][^]]*)?\\]\\]"
+		found=0
+		while IFS= read -r hf; do
+			[ -n "$hf" ] || continue
+			[ "$hf" = "$f" ] && continue # ignore self-references, like cmd_backlinks
+			found=1
+			break
+		done < <(rg -lN -e "$pat" --glob '*.md' --glob '!Templates/**' "$root" 2>/dev/null)
+		if [ "$found" -eq 0 ]; then
+			printf 'ORPHAN\t%s\tzero inbound [[wikilinks]] from anywhere else in the vault\n' "${f#"$root"/}"
+		fi
+		if [ -z "${indexed["$f"]:-}" ]; then
+			printf 'UNINDEXED\t%s\tnot in the Agent Index and not linked from any MOC\n' "${f#"$root"/}"
+		fi
+	done
 }
 
 # Exit codes (bitwise, so they compose): 0=clean 1=config errors 2=drift/lint
 # findings (index drift and/or schema lints) 3=both.
 cmd_doctor() {
+	local deep=0
+	case "${1:-}" in --deep) deep=1 ;; esac
 	local rc=0
 	# 1) config lint — the accepted TOML subset is enforced here.
 	if [ -r "$VAULTMEM_CONFIG" ]; then
@@ -559,8 +712,34 @@ ${schema_issues}"
 		fi
 	fi
 
+	# 4) --deep only: vault-wide orphan/unindexed scan. Never runs by default —
+	# base `doctor` (and the `doctor` call `groom` makes internally) must stay
+	# fast, and this is O(notes) with an `rg` pass per candidate.
+	local deep_issues=""
+	if [ "$deep" = 1 ]; then
+		local _did _dpath _drest _is_primary
+		while IFS=$'\t' read -r _did _dpath _drest; do
+			[ -n "$_did" ] && [ -n "$_dpath" ] || continue
+			case "$SEL" in both) ;; "$_did") ;; *) continue ;; esac
+			[ -d "$_dpath" ] || continue
+			_is_primary=0
+			[ "$_dpath" = "$PRIMARY" ] && _is_primary=1
+			deep_issues="${deep_issues}$(_deep_scan "$_dpath" "$_is_primary")
+"
+		done <<<"$_REG"
+		deep_issues=$(printf '%s\n' "$deep_issues" | grep -v '^[[:space:]]*$' || true)
+		if [ -n "$deep_issues" ]; then
+			if [ -n "$issues" ]; then
+				issues="${issues}
+${deep_issues}"
+			else
+				issues="$deep_issues"
+			fi
+		fi
+	fi
+
 	if [ -z "$issues" ]; then
-		printf 'vaultmem doctor: clean (no broken/stale rows, no schema lint findings).\n'
+		printf 'vaultmem doctor: clean (no broken/stale rows, no schema lint findings%s).\n' "$([ "$deep" = 1 ] && printf ', no --deep findings')"
 	else
 		rc=$((rc | 2))
 		local nb ns nc
@@ -1400,7 +1579,7 @@ while [ $# -gt 0 ]; do
 		shift 2
 		;;
 	-h | --help)
-		sed -n '4,56p' "$0"
+		sed -n '4,58p' "$0"
 		exit 0
 		;;
 	*)
@@ -1425,10 +1604,10 @@ status | sessions | which | init | doctor | "") ;;
 esac
 
 case "${ARGS[0]:-}" in
-"") sed -n '4,56p' "$0" ;; # no args → print usage
+"") sed -n '4,58p' "$0" ;; # no args → print usage
 status) cmd_status ;;
 index) cmd_index "${ARGS[1]:-}" ;;
-doctor) cmd_doctor ;;
+doctor) cmd_doctor "${ARGS[1]:-}" ;;
 mocs) cmd_mocs ;;
 vaults) cmd_vaults ;;
 path) cmd_path "${ARGS[1]:-}" ;;

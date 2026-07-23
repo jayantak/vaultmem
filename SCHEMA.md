@@ -145,9 +145,23 @@ Three invariants keep glyph-as-presentation from becoming glyph-as-identity:
   and no death word).
 - `doctor` separately walks `Sessions/` and `Projects/` directly (not via the
   index) for structural corruption — `NOALIAS`, `GLYPH-DESYNC`,
-  `GLYPHED-FOLDER`, `NO-UPDATED`, `MISSING-FM`, `EMPTY-BOOKMARK`. See the
-  README's [doctor](README.md#doctor) section for the full table and exit
-  codes.
+  `GLYPHED-FOLDER`, `NO-UPDATED`, `MISSING-FM`, `EMPTY-BOOKMARK`,
+  `INDEX-DRIFT`. See the README's [doctor](README.md#doctor) section for the
+  full table and exit codes.
+
+### Project `## Sessions` index rows
+
+A Project note's `## Sessions` section indexes its sessions, one row per
+`[[thread]]`, grouped however the project prefers (by status, chronologically,
+etc.). The `session` skill appends a row per the shape
+`- [[<thread>]] — <one-line> (status: active)`, optionally folding in a
+tracker issue id (`(PROJ-1234, active)`); a bare `(active)` is also read. All
+three shapes carry the same thing: a trailing status word in the line's last
+`(...)` group. `doctor` compares that token against the linked session's own
+`status:` frontmatter and flags a disagreement as `INDEX-DRIFT` — read-only,
+it never rewrites the Project file. A row reading `archived` is never flagged:
+that word marks the session's on-disk location (`Sessions/_archive/<thread>/`)
+once `groom` retires it, not a live status — see § Status vocabulary above.
 
 ## Maps of Content
 
@@ -160,3 +174,18 @@ blockquote line (`> …`) is the one-liner shown by `mocs` and `index`.
 (`Folder/Note` → `Folder/Note.md`), then unique basename (case-insensitive),
 then a frontmatter `aliases:` entry. `|display`, `#heading`, and `^block`
 suffixes are stripped first. `Templates/` is excluded. No fuzzy matching.
+
+## Reachability (`doctor --deep`)
+
+`vaultmem doctor --deep` is an opt-in, vault-wide scan (off by default; see
+README [doctor --deep](README.md#doctor---deep)) for notes that have fallen
+out of the graph: `ORPHAN` (zero inbound `[[wikilinks]]` from anywhere else in
+the vault) and `UNINDEXED` (absent from both the primary vault's Agent Index
+and every MOC's outbound links). `Home.md`, `MOCs/`, `Templates/`, and
+anything under `_archive/` are excluded as candidates — they are hubs,
+retired notes, or templates, not orphans by any useful definition. `Sessions/`
+and `Projects/` are excluded too: those notes are discovered through the
+Project→Session lifecycle tier (`sessions`/`projects`/`project <name>`), not
+through the wikilink graph or the Agent Index/MOC system — nothing elsewhere
+in this document requires a Session or Project to be MOC-linked or
+Agent-Index-listed, so `--deep` does not require it either.

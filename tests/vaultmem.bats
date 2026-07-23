@@ -1096,3 +1096,213 @@ EOF
   run "$OM" doctor
   [ "$status" -eq 3 ]
 }
+
+# --- doctor INDEX-DRIFT (P2: Project<->Session index drift) ---------------------
+
+@test "doctor INDEX-DRIFT: '(status: active)' row disagrees with the session's actual status: fires" {
+  write_healthy_session drift-thread
+  sed -i.bak 's/^status: active/status: parked/' "$OBS_JAY/Sessions/drift-thread/_index.md"
+  mkdir -p "$OBS_JAY/Projects"
+  cat >"$OBS_JAY/Projects/Demo.md" <<'EOF'
+---
+type: project
+status: active
+---
+# Demo
+
+## Sessions
+- [[drift-thread]] — testing (status: active)
+EOF
+  run "$OM" doctor
+  [ "$status" -eq 2 ]
+  [[ "$output" == *"INDEX-DRIFT"* ]]
+  [[ "$output" == *"drift-thread"* ]]
+}
+
+@test "doctor INDEX-DRIFT: '(PROJ-123, active)' row shape disagrees with the session's actual status: fires" {
+  write_healthy_session ticket-thread
+  sed -i.bak 's/^status: active/status: done/' "$OBS_JAY/Sessions/ticket-thread/_index.md"
+  mkdir -p "$OBS_JAY/Projects"
+  cat >"$OBS_JAY/Projects/Demo.md" <<'EOF'
+---
+type: project
+status: active
+---
+# Demo
+
+## Sessions
+- [[ticket-thread]] — testing (PROJ-123, active)
+EOF
+  run "$OM" doctor
+  [ "$status" -eq 2 ]
+  [[ "$output" == *"INDEX-DRIFT"* ]]
+  [[ "$output" == *"ticket-thread"* ]]
+}
+
+@test "doctor INDEX-DRIFT: bare '(active)' row shape disagrees with the session's actual status: fires" {
+  write_healthy_session bare-thread
+  sed -i.bak 's/^status: active/status: parked/' "$OBS_JAY/Sessions/bare-thread/_index.md"
+  mkdir -p "$OBS_JAY/Projects"
+  cat >"$OBS_JAY/Projects/Demo.md" <<'EOF'
+---
+type: project
+status: active
+---
+# Demo
+
+## Sessions
+- [[bare-thread]] — testing (active)
+EOF
+  run "$OM" doctor
+  [ "$status" -eq 2 ]
+  [[ "$output" == *"INDEX-DRIFT"* ]]
+  [[ "$output" == *"bare-thread"* ]]
+}
+
+@test "doctor INDEX-DRIFT: does not fire when the row status token agrees with the session's status:" {
+  write_healthy_session agree-thread
+  mkdir -p "$OBS_JAY/Projects"
+  cat >"$OBS_JAY/Projects/Demo.md" <<'EOF'
+---
+type: project
+status: active
+---
+# Demo
+
+## Sessions
+- [[agree-thread]] — testing (status: active)
+EOF
+  run "$OM" doctor
+  [[ "$output" != *"INDEX-DRIFT"* ]]
+}
+
+@test "doctor INDEX-DRIFT: does not fire on an archived session whose row correctly reads 'archived'" {
+  write_healthy_session archived-thread
+  sed -i.bak 's/^status: active/status: done/' "$OBS_JAY/Sessions/archived-thread/_index.md"
+  mkdir -p "$OBS_JAY/Sessions/_archive"
+  mv "$OBS_JAY/Sessions/archived-thread" "$OBS_JAY/Sessions/_archive/archived-thread"
+  mkdir -p "$OBS_JAY/Projects"
+  cat >"$OBS_JAY/Projects/Demo.md" <<'EOF'
+---
+type: project
+status: active
+---
+# Demo
+
+## Sessions
+- [[archived-thread]] — testing (status: archived)
+EOF
+  run "$OM" doctor
+  [[ "$output" != *"INDEX-DRIFT"* ]]
+}
+
+# --- doctor --deep (P3: orphans + unindexed) ------------------------------------
+
+@test "doctor --deep ORPHAN: a note with zero inbound wikilinks fires" {
+  mkdir -p "$OBS_JAY/Notes"
+  printf -- '# Lonely Note\nno one links here.\n' >"$OBS_JAY/Notes/Lonely.md"
+  run "$OM" doctor --deep
+  [ "$status" -eq 2 ]
+  [[ "$output" == *"ORPHAN"* ]]
+  [[ "$output" == *"Lonely"* ]]
+}
+
+@test "doctor --deep ORPHAN: does not fire on a note linked from elsewhere in the vault" {
+  mkdir -p "$OBS_JAY/Notes"
+  printf -- '# Linked Note\ncontent.\n' >"$OBS_JAY/Notes/Linked.md"
+  printf -- '# Linker\nsee [[Linked]].\n' >"$OBS_JAY/Notes/Linker.md"
+  run "$OM" doctor --deep
+  echo "$output" | grep -qE '^\s*\[ORPHAN\]\s+Notes/Linked(\.md)?\s*$' && exit 1
+  true
+}
+
+@test "doctor --deep ORPHAN: skips Home.md, MOCs/, Templates/, and _archive/ (hubs/retired, not orphans)" {
+  mkdir -p "$OBS_JAY/MOCs" "$OBS_JAY/Templates" "$OBS_JAY/Sessions/_archive/old-thread" "$OBS_JAY/Projects/_archive"
+  printf -- '# MOC - Topic\n' >"$OBS_JAY/MOCs/MOC - Topic.md"
+  printf -- '# Session Template\n' >"$OBS_JAY/Templates/Session _index.md"
+  printf -- '---\nthread: old-thread\nstatus: done\n---\n# old-thread\n' >"$OBS_JAY/Sessions/_archive/old-thread/_index.md"
+  printf -- '---\ntype: project\nstatus: done\n---\n# Retired\n' >"$OBS_JAY/Projects/_archive/Retired.md"
+  run "$OM" doctor --deep
+  [[ "$output" != *"MOC - Topic"* ]]
+  [[ "$output" != *"Session Template"* ]]
+  [[ "$output" != *"old-thread"* ]]
+  [[ "$output" != *"Retired"* ]]
+}
+
+@test "doctor --deep skips live (non-archived) Sessions and Projects — they are discovered via the lifecycle tier, not the wikilink graph or Agent Index/MOC" {
+  mkdir -p "$OBS_JAY/Sessions/live-thread" "$OBS_JAY/Projects"
+  cat >"$OBS_JAY/Sessions/live-thread/_index.md" <<'EOF'
+---
+thread: live-thread
+status: active
+updated: 2026-07-20 10:00
+project: Demo
+aliases: [live-thread]
+---
+# 🟢 live-thread
+
+## Bookmark
+doing stuff
+EOF
+  cat >"$OBS_JAY/Projects/Demo.md" <<'EOF'
+---
+type: project
+status: active
+---
+# 🟢 Demo
+
+## Sessions
+- [[live-thread]] — testing (status: active)
+EOF
+  run "$OM" doctor --deep
+  [[ "$output" != *"ORPHAN"* ]]
+  [[ "$output" != *"UNINDEXED"* ]]
+  [ "$status" -eq 0 ]
+}
+
+@test "doctor --deep UNINDEXED: a note absent from both the Agent Index and every MOC fires" {
+  printf -- '---\nschema: 1\n---\n# Home\n<!-- AGENT-INDEX:START -->\n<!-- AGENT-INDEX:END -->\n' >"$OBS_JAY/Home.md"
+  mkdir -p "$OBS_JAY/Notes"
+  printf -- '# Unindexed Note\ncontent.\n' >"$OBS_JAY/Notes/Unindexed.md"
+  run "$OM" doctor --deep
+  [ "$status" -eq 2 ]
+  [[ "$output" == *"UNINDEXED"* ]]
+  [[ "$output" == *"Unindexed"* ]]
+}
+
+@test "doctor --deep UNINDEXED: does not fire on a note present in the Agent Index" {
+  # flo registers first in this suite's fixture config, so it is PRIMARY — the
+  # only vault the Agent-Index-membership branch is consulted for.
+  mkdir -p "$OBS_FLO/Notes"
+  printf -- '# Indexed Note\ncontent.\n' >"$OBS_FLO/Notes/Indexed.md"
+  cat >"$OBS_FLO/Home.md" <<'EOF'
+---
+schema: 1
+---
+# Home
+<!-- AGENT-INDEX:START -->
+### Section
+| [[Notes/Indexed]] | the summary |
+<!-- AGENT-INDEX:END -->
+EOF
+  run "$OM" doctor --deep
+  echo "$output" | grep -qE '^\s*\[UNINDEXED\]\s+Notes/Indexed(\.md)?\s*$' && exit 1
+  true
+}
+
+@test "doctor --deep UNINDEXED: does not fire on a note linked from a MOC" {
+  mkdir -p "$OBS_JAY/Notes" "$OBS_JAY/MOCs"
+  printf -- '# Moc Note\ncontent.\n' >"$OBS_JAY/Notes/MocNote.md"
+  printf -- '# MOC - Topic\nSee [[MocNote]].\n' >"$OBS_JAY/MOCs/MOC - Topic.md"
+  run "$OM" doctor --deep
+  echo "$output" | grep -qE '^\s*\[UNINDEXED\]\s+Notes/MocNote(\.md)?\s*$' && exit 1
+  true
+}
+
+@test "doctor --deep is not run by base doctor (no ORPHAN/UNINDEXED without --deep)" {
+  mkdir -p "$OBS_JAY/Notes"
+  printf -- '# Lonely Note\nno one links here.\n' >"$OBS_JAY/Notes/Lonely.md"
+  run "$OM" doctor
+  [[ "$output" != *"ORPHAN"* ]]
+  [[ "$output" != *"UNINDEXED"* ]]
+}
