@@ -786,7 +786,7 @@ cmd_doctor() {
 	# is exactly as load-bearing in a non-primary vault.
 	local schema_issues="" _sid _spath _srest
 	while IFS=$'\t' read -r _sid _spath _srest; do
-		[ -n "$_sid" ] && [ -n "$_spath" ] || continue
+		if [ -z "$_sid" ] || [ -z "$_spath" ]; then continue; fi
 		case "$SEL" in both) ;; "$_sid") ;; *) continue ;; esac
 		[ -d "$_spath" ] || continue
 		schema_issues="${schema_issues}$(_schema_scan "$_spath")
@@ -812,7 +812,7 @@ ${schema_issues}"
 	if [ "$deep" = 1 ]; then
 		local _did _dpath _drest _is_primary
 		while IFS=$'\t' read -r _did _dpath _drest; do
-			[ -n "$_did" ] && [ -n "$_dpath" ] || continue
+			if [ -z "$_did" ] || [ -z "$_dpath" ]; then continue; fi
 			case "$SEL" in both) ;; "$_did") ;; *) continue ;; esac
 			[ -d "$_dpath" ] || continue
 			_is_primary=0
@@ -1774,7 +1774,7 @@ _abs_path() {
 _vault_root_for_path() {
 	local abs="$1" _id _p _rest _pr
 	while IFS=$'\t' read -r _id _p _rest; do
-		[ -n "$_id" ] && [ -n "$_p" ] || continue
+		if [ -z "$_id" ] || [ -z "$_p" ]; then continue; fi
 		case "$abs" in
 		"$_p"/*)
 			printf '%s\n' "$_p"
