@@ -346,6 +346,139 @@ EOF
   [[ "$output" == *"none"* ]]
 }
 
+@test "dangling default output is unchanged (source -> target lines)" {
+  seed_graph
+  run "$OM" -v flo dangling
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"▸ Dangling wikilinks"* ]]
+  [[ "$output" != *"by target"* ]]
+  [[ "$output" == *"→ [[Architecture/Ghost]]"* ]]
+}
+
+@test "dangling --by-target aggregates by missing target with inbound counts, sorted descending" {
+  seed_graph
+  # A second reference to the same dangling target, from a different note, so
+  # the target's inbound count is 2 (MOC + Widget) vs. any other target's 0/1.
+  printf -- '\nAlso see [[Architecture/Ghost]].\n' >>"$OBS_FLO/Architecture/Widget.md"
+  run "$OM" -v flo dangling --by-target
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"▸ Dangling wikilinks — by target"* ]]
+  [[ "$output" == *"2  [[Architecture/Ghost]]"* ]]
+  # Aggregated: exactly one line for the target, not one per source note.
+  ghost_lines=$(printf '%s\n' "$output" | grep -c '\[\[Architecture/Ghost\]\]')
+  [ "$ghost_lines" -eq 1 ]
+}
+
+@test "dangling --by-target collapses case-variant targets into one row" {
+  seed_graph
+  # Same missing note referenced with two different casings from two
+  # different notes. _resolve_path resolves wikilinks case-insensitively
+  # (find -iname), so these are the same dangling target and must collapse
+  # into a single aggregated row with count 2, not split into two rows of 1.
+  printf -- '\nAlso see [[Architecture/ghost]].\n' >>"$OBS_FLO/Architecture/Widget.md"
+  run "$OM" -v flo dangling --by-target
+  [ "$status" -eq 0 ]
+  ghost_lines=$(printf '%s\n' "$output" | grep -ic '\[\[Architecture/Ghost\]\]')
+  [ "$ghost_lines" -eq 1 ]
+  [[ "$output" == *"2  [[Architecture/Ghost]]"* ]]
+}
+
+@test "dangling --by-target on a clean vault reports none" {
+  mkdir -p "$OBS_FLO"
+  printf -- '# Notes\nno links here\n' >"$OBS_FLO/clean.md"
+  run "$OM" -v flo dangling --by-target
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"none"* ]]
+}
+
+@test "dangling --by-target restricts to a single note when given one" {
+  seed_graph
+  run "$OM" -v flo dangling --by-target "Demo"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"[[Architecture/Ghost]]"* ]]
+}
+
+# --- session resume: bookmark ------------------------------------------------
+
+seed_bookmark_session() {
+  mkdir -p "$OBS_JAY/Sessions/live-thread" "$OBS_JAY/Sessions/_archive/old-thread"
+  cat >"$OBS_JAY/Sessions/live-thread/_index.md" <<'EOF'
+---
+thread: live-thread
+status: active
+updated: 2026-07-20
+aliases: [live-thread]
+---
+# live-thread
+
+## Bookmark
+Last: did X
+Next: do Y
+
+## Pinned
+- constant: some value
+
+## Work log
+- did stuff
+
+## Decisions
+none
+EOF
+  cat >"$OBS_JAY/Sessions/_archive/old-thread/_index.md" <<'EOF'
+---
+thread: old-thread
+status: done
+updated: 2026-06-01
+aliases: [old-thread]
+---
+# old-thread
+
+## Bookmark
+Last: closed out
+Next: n/a
+
+## Pinned
+- constant: archived-const
+EOF
+}
+
+@test "bookmark prints only the Bookmark and Pinned sections" {
+  seed_bookmark_session
+  run "$OM" -v jay bookmark live-thread
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"## Bookmark"* ]]
+  [[ "$output" == *"Last: did X"* ]]
+  [[ "$output" == *"## Pinned"* ]]
+  [[ "$output" == *"constant: some value"* ]]
+  [[ "$output" != *"## Work log"* ]]
+  [[ "$output" != *"did stuff"* ]]
+  [[ "$output" != *"## Decisions"* ]]
+}
+
+@test "bookmark resolves an archived session under Sessions/_archive/" {
+  seed_bookmark_session
+  run "$OM" -v jay bookmark old-thread
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"## Bookmark"* ]]
+  [[ "$output" == *"Last: closed out"* ]]
+  [[ "$output" == *"## Pinned"* ]]
+  [[ "$output" == *"archived-const"* ]]
+}
+
+@test "bookmark errors clearly (nonzero) on an unknown thread" {
+  seed_bookmark_session
+  run "$OM" -v jay bookmark no-such-thread
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"no such session"* ]]
+  [[ "$output" == *"no-such-thread"* ]]
+}
+
+@test "bookmark errors (nonzero) with no thread argument" {
+  seed_bookmark_session
+  run "$OM" -v jay bookmark
+  [ "$status" -ne 0 ]
+}
+
 # --- project tier: projects / project verbs --------------------------------
 
 # Seed a vault with one Project note and three sessions (2 under it, 1 orphan).

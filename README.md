@@ -114,6 +114,7 @@ vaultmem links <note>       outbound links, each resolved or flagged dangling
 vaultmem backlinks <note>   notes that link TO this one (alias-aware)
 vaultmem neighbors <note>   outbound + backlinks together (one-hop view)
 vaultmem dangling [note]    broken [[links]] — one note, or the whole vault
+vaultmem dangling --by-target  same scan, aggregated by missing target + inbound count
 ```
 
 **router**
@@ -129,6 +130,7 @@ vaultmem sessions           the grouped picker (for the SessionStart hook)
 vaultmem projects           Project notes + active/total session counts
 vaultmem project <name>     one project: repos, linear, MOC, sessions by status
 vaultmem status             one-line index summary + groom-nudge count (fail-quiet)
+vaultmem bookmark <thread>  print only ## Bookmark + ## Pinned from a session's _index.md
 ```
 
 **hygiene · setup**

@@ -44,9 +44,16 @@
 #   vaultmem links <note>       outbound [[wikilinks]] from a note → resolved paths
 #   vaultmem backlinks <note>   notes that link TO this one (reverse edges)
 #   vaultmem neighbors <note>   one-hop graph view: outbound + backlinks together
+#   vaultmem dangling [note]    broken [[links]] — one note, or the whole vault
+#   vaultmem dangling --by-target  same scan, aggregated by missing target + inbound count
+#                               (most-wanted missing notes — what to write next)
 #     <name>/<note> = a wikilink target (basename, Folder/Name, or alias) or a file path.
 #     Traversal protocol: start at a MOC/Home hub → `links` to fan out → read the
 #     1–2 most relevant → `backlinks` to climb back / find related. Stop at ~2 hops.
+#
+# Session resume:
+#   vaultmem bookmark <thread>  print only ## Bookmark + ## Pinned from a session's
+#                               _index.md — the resumable state, without the whole file
 #
 # Design notes:
 #   - Curated hits (Home.md Agent Index + MOCs/) come first: they are
@@ -1440,7 +1447,22 @@ cmd_neighbors() {
 
 # Dangling-link hygiene. With a note arg → that note's broken links. Without →
 # scan the vault(s) for every broken [[link]] (the anti-fabrication check).
+# --by-target (leading flag, may precede a note arg) aggregates the same scan
+# by missing target instead of by source note: each dangling target once, with
+# its inbound (broken-referencing) count, sorted count-descending — "most-
+# wanted missing notes", i.e. what to write next.
 cmd_dangling() {
+	local by_target=0
+	case "$1" in
+	--by-target)
+		by_target=1
+		shift
+		;;
+	"--by-target "*)
+		by_target=1
+		set -- "${1#--by-target }"
+		;;
+	esac
 	local -a files=()
 	if [ -n "$1" ]; then
 		local n
@@ -1451,6 +1473,33 @@ cmd_dangling() {
 		local r
 		while IFS= read -r r; do roots+=("$r"); done < <(_link_roots)
 		while IFS= read -r f; do files+=("$f"); done < <(rg -lN '\[\[[^]]+\]\]' --glob '*.md' --glob '!Templates/**' "${roots[@]}" 2>/dev/null)
+	fi
+	if [ "$by_target" -eq 1 ]; then
+		printf '%s▸ Dangling wikilinks — by target%s\n' "$B" "$R"
+		local f t missing
+		missing=$(
+			for f in "${files[@]}"; do
+				while IFS= read -r t; do
+					[ -n "$t" ] || continue
+					_resolve_path "$t" >/dev/null 2>&1 || printf '%s\n' "$t"
+				done < <(_outbound_targets "$f")
+			done
+		)
+		if [ -z "$missing" ]; then
+			printf '  (none — all links resolve ✓)\n'
+		else
+			# Group by case-folded target (matches _resolve_path's case-insensitive
+			# lookup) so e.g. [[Widget]] and [[widget]] count as one missing note
+			# instead of splintering into two diluted rows. Displays the
+			# first-seen original-case spelling as the representative.
+			printf '%s\n' "$missing" | awk '
+				{ key = tolower($0); count[key]++; if (!(key in rep)) rep[key] = $0 }
+				END { for (k in count) printf "%d\t%s\n", count[k], rep[k] }
+			' | sort -t $'\t' -k1,1rn -k2,2f | while IFS=$'\t' read -r count target; do
+				printf '  %3d  [[%s]]\n' "$count" "$target"
+			done
+		fi
+		return 0
 	fi
 	printf '%s▸ Dangling wikilinks%s\n' "$B" "$R"
 	local found=0 f t
@@ -1464,6 +1513,51 @@ cmd_dangling() {
 		done < <(_outbound_targets "$f")
 	done
 	[ "$found" -eq 0 ] && printf '  (none — all links resolve ✓)\n'
+	return 0
+}
+
+# Resolve a bare thread name to its _index.md, across all selected vault
+# roots. Tries the live path first (Sessions/<thread>/_index.md), then the
+# archived path (Sessions/_archive/<thread>/_index.md) — a groomed/done
+# session's Bookmark is still a legitimate resume artifact to re-anchor from,
+# unlike the listing surfaces (_session_rows/groom/sessions) which exclude
+# _archive/ on purpose to keep the active picker uncluttered. Prints the path
+# and returns 0, else returns 1.
+_resolve_session_path() {
+	local thread="$1" r p
+	[ -n "$thread" ] || return 1
+	local -a roots=()
+	while IFS= read -r r; do roots+=("$r"); done < <(_link_roots)
+	for p in "${roots[@]/%//Sessions/$thread/_index.md}"; do
+		[ -f "$p" ] && {
+			printf '%s\n' "$p"
+			return 0
+		}
+	done
+	for p in "${roots[@]/%//Sessions/_archive/$thread/_index.md}"; do
+		[ -f "$p" ] && {
+			printf '%s\n' "$p"
+			return 0
+		}
+	done
+	return 1
+}
+
+# Print only the `## Bookmark` and `## Pinned` sections of a session's
+# _index.md — the two blocks the session skill designates as resumable state
+# (see SCHEMA.md § ## Bookmark, skills/session/SKILL.md), so an agent can
+# re-anchor without reading the whole file. NOT fail-quiet: an unknown thread
+# is a real error (a typo'd resume target should not silently print nothing).
+cmd_bookmark() {
+	local thread="$1" f
+	[ -n "$thread" ] || die "usage: vaultmem bookmark <thread>"
+	f=$(_resolve_session_path "$thread") || die "no such session: $thread (looked in Sessions/ and Sessions/_archive/)"
+	printf '%s▸ Bookmark: %s%s\n' "$B" "$thread" "$R"
+	awk '
+    /^## (Bookmark|Pinned)[[:space:]]*$/{show=1; print; next}
+    show && /^## /{show=0}
+    show{print}
+  ' "$f"
 	return 0
 }
 
@@ -1622,5 +1716,6 @@ links) cmd_links "${ARGS[*]:1}" ;;
 backlinks) cmd_backlinks "${ARGS[*]:1}" ;;
 neighbors) cmd_neighbors "${ARGS[*]:1}" ;;
 dangling) cmd_dangling "${ARGS[*]:1}" ;;
+bookmark) cmd_bookmark "${ARGS[*]:1}" ;;
 *) cmd_search "${ARGS[*]}" ;;
 esac
