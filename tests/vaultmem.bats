@@ -808,3 +808,291 @@ EOF
   [ "$status" -ne 0 ]
   [[ "$output" == *"nested section"* ]]
 }
+
+# --- doctor schema lints (P1) + exit codes (A4) ---------------------------------
+# Reusable healthy fixture: an active session that follows the real session
+# skill template exactly (aliases set, updated set, H1 glyph matches status,
+# Bookmark filled in, every other spine heading intentionally empty) — every
+# schema-lint test below starts from this and corrupts exactly one thing, so a
+# passing "does NOT fire" test proves no false positive on a normal session.
+write_healthy_session() { # $1 = thread name
+  local t="$1"
+  mkdir -p "$OBS_JAY/Sessions/$t"
+  cat >"$OBS_JAY/Sessions/$t/_index.md" <<EOF
+---
+thread: $t
+project: Demo
+status: active
+aliases: [$t]
+updated: $(days_ago 0)
+---
+# 🟢 $t
+**Goal:** test session
+
+## Bookmark
+Last: did a thing · Next: do another · Open: none
+
+## Pinned
+
+## Work log
+
+## Decisions
+
+## Git state
+| Repo | Branch / worktree | PR | State |
+|---|---|---|---|
+EOF
+}
+
+@test "doctor: clean healthy session + project produce no schema findings" {
+  write_healthy_session good-thread
+  mkdir -p "$OBS_JAY/Projects"
+  cat >"$OBS_JAY/Projects/🟢 Demo.md" <<'EOF'
+---
+type: project
+status: active
+---
+# 🟢 Demo
+
+## Sessions
+- [[good-thread]] — testing (status: active)
+EOF
+  run "$OM" doctor
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"clean"* ]]
+}
+
+@test "doctor NOALIAS: session _index.md missing aliases: [<thread>] fires" {
+  write_healthy_session no-alias-thread
+  # drop the aliases line
+  sed -i.bak '/^aliases:/d' "$OBS_JAY/Sessions/no-alias-thread/_index.md"
+  run "$OM" doctor
+  [ "$status" -eq 2 ]
+  [[ "$output" == *"NOALIAS"* ]]
+  [[ "$output" == *"no-alias-thread"* ]]
+}
+
+@test "doctor NOALIAS: does not fire when aliases include the thread name" {
+  write_healthy_session has-alias-thread
+  run "$OM" doctor
+  [[ "$output" != *"NOALIAS"* ]]
+}
+
+@test "doctor GLYPH-DESYNC: session H1 glyph disagreeing with status: fires" {
+  write_healthy_session desync-thread
+  sed -i.bak 's/^# 🟢 desync-thread/# 💤 desync-thread/' "$OBS_JAY/Sessions/desync-thread/_index.md"
+  run "$OM" doctor
+  [ "$status" -eq 2 ]
+  [[ "$output" == *"GLYPH-DESYNC"* ]]
+  [[ "$output" == *"desync-thread"* ]]
+}
+
+@test "doctor GLYPH-DESYNC: a missing H1 glyph on a status-bearing session fires" {
+  write_healthy_session noglyph-thread
+  sed -i.bak 's/^# 🟢 noglyph-thread/# noglyph-thread/' "$OBS_JAY/Sessions/noglyph-thread/_index.md"
+  run "$OM" doctor
+  [ "$status" -eq 2 ]
+  [[ "$output" == *"GLYPH-DESYNC"* ]]
+}
+
+@test "doctor GLYPH-DESYNC: project filename+H1 glyph disagreeing with status: fires" {
+  mkdir -p "$OBS_JAY/Projects"
+  cat >"$OBS_JAY/Projects/🟢 Widget.md" <<'EOF'
+---
+type: project
+status: parked
+---
+# 🟢 Widget
+EOF
+  run "$OM" doctor
+  [ "$status" -eq 2 ]
+  [[ "$output" == *"GLYPH-DESYNC"* ]]
+  [[ "$output" == *"Widget"* ]]
+}
+
+@test "doctor GLYPH-DESYNC: does not fire when session H1 glyph matches status" {
+  write_healthy_session synced-thread
+  run "$OM" doctor
+  [[ "$output" != *"GLYPH-DESYNC"* ]]
+}
+
+# The filename glyph is OPTIONAL (SCHEMA.md § Status-glyph invariants: a Project
+# filename *may* carry one). A glyph-less filename with a correct H1 is fully
+# schema-legal and must stay clean — otherwise the lint fires on every vault
+# that never adopted the filename convention.
+@test "doctor GLYPH-DESYNC: does not fire on a project with no filename glyph" {
+  mkdir -p "$OBS_JAY/Projects"
+  cat >"$OBS_JAY/Projects/Widget.md" <<'EOF'
+---
+type: project
+status: active
+---
+# 🟢 Widget
+EOF
+  run "$OM" doctor
+  [ "$status" -eq 0 ]
+  [[ "$output" != *"GLYPH-DESYNC"* ]]
+}
+
+@test "doctor GLYPH-DESYNC: fires on a wrong filename glyph even when the H1 is right" {
+  mkdir -p "$OBS_JAY/Projects"
+  cat >"$OBS_JAY/Projects/💤 Widget.md" <<'EOF'
+---
+type: project
+status: active
+---
+# 🟢 Widget
+EOF
+  run "$OM" doctor
+  [ "$status" -eq 2 ]
+  [[ "$output" == *"GLYPH-DESYNC"* ]]
+}
+
+@test "doctor GLYPHED-FOLDER: a session folder carrying a status glyph fires" {
+  write_healthy_session "glyphed-folder-thread"
+  mv "$OBS_JAY/Sessions/glyphed-folder-thread" "$OBS_JAY/Sessions/🟢 glyphed-folder-thread"
+  run "$OM" doctor
+  [ "$status" -eq 2 ]
+  [[ "$output" == *"GLYPHED-FOLDER"* ]]
+  [[ "$output" == *"glyphed-folder-thread"* ]]
+}
+
+@test "doctor GLYPHED-FOLDER: does not fire on a plain (unglyphed) session folder" {
+  write_healthy_session plain-folder-thread
+  run "$OM" doctor
+  [[ "$output" != *"GLYPHED-FOLDER"* ]]
+}
+
+@test "doctor NO-UPDATED: session _index.md missing updated: fires" {
+  write_healthy_session no-updated-thread
+  sed -i.bak '/^updated:/d' "$OBS_JAY/Sessions/no-updated-thread/_index.md"
+  run "$OM" doctor
+  [ "$status" -eq 2 ]
+  [[ "$output" == *"NO-UPDATED"* ]]
+  [[ "$output" == *"no-updated-thread"* ]]
+}
+
+@test "doctor NO-UPDATED: an unparseable updated: value fires" {
+  write_healthy_session bad-updated-thread
+  sed -i.bak 's/^updated:.*/updated: not-a-date/' "$OBS_JAY/Sessions/bad-updated-thread/_index.md"
+  run "$OM" doctor
+  [ "$status" -eq 2 ]
+  [[ "$output" == *"NO-UPDATED"* ]]
+}
+
+@test "doctor NO-UPDATED: does not fire when updated: is a valid date" {
+  write_healthy_session valid-updated-thread
+  run "$OM" doctor
+  [[ "$output" != *"NO-UPDATED"* ]]
+}
+
+@test "doctor MISSING-FM: session missing thread/status/updated all fire together" {
+  mkdir -p "$OBS_JAY/Sessions/bare-thread"
+  printf -- '---\nproject: Demo\n---\n# bare-thread\n' >"$OBS_JAY/Sessions/bare-thread/_index.md"
+  run "$OM" doctor
+  [ "$status" -eq 2 ]
+  [[ "$output" == *"MISSING-FM"* ]]
+  [[ "$output" == *"bare-thread"* ]]
+  [[ "$output" == *"thread"* ]]
+  [[ "$output" == *"status"* ]]
+  [[ "$output" == *"updated"* ]]
+}
+
+@test "doctor MISSING-FM: project missing type: and status: fires" {
+  mkdir -p "$OBS_JAY/Projects"
+  printf -- '# Untyped Project\n' >"$OBS_JAY/Projects/Untyped.md"
+  run "$OM" doctor
+  [ "$status" -eq 2 ]
+  [[ "$output" == *"MISSING-FM"* ]]
+  [[ "$output" == *"Untyped"* ]]
+  [[ "$output" == *"type"* ]]
+}
+
+@test "doctor MISSING-FM: does not fire when all required fields are present" {
+  write_healthy_session complete-thread
+  mkdir -p "$OBS_JAY/Projects"
+  cat >"$OBS_JAY/Projects/🟢 Demo2.md" <<'EOF'
+---
+type: project
+status: active
+---
+# 🟢 Demo2
+EOF
+  run "$OM" doctor
+  [[ "$output" != *"MISSING-FM"* ]]
+}
+
+@test "doctor EMPTY-BOOKMARK: an active session with an empty Bookmark fires" {
+  write_healthy_session empty-bookmark-thread
+  # Blank out only the Bookmark body, leaving the other intentionally-empty
+  # template headings (Pinned/Work log/Decisions/Git state) as-is.
+  awk '
+    /^## Bookmark/{print; print ""; f=1; next}
+    f && /^## /{f=0}
+    f{next}
+    {print}
+  ' "$OBS_JAY/Sessions/empty-bookmark-thread/_index.md" >"$OBS_JAY/Sessions/empty-bookmark-thread/_index.md.new"
+  mv "$OBS_JAY/Sessions/empty-bookmark-thread/_index.md.new" "$OBS_JAY/Sessions/empty-bookmark-thread/_index.md"
+  run "$OM" doctor
+  [ "$status" -eq 2 ]
+  [[ "$output" == *"EMPTY-BOOKMARK"* ]]
+  [[ "$output" == *"empty-bookmark-thread"* ]]
+}
+
+@test "doctor EMPTY-BOOKMARK: does not fire on a healthy new session (Pinned/Work log/Decisions/Git state empty by template, Bookmark filled)" {
+  write_healthy_session fresh-thread
+  run "$OM" doctor
+  [[ "$output" != *"EMPTY-BOOKMARK"* ]]
+}
+
+@test "doctor EMPTY-BOOKMARK: does not fire on a parked session with an empty Bookmark (active-only lint)" {
+  write_healthy_session parked-empty-bookmark
+  sed -i.bak 's/^status: active/status: parked/; s/^# 🟢 parked-empty-bookmark/# 💤 parked-empty-bookmark/' \
+    "$OBS_JAY/Sessions/parked-empty-bookmark/_index.md"
+  awk '
+    /^## Bookmark/{print; print ""; f=1; next}
+    f && /^## /{f=0}
+    f{next}
+    {print}
+  ' "$OBS_JAY/Sessions/parked-empty-bookmark/_index.md" >"$OBS_JAY/Sessions/parked-empty-bookmark/_index.md.new"
+  mv "$OBS_JAY/Sessions/parked-empty-bookmark/_index.md.new" "$OBS_JAY/Sessions/parked-empty-bookmark/_index.md"
+  run "$OM" doctor
+  [[ "$output" != *"EMPTY-BOOKMARK"* ]]
+}
+
+@test "doctor exit codes: 0 = clean" {
+  write_healthy_session clean-thread
+  run "$OM" doctor
+  [ "$status" -eq 0 ]
+}
+
+@test "doctor exit codes: 1 = config errors only, no drift" {
+  cat >"$VAULTMEM_CONFIG" <<EOF
+[vault.jay]
+label = "Personal"
+path = "$OBS_JAY"
+bogus = "nope"
+EOF
+  run "$OM" doctor
+  [ "$status" -eq 1 ]
+}
+
+@test "doctor exit codes: 2 = schema lint drift only, config clean" {
+  write_healthy_session drift-only-thread
+  sed -i.bak '/^aliases:/d' "$OBS_JAY/Sessions/drift-only-thread/_index.md"
+  run "$OM" doctor
+  [ "$status" -eq 2 ]
+}
+
+@test "doctor exit codes: 3 = both config errors and drift (bitwise OR of 1 and 2)" {
+  write_healthy_session both-thread
+  sed -i.bak '/^aliases:/d' "$OBS_JAY/Sessions/both-thread/_index.md"
+  cat >"$VAULTMEM_CONFIG" <<EOF
+[vault.jay]
+label = "Personal"
+path = "$OBS_JAY"
+bogus = "nope"
+EOF
+  run "$OM" doctor
+  [ "$status" -eq 3 ]
+}

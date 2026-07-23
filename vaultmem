@@ -16,7 +16,11 @@
 #   vaultmem index              browse the Agent Index: section counts + MOCs (the shape)
 #   vaultmem index <section>    expand one section (e.g. index architecture); rows capped
 #   vaultmem index all          full flat dump (escape hatch; rows still width-capped)
-#   vaultmem doctor             flag drifted index rows: BROKEN (missing/0-byte note) + STALE (note reverted/done but row reads live); also lint the config
+#   vaultmem doctor             flag drifted index rows + vault schema lints; also lint the config
+#                               index drift: BROKEN (missing/0-byte note) + STALE (note reverted/done but row reads live)
+#                               schema lints (walk Sessions/Projects): NOALIAS, GLYPH-DESYNC,
+#                               GLYPHED-FOLDER, NO-UPDATED, MISSING-FM, EMPTY-BOOKMARK (see SCHEMA.md)
+#                               exit codes: 0=clean 1=config errors 2=drift/lint findings 3=both
 #   vaultmem mocs               list Maps of Content (the domain hubs)
 #   vaultmem vaults             print vault registry (id, path, MOC, routing rules)
 #   vaultmem path <id>          print the vault root path (for V="$(…)" in scripts)
@@ -371,6 +375,150 @@ _doctor_scan() { # $1=vault root; prints "CLASS\tnote\tdetail" lines, one per is
 		esac
 	done < <(_index_row_targets)
 }
+# Map a status word to its required presentation glyph. Empty for an
+# unrecognized status (nothing to compare against).
+_status_glyph() {
+	case "$1" in
+	active) printf '🟢' ;;
+	parked) printf '💤' ;;
+	done) printf '✅' ;;
+	esac
+}
+
+# First-line H1 glyph of a note ("# 🟢 Foo" → "🟢"), or empty if the H1 has
+# no leading glyph (or no H1 at all).
+_h1_glyph() {
+	local h1 stripped
+	h1=$(awk '/^# /{print; exit}' "$1")
+	h1="${h1#\# }"
+	stripped=$(_strip_status_glyph "$h1")
+	[ "$stripped" != "$h1" ] && printf '%s' "${h1%% *}"
+}
+
+# Schema lints — walk Sessions/ and Projects/ directly (not the Agent Index),
+# so they catch structural corruption an index row would never mention. Kept
+# to a couple of awk passes per note: no vault-wide full-text scan (that is a
+# later --deep wave, not this one), so `doctor`/`groom` (which calls doctor)
+# stay fast.
+_schema_scan() { # $1=vault root; prints "CLASS\tnote\tdetail" lines
+	local root="$1" f dir name thread status updated aliases_line has_alias
+	local h1g want_g fmiss
+
+	# Sessions -----------------------------------------------------------------
+	while IFS= read -r f; do
+		[ -n "$f" ] || continue
+		dir=$(dirname "$f")
+		case "$dir" in "$root/Sessions/_archive"/*) continue ;; esac
+		name=$(basename "$dir")
+		[ "$name" = "Sessions" ] && continue
+
+		# GLYPHED-FOLDER — the session folder itself carries a status glyph.
+		if [ "$(_strip_status_glyph "$name")" != "$name" ]; then
+			printf 'GLYPHED-FOLDER\tSessions/%s\tfolder name carries a status glyph; vaultmem keys sessions by folder basename == thread — this desyncs the picker and groom\n' "$name"
+		fi
+
+		thread=$(_fm_field "$f" thread)
+		status=$(_fm_field "$f" status | tr '[:upper:]' '[:lower:]')
+		updated=$(_fm_field "$f" updated)
+
+		# MISSING-FM — required session frontmatter: thread, status, updated.
+		fmiss=""
+		[ -n "$thread" ] || fmiss="${fmiss}thread "
+		[ -n "$status" ] || fmiss="${fmiss}status "
+		[ -n "$updated" ] || fmiss="${fmiss}updated "
+		[ -n "$fmiss" ] && printf 'MISSING-FM\tSessions/%s\tmissing frontmatter: %s\n' "$name" "$fmiss"
+
+		# NOALIAS — aliases: [] must contain the thread name (== folder name),
+		# because the file is _index.md, not <thread>.md, so [[<thread>]]
+		# back-links from the Project note only resolve through the alias.
+		aliases_line=$(awk '
+      NR==1 && $0!="---"{exit} NR==1{next}
+      $0=="---"{exit}
+      /^aliases:[[:space:]]*\[/{print; exit}
+    ' "$f")
+		has_alias=0
+		if [ -n "$aliases_line" ]; then
+			has_alias=$(awk -v want="$name" '{
+        s=$0; sub(/^aliases:[[:space:]]*\[/,"",s); sub(/\].*/,"",s)
+        n=split(s,a,",")
+        for(i=1;i<=n;i++){
+          v=a[i]; gsub(/^[[:space:]"'"'"']+|[[:space:]"'"'"']+$/,"",v)
+          if(v==want){print 1; exit}
+        }
+      }' <<<"$aliases_line")
+		fi
+		[ "${has_alias:-0}" = 1 ] || printf 'NOALIAS\tSessions/%s\tmissing aliases: [%s] — Project back-links [[%s]] will not resolve\n' "$name" "$name" "$name"
+
+		# NO-UPDATED — missing/unparseable `updated:`.
+		if [ -z "$updated" ] || [ -z "$(_to_epoch "$updated")" ]; then
+			printf 'NO-UPDATED\tSessions/%s\tmissing or unparseable updated: — staleness math falls back to file mtime\n' "$name"
+		fi
+
+		# GLYPH-DESYNC — session H1 glyph vs status: (H1 only; folder is
+		# checked above, filename is never glyphed for sessions).
+		if [ -n "$status" ]; then
+			want_g=$(_status_glyph "$status")
+			if [ -n "$want_g" ]; then
+				h1g=$(_h1_glyph "$f")
+				[ "$h1g" = "$want_g" ] || printf 'GLYPH-DESYNC\tSessions/%s\tH1 glyph "%s" does not match status: %s (want %s)\n' "$name" "${h1g:-<none>}" "$status" "$want_g"
+			fi
+		fi
+
+		# EMPTY-BOOKMARK — active sessions only; every other template
+		# heading (Pinned/Work log/Decisions/Git state) ships intentionally
+		# empty on a fresh session, so only Bookmark is linted, and only
+		# when status is active.
+		if [ "$status" = active ]; then
+			if ! awk '
+        /^## Bookmark[[:space:]]*$/{f=1; next}
+        f && /^## /{exit}
+        f && /[^[:space:]]/{found=1; exit}
+        END{exit !found}
+      ' "$f"; then
+				printf 'EMPTY-BOOKMARK\tSessions/%s\t## Bookmark is empty on an active session\n' "$name"
+			fi
+		fi
+	done < <(find "$root/Sessions" -maxdepth 2 -name "_index.md" -type f 2>/dev/null)
+
+	# Projects -------------------------------------------------------------------
+	# type=moc notes (MOCs living alongside Projects, if any) and anything not a
+	# plain file are out of scope; a missing `type:` is itself a lint finding
+	# below, so unlike the other project-consuming commands this loop does NOT
+	# gate on type=project — that would make a note missing `type:` invisible.
+	local ptype
+	while IFS= read -r f; do
+		[ -e "$f" ] || continue
+		ptype=$(_fm_field "$f" type)
+		[ "$ptype" = moc ] && continue
+		name=$(basename "${f%.md}")
+		status=$(_fm_field "$f" status | tr '[:upper:]' '[:lower:]')
+
+		# MISSING-FM — required project frontmatter: type, status.
+		fmiss=""
+		[ "$ptype" = project ] || fmiss="${fmiss}type "
+		[ -n "$status" ] || fmiss="${fmiss}status "
+		[ -n "$fmiss" ] && printf 'MISSING-FM\tProjects/%s\tmissing frontmatter: %s\n' "$name" "$fmiss"
+
+		# GLYPH-DESYNC — a glyph that disagrees with status:. The filename glyph is
+		# optional (SCHEMA.md § Status-glyph invariants: a Project filename *may*
+		# carry one), so it is only compared when actually present; the H1 glyph is
+		# required and always compared.
+		if [ -n "$status" ]; then
+			want_g=$(_status_glyph "$status")
+			if [ -n "$want_g" ]; then
+				local file_g=""
+				[ "$(_strip_status_glyph "$name")" != "$name" ] && file_g="${name%% *}"
+				h1g=$(_h1_glyph "$f")
+				if { [ -n "$file_g" ] && [ "$file_g" != "$want_g" ]; } || [ "$h1g" != "$want_g" ]; then
+					printf 'GLYPH-DESYNC\tProjects/%s\tfilename glyph "%s" / H1 glyph "%s" does not match status: %s (want %s)\n' "$name" "${file_g:-<none>}" "${h1g:-<none>}" "$status" "$want_g"
+				fi
+			fi
+		fi
+	done < <(printf '%s\n' "$root/Projects"/*.md)
+}
+
+# Exit codes (bitwise, so they compose): 0=clean 1=config errors 2=drift/lint
+# findings (index drift and/or schema lints) 3=both.
 cmd_doctor() {
 	local rc=0
 	# 1) config lint — the accepted TOML subset is enforced here.
@@ -379,22 +527,48 @@ cmd_doctor() {
 		cfg_issues=$(_lint_config "$VAULTMEM_CONFIG") || {
 			printf '%s▸ Config errors in %s%s\n' "$B" "$VAULTMEM_CONFIG" "$R"
 			printf '%s\n' "$cfg_issues" | sed 's/^/  /'
-			rc=1
+			rc=$((rc | 1))
 		}
 	fi
-	# 2) index drift on the primary vault.
+	# 2) index drift on the primary vault (Agent Index row rot).
+	local drift_issues=""
 	if [ -f "$PRIMARY_HOME" ]; then
-		local issues
-		issues=$(_doctor_scan "$PRIMARY")
-		if [ -z "$issues" ]; then
-			printf 'vaultmem doctor: index is clean (no broken or stale rows).\n'
+		drift_issues=$(_doctor_scan "$PRIMARY")
+	fi
+	# 3) schema lints — every configured vault's Sessions/Projects, not just the
+	# primary: structural corruption (a glyphed session folder, a missing alias)
+	# is exactly as load-bearing in a non-primary vault.
+	local schema_issues="" _sid _spath _srest
+	while IFS=$'\t' read -r _sid _spath _srest; do
+		[ -n "$_sid" ] && [ -n "$_spath" ] || continue
+		case "$SEL" in both) ;; "$_sid") ;; *) continue ;; esac
+		[ -d "$_spath" ] || continue
+		schema_issues="${schema_issues}$(_schema_scan "$_spath")
+"
+	done <<<"$_REG"
+	schema_issues=$(printf '%s\n' "$schema_issues" | grep -v '^[[:space:]]*$' || true)
+
+	local issues=""
+	[ -n "$drift_issues" ] && issues="$drift_issues"
+	if [ -n "$schema_issues" ]; then
+		if [ -n "$issues" ]; then
+			issues="${issues}
+${schema_issues}"
 		else
-			local nb ns
-			nb=$(printf '%s\n' "$issues" | grep -c '^BROKEN')
-			ns=$(printf '%s\n' "$issues" | grep -c '^STALE')
-			printf '%s▸ Index drift — %s broken, %s stale (review; edit Home.md rows to fix)%s\n' "$B" "$nb" "$ns" "$R"
-			printf '%s\n' "$issues" | awk -F'\t' '{printf "  [%s] %s\n        %s\n", $1, $2, $3}'
+			issues="$schema_issues"
 		fi
+	fi
+
+	if [ -z "$issues" ]; then
+		printf 'vaultmem doctor: clean (no broken/stale rows, no schema lint findings).\n'
+	else
+		rc=$((rc | 2))
+		local nb ns nc
+		nb=$(printf '%s\n' "$issues" | grep -c '^BROKEN')
+		ns=$(printf '%s\n' "$issues" | grep -c '^STALE')
+		nc=$(printf '%s\n' "$issues" | grep -vc '^BROKEN\|^STALE\|^[[:space:]]*$')
+		printf '%s▸ Index drift — %s broken, %s stale; %s schema lint finding(s) (review)%s\n' "$B" "$nb" "$ns" "$nc" "$R"
+		printf '%s\n' "$issues" | awk -F'\t' 'NF>=3{printf "  [%s] %s\n        %s\n", $1, $2, $3}'
 	fi
 	return "$rc"
 }
@@ -1226,7 +1400,7 @@ while [ $# -gt 0 ]; do
 		shift 2
 		;;
 	-h | --help)
-		sed -n '4,52p' "$0"
+		sed -n '4,56p' "$0"
 		exit 0
 		;;
 	*)
@@ -1251,7 +1425,7 @@ status | sessions | which | init | doctor | "") ;;
 esac
 
 case "${ARGS[0]:-}" in
-"") sed -n '4,52p' "$0" ;; # no args → print usage
+"") sed -n '4,56p' "$0" ;; # no args → print usage
 status) cmd_status ;;
 index) cmd_index "${ARGS[1]:-}" ;;
 doctor) cmd_doctor ;;

@@ -81,7 +81,8 @@ equivalent and directive customization are in [docs/hooks.md](docs/hooks.md).
   one terse row per note (`| [[Note]] | one-line summary |`), grouped in
   sections. It's a triage pointer ("which note?"), the highest-signal thing to
   read first. `index` shows the shape; `index <section>` drills in; `doctor`
-  flags rows that have rotted. See [SCHEMA.md](SCHEMA.md).
+  flags rows that have rotted, plus structural corruption in Sessions/Projects
+  themselves (see [doctor](#doctor) below). See [SCHEMA.md](SCHEMA.md).
 - **MOCs** — Maps of Content (`MOCs/MOC - <Topic>.md`), one hub note per domain,
   the top of the wikilink graph you fan out from.
 - **Projects → Sessions** — two lifecycle tiers. A **Project** (`Projects/<name>.md`,
@@ -133,10 +134,46 @@ vaultmem status             one-line index summary + groom-nudge count (fail-qui
 **hygiene · setup**
 ```
 vaultmem groom              archive done sessions + done projects; report cold-parked + stale-active
-vaultmem doctor             lint the config + flag drifted index rows
+vaultmem doctor             lint the config + flag drifted index rows + vault schema lints
 vaultmem init [--vault <id>]  scaffold a compliant vault skeleton
 vaultmem init --config      write a starter config.toml
 ```
+
+## doctor
+
+`vaultmem doctor` runs three checks and reports all of them in one pass:
+
+1. **Config lint** — the registry TOML is checked against the accepted subset
+   (see [Config reference](#config-reference) below).
+2. **Index drift** — Agent Index rows in the primary vault's `Home.md` that
+   have rotted: `BROKEN` (the row's `[[wikilink]]` resolves to a missing or
+   0-byte note) and `STALE` (the note's `status:` says it's dead but the row
+   summary still reads live).
+3. **Schema lints** — every configured vault's `Sessions/` and `Projects/`
+   notes, checked directly (not via the Agent Index), for structural
+   corruption:
+
+   | Class | Fires on | Why it matters |
+   |---|---|---|
+   | `NOALIAS` | a session `_index.md` without `aliases: [<thread>]` naming its own thread | the file is `_index.md`, not `<thread>.md`, so a Project's `[[<thread>]]` back-link only resolves through this alias |
+   | `GLYPH-DESYNC` | the status glyph (H1 for a session; filename **and** H1 for a project) disagrees with `status:`, including a missing glyph | the sidebar/picker glyph is presentation, not identity — a stale one is a lie the UI tells |
+   | `GLYPHED-FOLDER` | a **session folder** name carries a leading status glyph | vaultmem keys a session by folder basename == `thread:`; a glyphed folder desyncs the picker and `groom` |
+   | `NO-UPDATED` | a session `_index.md` with missing/unparseable `updated:` | staleness/cold-parked math falls back to file mtime, which cloud-drive re-sync rewrites |
+   | `MISSING-FM` | required frontmatter absent — session: `thread`, `status`, `updated`; project: `type`, `status` | downstream commands read these fields directly and treat absence as silently-empty |
+   | `EMPTY-BOOKMARK` | an **active** session whose `## Bookmark` section has no content | only `Bookmark` is linted (and only when active) — every other template heading (`Pinned`/`Work log`/`Decisions`/`Git state`) ships intentionally empty on a fresh session |
+
+   Schema lints are O(sessions), a couple of `awk` passes per note — fast
+   enough to run on every `doctor` call (including the one `groom` makes
+   internally); no vault-wide full-text scan.
+
+**Exit codes** (bitwise, so they compose):
+
+| Code | Meaning |
+|---|---|
+| `0` | clean — no config errors, no drift, no schema lint findings |
+| `1` | config errors only |
+| `2` | drift and/or schema lint findings only |
+| `3` | both config errors and drift/lint findings (`1 \| 2`) |
 
 ## Config reference
 

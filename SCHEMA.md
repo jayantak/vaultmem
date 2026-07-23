@@ -43,8 +43,26 @@ inline ` # comment`. It never parses nested YAML.
 | `repos`    | Projects            | Repos the project touches (shown by `project <name>`). |
 | `linear`   | Projects            | Optional issue/epic reference (shown by `project <name>`). |
 | `moc`      | Projects            | Optional `[[MOC - <Topic>]]` backref (shown by `project <name>`). |
-| `aliases`  | any                 | Alternate names a `[[wikilink]]` may resolve through. |
+| `aliases`  | any                 | Alternate names a `[[wikilink]]` may resolve through. **Required on every Session** (`aliases: [<thread>]`): the file is `_index.md`, not `<thread>.md`, so a Project's `## Sessions` line links `[[<thread>]]` and that only resolves through this alias. `doctor` flags a missing one as `NOALIAS`. |
 | `thread`   | Sessions            | The session's own slug (matches its directory name). |
+
+### Required frontmatter
+
+`doctor`'s `MISSING-FM` lint enforces a minimum per note type — absence isn't
+just an empty read, it breaks a downstream command:
+
+- **Session** (`_index.md`): `thread`, `status`, `updated`.
+- **Project** (`<name>.md`, excluding `type: moc` notes): `type`, `status`.
+
+### `## Bookmark` (Sessions)
+
+The `session` skill's `_index.md` template has a fixed spine of headings
+(`Bookmark`, `Pinned`, `Work log`, `Decisions`, `Git state`) — see that skill
+for the full template. `doctor`'s `EMPTY-BOOKMARK` lint checks only the
+`## Bookmark` heading, and only on `status: active` sessions: it is the always-
+current resume pointer, so an active session with nothing under it is a real
+gap. The other spine headings ship intentionally empty on a fresh session and
+are never linted.
 
 ## Status vocabulary
 
@@ -81,13 +99,22 @@ Projects/🟢 Widget Pipeline.md
 
 Glyph set: `🟢` active · `💤`/`⬜` parked/idle · `✅` done · `🔴` blocked · `🟡` at-risk.
 
-Two invariants keep glyph-as-presentation from becoming glyph-as-identity:
+Three invariants keep glyph-as-presentation from becoming glyph-as-identity:
 
 1. The glyph lives on the **filename and the H1** of a Project (and the H1 of a
    Session), never elsewhere.
 2. A Session's `project:` field is the **plain** project name — no glyph. Name
    matching strips a leading glyph before comparing, so a plain-named session
    still binds to a glyph-prefixed project file.
+3. A **Session folder** (`Sessions/<thread>/`) must never carry a glyph —
+   vaultmem keys a session by its folder basename == `thread:`, so a glyphed
+   folder desyncs the picker and `groom`. Only the H1 glyphs for a session;
+   the file is always `_index.md` and the folder is always the plain thread
+   name. `doctor` flags a glyphed session folder as `GLYPHED-FOLDER`, and a
+   glyph that disagrees with `status:` as `GLYPH-DESYNC`. The H1 glyph is
+   required and always checked (a missing one is a desync); a Project's
+   *filename* glyph stays optional per the "may carry" rule above, and is
+   checked only when present.
 
 ## Agent-Index row grammar
 
@@ -116,6 +143,11 @@ Two invariants keep glyph-as-presentation from becoming glyph-as-identity:
   or a 0-byte stub; **STALE** if the linked note's `status` is dead but the row
   summary still reads live (contains a live word — verdict/shipped/active/… —
   and no death word).
+- `doctor` separately walks `Sessions/` and `Projects/` directly (not via the
+  index) for structural corruption — `NOALIAS`, `GLYPH-DESYNC`,
+  `GLYPHED-FOLDER`, `NO-UPDATED`, `MISSING-FM`, `EMPTY-BOOKMARK`. See the
+  README's [doctor](README.md#doctor) section for the full table and exit
+  codes.
 
 ## Maps of Content
 
