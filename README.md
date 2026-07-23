@@ -1,5 +1,9 @@
 # vaultmem
 
+[![CI](https://github.com/jayantak/vaultmem/actions/workflows/ci.yml/badge.svg)](https://github.com/jayantak/vaultmem/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+[![Release](https://img.shields.io/github/v/tag/jayantak/vaultmem)](https://github.com/jayantak/vaultmem/releases)
+
 **Agent memory over an Obsidian vault — bash + ripgrep, no database.**
 
 Your notes are already the memory. `vaultmem` is the fast read/route path over a
@@ -7,9 +11,6 @@ plain-markdown [Obsidian](https://obsidian.md) vault: a curated Agent Index, a
 wikilink graph, and a session/project tier — all `rg` over `.md` files. Clone it,
 read it, it's one bash script. No daemon, no index to rebuild, no vector store to
 keep in sync.
-
-<!-- asciinema: replace with an asciinema cast once recorded -->
-_(demo: asciinema cast placeholder)_
 
 ## Why not a vector DB
 
@@ -20,6 +21,15 @@ store adds a daemon, an ingestion step, and an index that silently drifts from
 the notes. `vaultmem` keeps the notes as the single source of truth and stays
 auditable in five minutes. If plain ripgrep ever demonstrably hurts, add an FTS
 cache then — not before.
+
+| | vaultmem | typical vector-DB memory (mem0, cognee, basic-memory) |
+|---|---|---|
+| Daemon/background process | No | Usually yes |
+| External DB required | No | Yes (vector store, often + SQLite) |
+| Embeddings/LLM calls to write memory | No | Usually yes |
+| Works with the Obsidian app closed | Yes | N/A — most aren't Obsidian-native |
+| Auditable in one sitting | Yes (~1900 lines, one file) | No |
+| Semantic recall (vocabulary-mismatch queries) | No — lexical/wikilink only | Yes |
 
 ## Install
 
@@ -352,6 +362,12 @@ should route to.
   sitting and audit exactly what it does to your notes. A compiled rewrite trades
   that away for performance nobody needs at this scale. The one bash pain —
   config parsing — is handled by the restricted TOML subset, zero new deps.
+
+## Versioning
+
+0.x, following [Semantic Versioning](https://semver.org/spec/v2.0.0.html#spec-item-4):
+a 0.MINOR bump may break the CLI surface, config schema, or vault schema; a
+0.MINOR.PATCH bump will not. See [CHANGELOG.md](CHANGELOG.md).
 
 ## License
 
