@@ -1856,88 +1856,48 @@ cmd_verify() {
 # Per-invocation resolve cache for the whole-vault scans. `_resolve_path` costs
 # a `find` per root (and, for aliases, a vault-wide grep + an awk per hit), so
 # calling it once per wikilink is O(links × notes) — 73s on a 111-note/586-link
-# vault. These build the same lookups ONCE per run and answer from memory; the
-# tables are discarded on exit. Deliberately not persisted: a cache that
+# vault. These build the same lookups ONCE per run and answer from a lookup
+# file, which is discarded on exit. Deliberately not persisted: a cache that
 # survives the process is an index to maintain, which the ethos forbids.
-_RESOLVE_CACHE_BUILT=""
-declare -A _RESOLVE_CACHE=()
+#
+# The table is a sorted "key<TAB>path" temp file, not an associative array:
+# macOS ships bash 3.2, where `declare -A` is a hard error on every invocation
+# (including the fail-quiet status/sessions hooks). Keep this bash-3.2 clean.
+_RESOLVE_CACHE_FILE=""
 
 _build_resolve_cache() { # $@ = candidate files (already Templates/_archive-filtered)
-	[ -z "$_RESOLVE_CACHE_BUILT" ] || return 0
-	_RESOLVE_CACHE_BUILT=1
-	local f base lower k
-	# Basename table. `_resolve_path` step 2 takes `find | head -1`, i.e. the
-	# FIRST match wins; keep that by never overwriting an existing entry.
+	[ -z "$_RESOLVE_CACHE_FILE" ] || return 0
+	_RESOLVE_CACHE_FILE=$(mktemp) || return 1
+	local raw f base
+	raw=$(mktemp) || return 1
+	# Basename rows. `_resolve_path` step 2 takes `find | head -1`, i.e. the
+	# FIRST match wins; the dedupe below keeps the first row per key.
 	for f in "$@"; do
 		base="${f##*/}"
 		base="${base%.md}"
-		lower=$(printf '%s' "$base" | tr '[:upper:]' '[:lower:]')
-		k="b_$lower"
-		[ -n "${_RESOLVE_CACHE[$k]+x}" ] || _RESOLVE_CACHE[$k]="$f"
-	done
-	# Alias table, one awk pass over the files that actually declare aliases
+		printf 'b_%s\t%s\n' "$(printf '%s' "$base" | tr '[:upper:]' '[:lower:]')" "$f"
+	done >>"$raw"
+	# Alias rows, one awk pass over the files that actually declare aliases
 	# (step 3 is rare, but when it misses it costs a vault-wide grep per link).
-	local key
-	while IFS=$'\t' read -r key f; do
-		[ -n "$key" ] || continue
-		k="a_$key"
-		[ -n "${_RESOLVE_CACHE[$k]+x}" ] || _RESOLVE_CACHE[$k]="$f"
-	done < <(
-		grep -l "aliases:" "$@" --include='*.md' 2>/dev/null | while IFS= read -r f; do
-			[ -n "$f" ] || continue
-			awk -v file="$f" '
-        NR==1 && $0!="---"{exit} NR==1{next}
-        $0=="---"{exit}
-        /^aliases:[[:space:]]*\[/{s=$0; sub(/^aliases:[[:space:]]*\[/,"",s); sub(/\].*/,"",s);
-          n=split(s,a,","); for(i=1;i<=n;i++){gsub(/^[[:space:]"'"'"']+|[[:space:]"'"'"']+$/,"",a[i]);
-          if(a[i]!="")printf "%s\t%s\n", tolower(a[i]), file} next}
-        /^aliases:[[:space:]]*$/{al=1; next}
-        al && /^[[:space:]]*-[[:space:]]*/{v=$0; sub(/^[[:space:]]*-[[:space:]]*/,"",v);
-          gsub(/^["'"'"']+|["'"'"']+$/,"",v); gsub(/[[:space:]]+$/,"",v);
-          if(v!="")printf "%s\t%s\n", tolower(v), file; next}
-        al && /^[^[:space:]-]/{al=0}
-      ' "$f"
-		done
-	)
-}
-
-# Cache-backed twin of `_resolve_path`. MUST mirror its precedence exactly
-# (real path → exact relative path → case-insensitive basename → alias) or the
-# frontier ranking shifts.
-_resolve_path_cached() {
-	local raw
-	raw="$(_clean_target "$1")"
-	[ -n "$raw" ] || return 1
-	[ -f "$raw" ] && {
-		printf '%s\n' "$raw"
-		return 0
-	}
-	local r
-	local -a roots=()
-	while IFS= read -r r; do roots+=("$r"); done < <(_link_roots)
-	for r in "${roots[@]}"; do
-		[ -f "$r/$raw.md" ] && {
-			printf '%s\n' "$r/$raw.md"
-			return 0
-		}
-		case "$raw" in *.*) [ -f "$r/$raw" ] && {
-			printf '%s\n' "$r/$raw"
-			return 0
-		} ;; esac
-	done
-	local base="${raw##*/}" lower hit
-	lower=$(printf '%s' "$base" | tr '[:upper:]' '[:lower:]')
-	hit="${_RESOLVE_CACHE[b_$lower]:-}"
-	[ -n "$hit" ] && {
-		printf '%s\n' "$hit"
-		return 0
-	}
-	hit="${_RESOLVE_CACHE[a_$lower]:-}"
-	[ -n "$hit" ] && {
-		printf '%s\n' "$hit"
-		return 0
-	}
-	return 1
+	grep -l "aliases:" "$@" 2>/dev/null | while IFS= read -r f; do
+		[ -n "$f" ] || continue
+		awk -v file="$f" '
+      NR==1 && $0!="---"{exit} NR==1{next}
+      $0=="---"{exit}
+      /^aliases:[[:space:]]*\[/{s=$0; sub(/^aliases:[[:space:]]*\[/,"",s); sub(/\].*/,"",s);
+        n=split(s,a,","); for(i=1;i<=n;i++){gsub(/^[[:space:]"'"'"']+|[[:space:]"'"'"']+$/,"",a[i]);
+        if(a[i]!="")printf "a_%s\t%s\n", tolower(a[i]), file} next}
+      /^aliases:[[:space:]]*$/{al=1; next}
+      al && /^[[:space:]]*-[[:space:]]*/{v=$0; sub(/^[[:space:]]*-[[:space:]]*/,"",v);
+        gsub(/^["'"'"']+|["'"'"']+$/,"",v); gsub(/[[:space:]]+$/,"",v);
+        if(v!="")printf "a_%s\t%s\n", tolower(v), file; next}
+      al && /^[^[:space:]-]/{al=0}
+    ' "$f"
+	done >>"$raw"
+	# First row per key wins (mirrors find|head -1). LC_ALL=C so the sort/join
+	# collation is byte-wise and identical across macOS and Linux.
+	LC_ALL=C sort -s -t"$(printf '\t')" -k1,1 "$raw" | LC_ALL=C awk -F'\t' '!seen[$1]++' >"$_RESOLVE_CACHE_FILE"
+	rm -f "$raw"
 }
 
 _frontier_scan() { # prints "note\tout\tin\tepoch" rows (tab-sep) over $(_link_roots)
@@ -1969,36 +1929,77 @@ _frontier_scan() { # prints "note\tout\tin\tepoch" rows (tab-sep) over $(_link_r
 
 	_build_resolve_cache "${files[@]}"
 
-	# Pass 1: outbound count per note + resolved target list (for pass 2 tally).
-	local tmp_out tmp_in
-	tmp_out=$(mktemp) && tmp_in=$(mktemp) || return 0
-	local t tp outc
+	# Pass 1: outbound count per note, plus every (note, target) edge. Targets
+	# are collected here and resolved as ONE batch below — resolving them one at
+	# a time costs a subprocess per link, which is most of what this scan was
+	# spending its time on.
+	local tmp_out tmp_edges tmp_in
+	tmp_out=$(mktemp) && tmp_edges=$(mktemp) && tmp_in=$(mktemp) || return 0
+	local t outc
 	for f in "${files[@]}"; do
 		outc=0
 		while IFS= read -r t; do
 			[ -n "$t" ] || continue
 			outc=$((outc + 1))
-			if tp=$(_resolve_path_cached "$t" 2>/dev/null); then
-				printf '%s\n' "$tp" >>"$tmp_in"
-			fi
+			printf '%s\n' "$t" >>"$tmp_edges"
 		done < <(_outbound_targets "$f")
 		printf '%s\t%s\n' "$f" "$outc" >>"$tmp_out"
 	done
 
-	# Pass 2: inbound = how often each resolved path appears as a target.
-	# Tally once into a map rather than re-scanning $tmp_in per note (that was
-	# the second O(n²) here).
-	local -A _inbound=()
-	while IFS= read -r tp; do
-		[ -n "$tp" ] || continue
-		_inbound["$tp"]=$((${_inbound["$tp"]:-0} + 1))
-	done <"$tmp_in"
+	# Batch-resolve: direct/relative-path hits first (cheap bash tests, and they
+	# take precedence), then one join of the remainder against the cache table.
+	local tmp_keys
+	tmp_keys=$(mktemp) || return 0
+	local raw base
+	while IFS= read -r t; do
+		[ -n "$t" ] || continue
+		raw="$(_clean_target "$t")"
+		[ -n "$raw" ] || continue
+		if [ -f "$raw" ]; then
+			printf '%s\n' "$raw" >>"$tmp_in"
+			continue
+		fi
+		tp=""
+		for r in "${roots[@]}"; do
+			if [ -f "$r/$raw.md" ]; then
+				tp="$r/$raw.md"
+				break
+			fi
+			case "$raw" in *.*) [ -f "$r/$raw" ] && {
+				tp="$r/$raw"
+				break
+			} ;; esac
+		done
+		if [ -n "$tp" ]; then
+			printf '%s\n' "$tp" >>"$tmp_in"
+			continue
+		fi
+		base="${raw##*/}"
+		printf '%s\n' "$(printf '%s' "$base" | tr '[:upper:]' '[:lower:]')" >>"$tmp_keys"
+	done <"$tmp_edges"
+
+	# Basename table wins over the alias table, mirroring _resolve_path's order.
+	if [ -s "$tmp_keys" ]; then
+		LC_ALL=C awk -F'\t' '
+      NR==FNR{ if($1 ~ /^b_/){b[substr($1,3)]=$2} else if($1 ~ /^a_/){a[substr($1,3)]=$2} next }
+      { if($0 in b){print b[$0]} else if($0 in a){print a[$0]} }
+    ' "$_RESOLVE_CACHE_FILE" "$tmp_keys" >>"$tmp_in"
+	fi
+	rm -f "$tmp_edges" "$tmp_keys"
+
+	# Pass 2: inbound = how often each resolved path appears as a target. Tally
+	# once into a "count<TAB>path" file rather than re-scanning $tmp_in per note
+	# (that was the second O(n²) here), then join it back per row.
+	local tmp_tally
+	tmp_tally=$(mktemp) || return 0
+	LC_ALL=C sort "$tmp_in" | LC_ALL=C uniq -c |
+		awk '{c=$1; $1=""; sub(/^ +/,""); printf "%s\t%s\n", $0, c}' >"$tmp_tally"
 
 	local upd ts
 	while IFS=$'\t' read -r f outc; do
 		[ -n "$f" ] || continue
 		local inc
-		inc="${_inbound["$f"]:-0}"
+		inc=$(LC_ALL=C awk -F'\t' -v want="$f" '$1==want{print $2; exit}' "$tmp_tally")
 		upd=$(_fm_field "$f" updated)
 		ts=$(_to_epoch "$upd")
 		if [ -z "$ts" ]; then
@@ -2006,7 +2007,8 @@ _frontier_scan() { # prints "note\tout\tin\tepoch" rows (tab-sep) over $(_link_r
 		fi
 		printf '%s\t%s\t%s\t%s\n' "$f" "$outc" "${inc:-0}" "$ts"
 	done <"$tmp_out"
-	rm -f "$tmp_out" "$tmp_in"
+	rm -f "$tmp_out" "$tmp_in" "$tmp_tally" "$_RESOLVE_CACHE_FILE"
+	_RESOLVE_CACHE_FILE=""
 }
 cmd_frontier() {
 	local now cap="$LIMIT" rows
