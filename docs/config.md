@@ -59,10 +59,12 @@ Applies across all vaults.
 | `vault`          | string  | first vault    | Fallback vault id when routing finds no signal (see `which`). |
 | `limit`          | integer | `20`           | Default result cap for search (overridable per-invocation with `-n`). |
 | `cold_days`      | integer | `21`           | A `parked` session untouched this many days is flagged cold by `groom`. |
+| `bloat_lines`    | integer | `150`          | An `active`/`parked` session's `_index.md` over this many lines is flagged checkpoint-due by `groom`. |
 | `directive_file` | string  | *(none)*       | Path to a plain-text file whose contents replace the built-in AGENT DIRECTIVE line printed by `sessions`. |
 
-Environment overrides: `VAULTMEM_COLD_DAYS` beats `cold_days`. If `vault` is
-unset, the first vault declared in the file is used as the fallback.
+Environment overrides: `VAULTMEM_COLD_DAYS` beats `cold_days`, `VAULTMEM_BLOAT_LINES`
+beats `bloat_lines`. If `vault` is unset, the first vault declared in the file is
+used as the fallback.
 
 `groom` also flags **stale-active** sessions — `status: active` untouched past
 `VAULTMEM_STALE_ACTIVE_DAYS` (default `7`) — as a parallel triage report next to
@@ -125,6 +127,7 @@ when you're ready to curate one.
 vault = "personal"        # fallback vault when routing finds no signal
 limit = 20                # default result cap
 cold_days = 21            # a parked session untouched this long is grooming-due
+bloat_lines = 150         # an active/parked _index.md over this many lines is checkpoint-due
 directive_file = ""       # optional: path to custom AGENT DIRECTIVE text
 
 [vault.personal]

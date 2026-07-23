@@ -9,7 +9,7 @@
       "name": "vaultmem",
       "source": "./",
       "description": "The session, obsidian-vault, and remember-project skills (namespaced vaultmem:session, vaultmem:obsidian-vault, vaultmem:remember-project). Pairs with the vaultmem CLI.",
-      "version": "0.1.0",
+      "version": "0.2.0",
       "license": "MIT",
       "keywords": [
         "obsidian",

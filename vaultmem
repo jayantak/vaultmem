@@ -16,7 +16,13 @@
 #   vaultmem index              browse the Agent Index: section counts + MOCs (the shape)
 #   vaultmem index <section>    expand one section (e.g. index architecture); rows capped
 #   vaultmem index all          full flat dump (escape hatch; rows still width-capped)
-#   vaultmem doctor             flag drifted index rows: BROKEN (missing/0-byte note) + STALE (note reverted/done but row reads live); also lint the config
+#   vaultmem doctor             flag drifted index rows + vault schema lints; also lint the config
+#                               index drift: BROKEN (missing/0-byte note) + STALE (note reverted/done but row reads live)
+#                               schema lints (walk Sessions/Projects): NOALIAS, GLYPH-DESYNC,
+#                               GLYPHED-FOLDER, NO-UPDATED, MISSING-FM, EMPTY-BOOKMARK, INDEX-DRIFT (see SCHEMA.md)
+#                               exit codes: 0=clean 1=config errors 2=drift/lint findings 3=both
+#   vaultmem doctor --deep      + vault-wide ORPHAN (no inbound links) and UNINDEXED (not in
+#                               Agent Index or any MOC) scan; slower, not run by base doctor/groom
 #   vaultmem mocs               list Maps of Content (the domain hubs)
 #   vaultmem vaults             print vault registry (id, path, MOC, routing rules)
 #   vaultmem path <id>          print the vault root path (for V="$(…)" in scripts)
@@ -24,12 +30,16 @@
 #   vaultmem sessions           picker line of recent sessions (all vaults)
 #   vaultmem projects           list Project notes (epics) + session counts
 #   vaultmem project <name>     one project: repos, linear, MOC, its sessions by status
-#   vaultmem groom              archive done sessions/projects; list cold-parked + stale-active
+#   vaultmem groom              archive done sessions/projects; list cold-parked + stale-active + checkpoint-due
 #                               (cold = parked, no `updated:` touch in VAULTMEM_COLD_DAYS=21;
 #                               stale-active = active, no touch in VAULTMEM_STALE_ACTIVE_DAYS=7;
+#                               checkpoint-due = active/parked _index.md over VAULTMEM_BLOAT_LINES=150 lines;
 #                               a `done` Project moves to Projects/_archive/ unless a live
 #                               (non-archived) session still points at it)
+#   vaultmem groom --dry-run    preview groom: print the would-move list + would-flip
+#                               project-index lines; no mv, no writes
 #   vaultmem status             one-line summary + groom-nudge count (used by the SessionStart hook)
+#   vaultmem nudge              fail-quiet Stop-hook check: vault touched but session note not updated
 #   vaultmem init [--vault <id>]  scaffold a compliant vault skeleton (see SCHEMA.md)
 #   vaultmem init --config      write a starter config.toml
 #
@@ -38,16 +48,32 @@
 #   vaultmem links <note>       outbound [[wikilinks]] from a note → resolved paths
 #   vaultmem backlinks <note>   notes that link TO this one (reverse edges)
 #   vaultmem neighbors <note>   one-hop graph view: outbound + backlinks together
+#   vaultmem dangling [note]    broken [[links]] — one note, or the whole vault
+#   vaultmem dangling --by-target  same scan, aggregated by missing target + inbound count
+#                               (most-wanted missing notes — what to write next)
+#   vaultmem frontier           rank notes by knowledge-frontier score (best place to write next)
+#                               score = (outbound - inbound) * exp(-days_since_updated / 30); -n caps results
 #     <name>/<note> = a wikilink target (basename, Folder/Name, or alias) or a file path.
 #     Traversal protocol: start at a MOC/Home hub → `links` to fan out → read the
 #     1–2 most relevant → `backlinks` to climb back / find related. Stop at ~2 hops.
+#
+# Session resume:
+#   vaultmem bookmark <thread>  print only ## Bookmark + ## Pinned from a session's
+#                               _index.md — the resumable state, without the whole file
+#
+# Verify-on-write (for a PostToolUse Write|Edit hook — see docs/hooks.md):
+#   vaultmem verify <file>      single-file lint: dangling wikilinks + the doctor
+#                               schema lints, scoped to just this note. Fail-quiet
+#                               (exit 0, silent) for any path outside a configured
+#                               vault root; non-zero only on a real finding.
 #
 # Design notes:
 #   - Curated hits (Home.md Agent Index + MOCs/) come first: they are
 #     human/agent-curated summaries, the highest-signal entry points.
 #   - Content hits are raw ripgrep over note bodies, capped for frugality.
-#   - `status` is fail-quiet: if the vault is not mounted (cloud drive offline)
-#     it prints nothing and exits 0, so it can never break a session start.
+#   - `status`/`sessions`/`verify`/`nudge` are fail-quiet: an unmounted/
+#     unconfigured vault (or a non-vault path for `verify`) prints nothing and
+#     exits 0, so they can never break a hook.
 #   - Link resolution mirrors Obsidian: strip `|display`/`#heading`/`^block`, then
 #     match relative-path → unique basename (case-insensitive) → frontmatter alias.
 
@@ -124,6 +150,7 @@ _lint_config() { # $1 = config path
     BEGIN {
       ok_defaults["vault"]=1; ok_defaults["limit"]=1
       ok_defaults["cold_days"]=1; ok_defaults["directive_file"]=1
+      ok_defaults["bloat_lines"]=1
       ok_vault["label"]=1; ok_vault["path"]=1; ok_vault["sessions"]=1
       ok_vault["home"]=1; ok_vault["mocs"]=1
       ok_vault["match_owners"]=1; ok_vault["match_paths"]=1
@@ -190,6 +217,7 @@ _load_registry() {
 	DEF_LIMIT=""
 	DEF_COLD_DAYS=""
 	DEF_DIRECTIVE_FILE=""
+	DEF_BLOAT_LINES=""
 	if [ -r "$VAULTMEM_CONFIG" ]; then
 		local parsed ids id path label sess home mocs mo mp
 		parsed=$(_parse_config "$VAULTMEM_CONFIG")
@@ -215,6 +243,7 @@ _load_registry() {
 		DEF_LIMIT=$(_cfg defaults limit)
 		DEF_COLD_DAYS=$(_cfg defaults cold_days)
 		DEF_DIRECTIVE_FILE=$(_expand_path "$(_cfg defaults directive_file)")
+		DEF_BLOAT_LINES=$(_cfg defaults bloat_lines)
 		unset -f _cfg
 	else
 		# No config file: thin zero-config escape hatch. Register a single
@@ -268,6 +297,49 @@ cmd_status() {
 	local nudge
 	nudge=$(_groom_nudge 2>/dev/null)
 	[ -n "$nudge" ] && printf '  %s\n' "$nudge"
+}
+
+# --- subcommand: nudge (fail-quiet; for a Stop hook) ----------------------------
+# Report-only "did work happen without the session note being maintained?" check.
+# No daemon, no DB: a stamp file under the cache dir (never the vault) marks the
+# start of the window; `find -newer` diffs vault mtimes against it. Same
+# fail-quiet contract as status/sessions — a missing vault, an unwritable cache
+# dir, or (most commonly) a first-ever call with no stamp yet all print nothing
+# and exit 0, so a Stop hook wired to this can never fail a turn.
+#
+# The stamp is meant to be planted at SessionStart and consumed at Stop (see
+# docs/hooks.md); if only wired at Stop, the first call in a session plants the
+# stamp and stays silent, and later Stops in that session compare against it —
+# degraded but still safe, never noisy on a cold start.
+_nudge_stamp_dir() { printf '%s/vaultmem' "${XDG_CACHE_HOME:-$HOME/.cache}"; }
+_nudge_stamp_file() { printf '%s/nudge-stamp' "$(_nudge_stamp_dir)"; }
+cmd_nudge() {
+	[ -f "$PRIMARY_HOME" ] || exit 0
+	local dir stamp
+	dir=$(_nudge_stamp_dir)
+	stamp=$(_nudge_stamp_file)
+	mkdir -p "$dir" 2>/dev/null || exit 0
+	if [ ! -e "$stamp" ]; then
+		touch "$stamp" 2>/dev/null
+		exit 0
+	fi
+	local -a roots=()
+	local r
+	while IFS= read -r r; do roots+=("$r"); done < <(_link_roots)
+	[ "${#roots[@]}" -gt 0 ] || exit 0
+	# Any note touched since the stamp, anywhere in a registered vault.
+	local touched
+	touched=$(find "${roots[@]}" -type f -name '*.md' -newer "$stamp" -not -path '*/Templates/*' 2>/dev/null | head -1)
+	if [ -n "$touched" ]; then
+		# Was a session's own _index.md among the touched notes?
+		local idx_touched
+		idx_touched=$(find "${roots[@]}" -type f -name '_index.md' -newer "$stamp" 2>/dev/null | head -1)
+		if [ -z "$idx_touched" ]; then
+			printf '⚠ vaultmem: notes changed this session but no Sessions/*/_index.md was updated — capture the work log / `updated:` before you stop.\n'
+		fi
+	fi
+	touch "$stamp" 2>/dev/null
+	return 0
 }
 
 # --- subcommand: index (browse the Agent Index) --------------------------------
@@ -371,7 +443,329 @@ _doctor_scan() { # $1=vault root; prints "CLASS\tnote\tdetail" lines, one per is
 		esac
 	done < <(_index_row_targets)
 }
+# Map a status word to its required presentation glyph. Empty for an
+# unrecognized status (nothing to compare against).
+_status_glyph() {
+	case "$1" in
+	active) printf '🟢' ;;
+	parked) printf '💤' ;;
+	done) printf '✅' ;;
+	esac
+}
+
+# First-line H1 glyph of a note ("# 🟢 Foo" → "🟢"), or empty if the H1 has
+# no leading glyph (or no H1 at all).
+_h1_glyph() {
+	local h1 stripped
+	h1=$(awk '/^# /{print; exit}' "$1")
+	h1="${h1#\# }"
+	stripped=$(_strip_status_glyph "$h1")
+	[ "$stripped" != "$h1" ] && printf '%s' "${h1%% *}"
+}
+
+# Emit each `## Sessions` index line in a Project note as "thread\ttoken" (tab-
+# sep): thread = the [[wikilink]] target, token = the trailing status word in
+# the line's last (...) group. Matches all three documented row shapes —
+# "(status: active)", "(PROJ-123, active)", "(active)" — by reusing the same
+# trailing-token regex shape as `_flip_project_status` (archived included, so
+# callers can recognize and skip already-archived rows).
+_project_session_tokens() { # $1 = Project .md path
+	awk '
+    /^## Sessions[[:space:]]*$/{f=1; next}
+    f && /^## /{f=0}
+    f && /\[\[[^]]+\]\].*\([^)]*(active|parked|done|archived)\)/ {
+      line=$0
+      t=line; sub(/.*\[\[/,"",t); sub(/\]\].*/,"",t); sub(/#.*/,"",t); sub(/\|.*/,"",t)
+      gsub(/^[[:space:]]+|[[:space:]]+$/,"",t)
+      tok=line; sub(/\)[^)]*$/,"",tok); sub(/.*\(/,"",tok)
+      sub(/.*,[[:space:]]*/,"",tok); sub(/^status:[[:space:]]*/,"",tok)
+      gsub(/^[[:space:]]+|[[:space:]]+$/,"",tok)
+      if (t != "" && tok != "") print t "\t" tok
+    }
+  ' "$1"
+}
+
+# Schema lints — walk Sessions/ and Projects/ directly (not the Agent Index),
+# so they catch structural corruption an index row would never mention. Kept
+# to a couple of awk passes per note: no vault-wide full-text scan (that is a
+# later --deep wave, not this one), so `doctor`/`groom` (which calls doctor)
+# stay fast. The per-note bodies are factored into _schema_scan_session_note /
+# _schema_scan_project_note so `verify` (single-file, PostToolUse hook) can
+# call the exact same lint logic as this vault-wide walk — one rule set, two
+# entry points.
+
+# Lint one session _index.md. $1=note path $2=display label (e.g. Sessions/<name>)
+# $3=folder basename (thread key). Prints "CLASS\tlabel\tdetail" lines.
+_schema_scan_session_note() {
+	local f="$1" label="$2" name="$3"
+	local thread status updated aliases_line has_alias h1g want_g fmiss
+
+	# GLYPHED-FOLDER — the session folder itself carries a status glyph.
+	if [ "$(_strip_status_glyph "$name")" != "$name" ]; then
+		printf 'GLYPHED-FOLDER\t%s\tfolder name carries a status glyph; vaultmem keys sessions by folder basename == thread — this desyncs the picker and groom\n' "$label"
+	fi
+
+	thread=$(_fm_field "$f" thread)
+	status=$(_fm_field "$f" status | tr '[:upper:]' '[:lower:]')
+	updated=$(_fm_field "$f" updated)
+
+	# MISSING-FM — required session frontmatter: thread, status, updated.
+	fmiss=""
+	[ -n "$thread" ] || fmiss="${fmiss}thread "
+	[ -n "$status" ] || fmiss="${fmiss}status "
+	[ -n "$updated" ] || fmiss="${fmiss}updated "
+	[ -n "$fmiss" ] && printf 'MISSING-FM\t%s\tmissing frontmatter: %s\n' "$label" "$fmiss"
+
+	# NOALIAS — aliases: [] must contain the thread name (== folder name),
+	# because the file is _index.md, not <thread>.md, so [[<thread>]]
+	# back-links from the Project note only resolve through the alias.
+	aliases_line=$(awk '
+      NR==1 && $0!="---"{exit} NR==1{next}
+      $0=="---"{exit}
+      /^aliases:[[:space:]]*\[/{print; exit}
+    ' "$f")
+	has_alias=0
+	if [ -n "$aliases_line" ]; then
+		has_alias=$(awk -v want="$name" '{
+        s=$0; sub(/^aliases:[[:space:]]*\[/,"",s); sub(/\].*/,"",s)
+        n=split(s,a,",")
+        for(i=1;i<=n;i++){
+          v=a[i]; gsub(/^[[:space:]"'"'"']+|[[:space:]"'"'"']+$/,"",v)
+          if(v==want){print 1; exit}
+        }
+      }' <<<"$aliases_line")
+	fi
+	[ "${has_alias:-0}" = 1 ] || printf 'NOALIAS\t%s\tmissing aliases: [%s] — Project back-links [[%s]] will not resolve\n' "$label" "$name" "$name"
+
+	# NO-UPDATED — missing/unparseable `updated:`.
+	if [ -z "$updated" ] || [ -z "$(_to_epoch "$updated")" ]; then
+		printf 'NO-UPDATED\t%s\tmissing or unparseable updated: — staleness math falls back to file mtime\n' "$label"
+	fi
+
+	# GLYPH-DESYNC — session H1 glyph vs status: (H1 only; folder is
+	# checked above, filename is never glyphed for sessions).
+	if [ -n "$status" ]; then
+		want_g=$(_status_glyph "$status")
+		if [ -n "$want_g" ]; then
+			h1g=$(_h1_glyph "$f")
+			[ "$h1g" = "$want_g" ] || printf 'GLYPH-DESYNC\t%s\tH1 glyph "%s" does not match status: %s (want %s)\n' "$label" "${h1g:-<none>}" "$status" "$want_g"
+		fi
+	fi
+
+	# EMPTY-BOOKMARK — active sessions only; every other template
+	# heading (Pinned/Work log/Decisions/Git state) ships intentionally
+	# empty on a fresh session, so only Bookmark is linted, and only
+	# when status is active.
+	if [ "$status" = active ]; then
+		if ! awk '
+        /^## Bookmark[[:space:]]*$/{f=1; next}
+        f && /^## /{exit}
+        f && /[^[:space:]]/{found=1; exit}
+        END{exit !found}
+      ' "$f"; then
+			printf 'EMPTY-BOOKMARK\t%s\t## Bookmark is empty on an active session\n' "$label"
+		fi
+	fi
+}
+
+# Lint one Project note. $1=note path $2=display label (e.g. Projects/<name>)
+# $3=basename without .md. $4=vault root (for INDEX-DRIFT's session lookups;
+# optional — omit to skip that check, e.g. from a caller that has no root
+# handy). Prints "CLASS\tlabel\tdetail" lines. type=moc notes are the
+# caller's concern to skip (not filtered in here).
+_schema_scan_project_note() {
+	local f="$1" label="$2" name="$3" root="${4:-}"
+	local ptype status want_g file_g h1g fmiss
+
+	ptype=$(_fm_field "$f" type)
+	status=$(_fm_field "$f" status | tr '[:upper:]' '[:lower:]')
+
+	# MISSING-FM — required project frontmatter: type, status.
+	fmiss=""
+	[ "$ptype" = project ] || fmiss="${fmiss}type "
+	[ -n "$status" ] || fmiss="${fmiss}status "
+	[ -n "$fmiss" ] && printf 'MISSING-FM\t%s\tmissing frontmatter: %s\n' "$label" "$fmiss"
+
+	# GLYPH-DESYNC — a glyph that disagrees with status:. The filename glyph is
+	# optional (SCHEMA.md § Status-glyph invariants: a Project filename *may*
+	# carry one), so it is only compared when actually present; the H1 glyph is
+	# required and always compared.
+	if [ -n "$status" ]; then
+		want_g=$(_status_glyph "$status")
+		if [ -n "$want_g" ]; then
+			file_g=""
+			[ "$(_strip_status_glyph "$name")" != "$name" ] && file_g="${name%% *}"
+			h1g=$(_h1_glyph "$f")
+			if { [ -n "$file_g" ] && [ "$file_g" != "$want_g" ]; } || [ "$h1g" != "$want_g" ]; then
+				printf 'GLYPH-DESYNC\t%s\tfilename glyph "%s" / H1 glyph "%s" does not match status: %s (want %s)\n' "$label" "${file_g:-<none>}" "${h1g:-<none>}" "$status" "$want_g"
+			fi
+		fi
+	fi
+
+	# INDEX-DRIFT — a `## Sessions` row's status token disagrees with the
+	# linked session's own frontmatter `status:`. Read-only: never rewrites
+	# the Project file. Rows reading "archived" are skipped — that word marks
+	# a session's location (Sessions/_archive/), not a live status, and is
+	# correct by definition once `groom` has moved the session there. Skipped
+	# entirely when no $root was given (nothing to resolve session paths
+	# against).
+	if [ -n "$root" ]; then
+		local sthread stok sfile sstatus
+		while IFS=$'\t' read -r sthread stok; do
+			[ -n "$sthread" ] || continue
+			stok=$(printf '%s' "$stok" | tr '[:upper:]' '[:lower:]')
+			[ "$stok" = archived ] && continue
+			sfile="$root/Sessions/$sthread/_index.md"
+			if [ ! -f "$sfile" ]; then
+				local sdir sg
+				sdir="$root/Sessions"
+				sg=$(_first_glob "$sdir/"*" $sthread/_index.md") || true
+				[ -n "$sg" ] && sfile="$sg"
+			fi
+			[ -f "$sfile" ] || continue
+			sstatus=$(_fm_field "$sfile" status | tr '[:upper:]' '[:lower:]')
+			[ -n "$sstatus" ] || continue
+			if [ "$sstatus" != "$stok" ]; then
+				printf 'INDEX-DRIFT\t%s\t## Sessions row for [[%s]] reads (%s) but Sessions/%s status: is %s\n' "$label" "$sthread" "$stok" "$sthread" "$sstatus"
+			fi
+		done < <(_project_session_tokens "$f")
+	fi
+}
+
+_schema_scan() { # $1=vault root; prints "CLASS\tnote\tdetail" lines
+	local root="$1" f dir name
+
+	# Sessions -----------------------------------------------------------------
+	while IFS= read -r f; do
+		[ -n "$f" ] || continue
+		dir=$(dirname "$f")
+		case "$dir" in "$root/Sessions/_archive"/*) continue ;; esac
+		name=$(basename "$dir")
+		[ "$name" = "Sessions" ] && continue
+		_schema_scan_session_note "$f" "Sessions/$name" "$name"
+	done < <(find "$root/Sessions" -maxdepth 2 -name "_index.md" -type f 2>/dev/null)
+
+	# Projects -------------------------------------------------------------------
+	# type=moc notes (MOCs living alongside Projects, if any) and anything not a
+	# plain file are out of scope; a missing `type:` is itself a lint finding
+	# in _schema_scan_project_note, so unlike the other project-consuming
+	# commands this loop does NOT gate on type=project — that would make a
+	# note missing `type:` invisible.
+	while IFS= read -r f; do
+		[ -e "$f" ] || continue
+		[ "$(_fm_field "$f" type)" = moc ] && continue
+		name=$(basename "${f%.md}")
+		_schema_scan_project_note "$f" "Projects/$name" "$name" "$root"
+	done < <(printf '%s\n' "$root/Projects"/*.md)
+}
+
+# Deep scan (--deep only; NOT run by base `doctor`/`groom` — vault-wide, so it
+# does not stay within the "couple of awk passes per note" budget the other
+# lints hold to). Two checks per vault:
+#   ORPHAN     — zero inbound [[wikilinks]] from anywhere else in the vault.
+#   UNINDEXED  — absent from BOTH the Agent Index (primary vault only) and
+#                every MOC's outbound links.
+# Home.md, MOCs/, Templates/, and anything under _archive/ are skipped as
+# candidates: they are hubs/retired, not content notes, and flagging them
+# would be a false positive (Home/MOCs are meant to have no inbound links of
+# their own; Templates/_archive are intentionally unlinked). Sessions/ and
+# Projects/ are skipped too: those notes are discovered through the
+# Project→Session lifecycle tier (`sessions`/`projects`/`project <name>`,
+# keyed off folder basename and the `## Sessions` index), never through the
+# wikilink graph or the Agent Index/MOC system — nothing in SCHEMA.md or the
+# README requires a Session or Project to be MOC-linked or Agent-Index-listed,
+# so flagging them here would be a false positive on schema-legal notes.
+_deep_scan() { # $1 = vault root, $2 = 1 if this is the primary (agent-index) vault
+	local root="$1" is_primary="$2"
+	local home="$root/Home.md" mocs_dir="$root/MOCs"
+	local sessions_dir="$root/Sessions" projects_dir="$root/Projects"
+	local -a candidates=()
+	local f
+	while IFS= read -r f; do
+		[ -n "$f" ] || continue
+		case "$f" in
+		"$home") continue ;;
+		"$mocs_dir"/*) continue ;;
+		"$root/Templates"/*) continue ;;
+		"$sessions_dir"/*) continue ;;
+		"$projects_dir"/*) continue ;;
+		*/_archive/*) continue ;;
+		esac
+		candidates+=("$f")
+	done < <(find "$root" -type f -name '*.md' 2>/dev/null | sort)
+	[ "${#candidates[@]}" -gt 0 ] || return 0
+
+	# Index-membership set: Agent Index row targets (primary vault only) ∪ every
+	# MOC's outbound wikilink targets — both keyed by resolved file path so
+	# comparison is exact regardless of how the link text was written.
+	local -A indexed=()
+	if [ "$is_primary" = 1 ] && [ -f "$home" ]; then
+		local t s tp
+		while IFS=$'\t' read -r t s; do
+			[ -n "$t" ] || continue
+			tp="$root/$t.md"
+			[ -f "$tp" ] || {
+				local dir base g
+				dir=$(dirname "$tp")
+				base=$(basename "$t")
+				g=$(_first_glob "$dir/"*" $base.md") || true
+				[ -n "$g" ] && tp="$g"
+			}
+			[ -f "$tp" ] && indexed["$tp"]=1
+		done < <(_index_row_targets)
+	fi
+	if [ -d "$mocs_dir" ]; then
+		local mf mt mtp
+		for mf in "$mocs_dir"/*.md; do
+			[ -e "$mf" ] || continue
+			while IFS= read -r mt; do
+				[ -n "$mt" ] || continue
+				mtp=$(_resolve_path "$mt") || continue
+				indexed["$mtp"]=1
+			done < <(_outbound_targets "$mf")
+		done
+	fi
+
+	# Inbound-edge set: invert cmd_backlinks — one rg pass per candidate over
+	# every note in the vault, matching basename or any frontmatter alias.
+	local base alt pat hf found
+	for f in "${candidates[@]}"; do
+		base="$(basename "${f%.md}")"
+		local -a term_list=("$base")
+		while IFS= read -r a; do [ -n "$a" ] && term_list+=("$a"); done < <(
+			awk 'NR==1 && $0!="---"{exit} NR==1{next} $0=="---"{exit}
+           /^aliases:[[:space:]]*\[/{s=$0; sub(/^aliases:[[:space:]]*\[/,"",s); sub(/\].*/,"",s);
+             n=split(s,a,","); for(i=1;i<=n;i++){gsub(/^[[:space:]"'"'"']+|[[:space:]"'"'"']+$/,"",a[i]); if(a[i]!="")print a[i]}
+             next}
+           /^aliases:[[:space:]]*$/{al=1; next}
+           al && /^[[:space:]]*-[[:space:]]*/{v=$0; sub(/^[[:space:]]*-[[:space:]]*/,"",v);
+             gsub(/^["'"'"']+|["'"'"']+$/,"",v); gsub(/[[:space:]]+$/,"",v); print v; next}
+           al && /^[^[:space:]-]/{al=0}' "$f"
+		)
+		alt=$(printf '%s|' "${term_list[@]}")
+		alt="${alt%|}"
+		pat="\\[\\[([^]]*/)?(${alt})([|#^][^]]*)?\\]\\]"
+		found=0
+		while IFS= read -r hf; do
+			[ -n "$hf" ] || continue
+			[ "$hf" = "$f" ] && continue # ignore self-references, like cmd_backlinks
+			found=1
+			break
+		done < <(rg -lN -e "$pat" --glob '*.md' --glob '!Templates/**' "$root" 2>/dev/null)
+		if [ "$found" -eq 0 ]; then
+			printf 'ORPHAN\t%s\tzero inbound [[wikilinks]] from anywhere else in the vault\n' "${f#"$root"/}"
+		fi
+		if [ -z "${indexed["$f"]:-}" ]; then
+			printf 'UNINDEXED\t%s\tnot in the Agent Index and not linked from any MOC\n' "${f#"$root"/}"
+		fi
+	done
+}
+
+# Exit codes (bitwise, so they compose): 0=clean 1=config errors 2=drift/lint
+# findings (index drift and/or schema lints) 3=both.
 cmd_doctor() {
+	local deep=0
+	case "${1:-}" in --deep) deep=1 ;; esac
 	local rc=0
 	# 1) config lint — the accepted TOML subset is enforced here.
 	if [ -r "$VAULTMEM_CONFIG" ]; then
@@ -379,22 +773,74 @@ cmd_doctor() {
 		cfg_issues=$(_lint_config "$VAULTMEM_CONFIG") || {
 			printf '%s▸ Config errors in %s%s\n' "$B" "$VAULTMEM_CONFIG" "$R"
 			printf '%s\n' "$cfg_issues" | sed 's/^/  /'
-			rc=1
+			rc=$((rc | 1))
 		}
 	fi
-	# 2) index drift on the primary vault.
+	# 2) index drift on the primary vault (Agent Index row rot).
+	local drift_issues=""
 	if [ -f "$PRIMARY_HOME" ]; then
-		local issues
-		issues=$(_doctor_scan "$PRIMARY")
-		if [ -z "$issues" ]; then
-			printf 'vaultmem doctor: index is clean (no broken or stale rows).\n'
+		drift_issues=$(_doctor_scan "$PRIMARY")
+	fi
+	# 3) schema lints — every configured vault's Sessions/Projects, not just the
+	# primary: structural corruption (a glyphed session folder, a missing alias)
+	# is exactly as load-bearing in a non-primary vault.
+	local schema_issues="" _sid _spath _srest
+	while IFS=$'\t' read -r _sid _spath _srest; do
+		if [ -z "$_sid" ] || [ -z "$_spath" ]; then continue; fi
+		case "$SEL" in both) ;; "$_sid") ;; *) continue ;; esac
+		[ -d "$_spath" ] || continue
+		schema_issues="${schema_issues}$(_schema_scan "$_spath")
+"
+	done <<<"$_REG"
+	schema_issues=$(printf '%s\n' "$schema_issues" | grep -v '^[[:space:]]*$' || true)
+
+	local issues=""
+	[ -n "$drift_issues" ] && issues="$drift_issues"
+	if [ -n "$schema_issues" ]; then
+		if [ -n "$issues" ]; then
+			issues="${issues}
+${schema_issues}"
 		else
-			local nb ns
-			nb=$(printf '%s\n' "$issues" | grep -c '^BROKEN')
-			ns=$(printf '%s\n' "$issues" | grep -c '^STALE')
-			printf '%s▸ Index drift — %s broken, %s stale (review; edit Home.md rows to fix)%s\n' "$B" "$nb" "$ns" "$R"
-			printf '%s\n' "$issues" | awk -F'\t' '{printf "  [%s] %s\n        %s\n", $1, $2, $3}'
+			issues="$schema_issues"
 		fi
+	fi
+
+	# 4) --deep only: vault-wide orphan/unindexed scan. Never runs by default —
+	# base `doctor` (and the `doctor` call `groom` makes internally) must stay
+	# fast, and this is O(notes) with an `rg` pass per candidate.
+	local deep_issues=""
+	if [ "$deep" = 1 ]; then
+		local _did _dpath _drest _is_primary
+		while IFS=$'\t' read -r _did _dpath _drest; do
+			if [ -z "$_did" ] || [ -z "$_dpath" ]; then continue; fi
+			case "$SEL" in both) ;; "$_did") ;; *) continue ;; esac
+			[ -d "$_dpath" ] || continue
+			_is_primary=0
+			[ "$_dpath" = "$PRIMARY" ] && _is_primary=1
+			deep_issues="${deep_issues}$(_deep_scan "$_dpath" "$_is_primary")
+"
+		done <<<"$_REG"
+		deep_issues=$(printf '%s\n' "$deep_issues" | grep -v '^[[:space:]]*$' || true)
+		if [ -n "$deep_issues" ]; then
+			if [ -n "$issues" ]; then
+				issues="${issues}
+${deep_issues}"
+			else
+				issues="$deep_issues"
+			fi
+		fi
+	fi
+
+	if [ -z "$issues" ]; then
+		printf 'vaultmem doctor: clean (no broken/stale rows, no schema lint findings%s).\n' "$([ "$deep" = 1 ] && printf ', no --deep findings')"
+	else
+		rc=$((rc | 2))
+		local nb ns nc
+		nb=$(printf '%s\n' "$issues" | grep -c '^BROKEN')
+		ns=$(printf '%s\n' "$issues" | grep -c '^STALE')
+		nc=$(printf '%s\n' "$issues" | grep -vc '^BROKEN\|^STALE\|^[[:space:]]*$')
+		printf '%s▸ Index drift — %s broken, %s stale; %s schema lint finding(s) (review)%s\n' "$B" "$nb" "$ns" "$nc" "$R"
+		printf '%s\n' "$issues" | awk -F'\t' 'NF>=3{printf "  [%s] %s\n        %s\n", $1, $2, $3}'
 	fi
 	return "$rc"
 }
@@ -561,22 +1007,45 @@ cmd_sessions() {
 # Count grooming-due sessions per vault: `done` (ready to archive), `parked`
 # older than COLD_DAYS, and `active` older than STALE_ACTIVE_DAYS (triage).
 # Emits one ⚠ line, or nothing when nothing's due.
+# Count active/parked sessions whose _index.md exceeds BLOAT_LINES. A wc -l per
+# session is cheap (no full-text scan), so this stays fail-quiet/hook-safe.
+_bloat_count() { # $1 = vault root
+	local root="$1/Sessions" f st lines n=0
+	[ -d "$root" ] || {
+		printf 0
+		return 0
+	}
+	while IFS= read -r f; do
+		[ -n "$f" ] || continue
+		case "$f" in "$root"/_archive/*) continue ;; esac
+		st=$(_fm_field "$f" status)
+		case "$st" in active | parked) ;; *) continue ;; esac
+		lines=$(wc -l <"$f" 2>/dev/null) || continue
+		lines="${lines// /}"
+		[ "${lines:-0}" -gt "$BLOAT_LINES" ] && n=$((n + 1))
+	done < <(find "$root" -maxdepth 2 -name "_index.md" -type f 2>/dev/null)
+	printf '%s' "$n"
+}
 _groom_nudge() {
-	local now part out="" rows done_n cold_n stale_n
+	local now part out="" rows done_n cold_n stale_n bloat_n
 	now=$(date +%s)
 	_count() { # $1 = vault root, $2 = label
 		rows=$(_session_rows "$1")
-		[ -n "$rows" ] || return 0
+		bloat_n=$(_bloat_count "$1")
+		[ -n "$rows" ] || {
+			[ "${bloat_n:-0}" -eq 0 ] && return 0
+		}
 		done_n=$(printf '%s\n' "$rows" | awk -F'\t' '$4=="done"{c++} END{print c+0}')
 		cold_n=$(printf '%s\n' "$rows" | awk -F'\t' -v now="$now" -v cd="$COLD_DAYS" \
 			'$4=="parked" && (now-$1)/86400 >= cd {c++} END{print c+0}')
 		stale_n=$(printf '%s\n' "$rows" | awk -F'\t' -v now="$now" -v sd="$STALE_ACTIVE_DAYS" \
 			'$4=="active" && (now-$1)/86400 >= sd {c++} END{print c+0}')
-		[ "$done_n" -eq 0 ] && [ "$cold_n" -eq 0 ] && [ "$stale_n" -eq 0 ] && return 0
+		[ "$done_n" -eq 0 ] && [ "$cold_n" -eq 0 ] && [ "$stale_n" -eq 0 ] && [ "${bloat_n:-0}" -eq 0 ] && return 0
 		local parts=""
 		[ "$done_n" -gt 0 ] && parts="${done_n} done to archive"
 		[ "$cold_n" -gt 0 ] && parts="${parts:+$parts, }${cold_n} parked cold >${COLD_DAYS}d"
 		[ "$stale_n" -gt 0 ] && parts="${parts:+$parts, }${stale_n} active stale >${STALE_ACTIVE_DAYS}d"
+		[ "${bloat_n:-0}" -gt 0 ] && parts="${parts:+$parts, }${bloat_n} checkpoint due >${BLOAT_LINES}L"
 		out="${out:+$out · }$2: $parts"
 	}
 	local _vid _vpath _vlabel
@@ -590,13 +1059,29 @@ _groom_nudge() {
 	[ -n "$out" ] && printf '⚠ %s — run `vaultmem groom`' "$out"
 }
 
+# The exact match condition for "this Project note has a `## Sessions` line
+# that would flip for $2=thread": it must both link [[<thread>]] AND carry a
+# trailing status token (active|parked|done) right before the closing `)`, in
+# one of the documented formats `(status: <st>)`, `(<ISSUE>, <st>)`, `(<st>)`.
+# Shared by _flip_project_status (the real mutation) and cmd_groom --dry-run
+# (the preview) so the two can never drift apart — a line missing the status
+# token is real `groom`'s no-op case, and the preview must say so too.
+_project_line_would_flip() { # $1 = Project .md path, $2 = thread
+	local pf="$1" thread="$2"
+	[ -f "$pf" ] || return 1
+	awk -v t="$thread" '
+    index($0, "[[" t "]]") && /(active|parked|done)\)/ { found=1; exit }
+    END { exit !found }
+  ' "$pf"
+}
+
 # On the `## Sessions` line that links [[<thread>]] in a Project note, flip the
 # trailing status token (active|parked|done) to `archived`. Best-effort: the
 # status is always the word right before the closing `)` in the documented
 # formats `(status: <st>)`, `(<ISSUE>, <st>)`, `(<st>)`.
 _flip_project_status() { # $1 = Project .md path, $2 = thread
 	local pf="$1" thread="$2" tmp
-	[ -f "$pf" ] || return 0
+	_project_line_would_flip "$pf" "$thread" || return 0
 	tmp=$(mktemp) || return 0
 	if awk -v t="$thread" '
     index($0, "[[" t "]]") && /(active|parked|done)\)/ {
@@ -611,11 +1096,18 @@ _flip_project_status() { # $1 = Project .md path, $2 = thread
 # parent Project's `## Sessions` line flipped to archived. Report-only: list
 # `parked` sessions untouched > COLD_DAYS as resume-or-retire triage candidates
 # (never auto-retired — that judgment lives in the session skill).
+#
+# --dry-run ($1): preview only — print the exact would-move list (source →
+# destination) and the project-index lines that would flip, and perform NO mv
+# and NO file writes. Real (no-flag) behavior is unchanged; the flag only
+# swaps the two mutating calls (mv, _flip_project_status) for print statements.
 cmd_groom() {
-	local now did=0 cold_lines="" stale_lines=""
+	local dry=0
+	[ "${1:-}" = "--dry-run" ] && dry=1
+	local now did=0 cold_lines="" stale_lines="" bloat_lines=""
 	now=$(date +%s)
 	_groom_vault() { # $1 = vault root, $2 = label
-		local root="$1/Sessions" label="$2" arc f name st proj upd ts age
+		local root="$1/Sessions" label="$2" arc f name st proj upd ts age lines
 		[ -d "$root" ] || return 0
 		arc="$root/_archive"
 		while IFS= read -r f; do
@@ -624,8 +1116,38 @@ cmd_groom() {
 			name=$(basename "$(dirname "$f")")
 			[ "$name" = "Sessions" ] && continue
 			st=$(_fm_field "$f" status)
+			# checkpoint-due: active/parked sessions past BLOAT_LINES — a wc -l per
+			# session is cheap, no full-text scan.
+			case "$st" in
+			active | parked)
+				lines=$(wc -l <"$f" 2>/dev/null) || lines=0
+				lines="${lines// /}"
+				if [ "${lines:-0}" -gt "$BLOAT_LINES" ]; then
+					proj=$(_fm_field "$f" project)
+					bloat_lines="${bloat_lines}  ${label}: ${name} (${lines}L, ${proj:-no project})
+"
+				fi
+				;;
+			esac
 			case "$st" in
 			done)
+				if [ "$dry" -eq 1 ]; then
+					if [ -e "$arc/$name" ]; then
+						printf '%s: skip %s (already in _archive/)\n' "$label" "$name" >&2
+						continue
+					fi
+					printf '%s: Sessions/%s → Sessions/_archive/%s\n' "$label" "$name" "$name"
+					proj=$(_fm_field "$f" project)
+					if [ -n "$proj" ]; then
+						local ppath="$1/Projects/$proj.md"
+						[ -f "$ppath" ] || ppath=$(_first_glob "$1/Projects/"*" $proj.md")
+						if [ -n "$ppath" ] && _project_line_would_flip "$ppath" "$name"; then
+							printf '%s: would flip Projects/%s session line [[%s]] → archived\n' "$label" "$(basename "${ppath%.md}")" "$name"
+						fi
+					fi
+					did=$((did + 1))
+					continue
+				fi
 				mkdir -p "$arc"
 				if [ -e "$arc/$name" ]; then
 					printf '%s: skip %s (already in _archive/)\n' "$label" "$name" >&2
@@ -696,6 +1218,15 @@ cmd_groom() {
 				printf '%s: NOT archiving %s (done) — live sessions still reference it:\n%s' "$label" "$name" "$blockers" >&2
 				continue
 			fi
+			if [ "$dry" -eq 1 ]; then
+				if [ -e "$arc/$(basename "$pf")" ]; then
+					printf '%s: skip %s (already in Projects/_archive/)\n' "$label" "$name" >&2
+					continue
+				fi
+				printf '%s: Projects/%s → Projects/_archive/%s\n' "$label" "$(basename "$pf")" "$(basename "$pf")"
+				did=$((did + 1))
+				continue
+			fi
 			mkdir -p "$arc"
 			if [ -e "$arc/$(basename "$pf")" ]; then
 				printf '%s: skip %s (already in Projects/_archive/)\n' "$label" "$name" >&2
@@ -713,7 +1244,11 @@ cmd_groom() {
 		_groom_vault "$_vpath" "$_vlabel"
 		_groom_projects "$_vpath" "$_vlabel"
 	done <<<"$_REG"
-	[ "$did" -eq 0 ] && printf 'Nothing to archive.\n'
+	if [ "$did" -eq 0 ]; then
+		printf 'Nothing to archive.\n'
+	elif [ "$dry" -eq 1 ]; then
+		printf '(dry run — no files moved, no writes made)\n'
+	fi
 	if [ -n "$cold_lines" ]; then
 		printf 'Cold parked (>%dd — resume or retire via the session skill):\n' "$COLD_DAYS"
 		printf '%s' "$cold_lines"
@@ -721,6 +1256,10 @@ cmd_groom() {
 	if [ -n "$stale_lines" ]; then
 		printf 'Stale active (>%dd untouched — park or retire via the session skill; if the bookmark says the task is done, flip status: done):\n' "$STALE_ACTIVE_DAYS"
 		printf '%s' "$stale_lines"
+	fi
+	if [ -n "$bloat_lines" ]; then
+		printf 'Checkpoint due (>%dL — distill via the session skill and trim _index.md):\n' "$BLOAT_LINES"
+		printf '%s' "$bloat_lines"
 	fi
 	# Grooming is the deliberate cleanup moment — also flag Agent-Index drift here
 	# (broken/stale rows) so it gets triaged alongside session archiving.
@@ -956,6 +1495,11 @@ COLD_DAYS="${VAULTMEM_COLD_DAYS:-${OBSIDIAN_SESSION_COLD_DAYS:-${DEF_COLD_DAYS:-
 # finished). No config-file key yet, env override only.
 STALE_ACTIVE_DAYS="${VAULTMEM_STALE_ACTIVE_DAYS:-7}"
 
+# Bloat threshold in lines (an active/parked session's _index.md past this many
+# lines is due for a checkpoint/distill per the session skill). Env override
+# wins over the config default, same pattern as COLD_DAYS.
+BLOAT_LINES="${VAULTMEM_BLOAT_LINES:-${DEF_BLOAT_LINES:-150}}"
+
 # --- subcommand: projects (list Project notes + session counts) ----------------
 cmd_projects() {
 	local -a roots=()
@@ -1087,7 +1631,22 @@ cmd_neighbors() {
 
 # Dangling-link hygiene. With a note arg → that note's broken links. Without →
 # scan the vault(s) for every broken [[link]] (the anti-fabrication check).
+# --by-target (leading flag, may precede a note arg) aggregates the same scan
+# by missing target instead of by source note: each dangling target once, with
+# its inbound (broken-referencing) count, sorted count-descending — "most-
+# wanted missing notes", i.e. what to write next.
 cmd_dangling() {
+	local by_target=0
+	case "$1" in
+	--by-target)
+		by_target=1
+		shift
+		;;
+	"--by-target "*)
+		by_target=1
+		set -- "${1#--by-target }"
+		;;
+	esac
 	local -a files=()
 	if [ -n "$1" ]; then
 		local n
@@ -1098,6 +1657,37 @@ cmd_dangling() {
 		local r
 		while IFS= read -r r; do roots+=("$r"); done < <(_link_roots)
 		while IFS= read -r f; do files+=("$f"); done < <(rg -lN '\[\[[^]]+\]\]' --glob '*.md' --glob '!Templates/**' "${roots[@]}" 2>/dev/null)
+	fi
+	if [ "$by_target" -eq 1 ]; then
+		printf '%s▸ Dangling wikilinks — by target%s\n' "$B" "$R"
+		local f t missing
+		missing=$(
+			for f in "${files[@]}"; do
+				while IFS= read -r t; do
+					[ -n "$t" ] || continue
+					_resolve_path "$t" >/dev/null 2>&1 || printf '%s\n' "$t"
+				done < <(_outbound_targets "$f")
+			done
+		)
+		if [ -z "$missing" ]; then
+			printf '  (none — all links resolve ✓)\n'
+		else
+			# Group by case-folded target (matches _resolve_path's case-insensitive
+			# lookup) so e.g. [[Widget]] and [[widget]] count as one missing note
+			# instead of splintering into two diluted rows. The representative
+			# spelling is the smallest variant under C collation, NOT the first
+			# seen: `rg -lN` file order differs between platforms, and awk's `<`
+			# follows the locale (en_US puts "ghost" before "Ghost"; C is the
+			# reverse), so both must be pinned or the displayed casing varies by
+			# machine. LC_ALL=C also keeps the sort byte-stable.
+			printf '%s\n' "$missing" | LC_ALL=C awk '
+				{ key = tolower($0); count[key]++; if (!(key in rep) || $0 < rep[key]) rep[key] = $0 }
+				END { for (k in count) printf "%d\t%s\n", count[k], rep[k] }
+			' | LC_ALL=C sort -t $'\t' -k1,1rn -k2,2f | while IFS=$'\t' read -r count target; do
+				printf '  %3d  [[%s]]\n' "$count" "$target"
+			done
+		fi
+		return 0
 	fi
 	printf '%s▸ Dangling wikilinks%s\n' "$B" "$R"
 	local found=0 f t
@@ -1111,6 +1701,234 @@ cmd_dangling() {
 		done < <(_outbound_targets "$f")
 	done
 	[ "$found" -eq 0 ] && printf '  (none — all links resolve ✓)\n'
+	return 0
+}
+
+# Resolve a bare thread name to its _index.md, across all selected vault
+# roots. Tries the live path first (Sessions/<thread>/_index.md), then the
+# archived path (Sessions/_archive/<thread>/_index.md) — a groomed/done
+# session's Bookmark is still a legitimate resume artifact to re-anchor from,
+# unlike the listing surfaces (_session_rows/groom/sessions) which exclude
+# _archive/ on purpose to keep the active picker uncluttered. Prints the path
+# and returns 0, else returns 1.
+_resolve_session_path() {
+	local thread="$1" r p
+	[ -n "$thread" ] || return 1
+	local -a roots=()
+	while IFS= read -r r; do roots+=("$r"); done < <(_link_roots)
+	for p in "${roots[@]/%//Sessions/$thread/_index.md}"; do
+		[ -f "$p" ] && {
+			printf '%s\n' "$p"
+			return 0
+		}
+	done
+	for p in "${roots[@]/%//Sessions/_archive/$thread/_index.md}"; do
+		[ -f "$p" ] && {
+			printf '%s\n' "$p"
+			return 0
+		}
+	done
+	return 1
+}
+
+# Print only the `## Bookmark` and `## Pinned` sections of a session's
+# _index.md — the two blocks the session skill designates as resumable state
+# (see SCHEMA.md § ## Bookmark, skills/session/SKILL.md), so an agent can
+# re-anchor without reading the whole file. NOT fail-quiet: an unknown thread
+# is a real error (a typo'd resume target should not silently print nothing).
+cmd_bookmark() {
+	local thread="$1" f
+	[ -n "$thread" ] || die "usage: vaultmem bookmark <thread>"
+	f=$(_resolve_session_path "$thread") || die "no such session: $thread (looked in Sessions/ and Sessions/_archive/)"
+	printf '%s▸ Bookmark: %s%s\n' "$B" "$thread" "$R"
+	awk '
+    /^## (Bookmark|Pinned)[[:space:]]*$/{show=1; print; next}
+    show && /^## /{show=0}
+    show{print}
+  ' "$f"
+	return 0
+}
+
+# --- subcommand: verify (single-file verify-on-write) ---------------------------
+# Designed for a PostToolUse Write|Edit hook: an agent editing source code in a
+# random repo will fire this constantly, so it MUST be fail-quiet (exit 0,
+# silent) for any path that is not a markdown note under a configured vault
+# root. Only a real finding on a real vault note returns non-zero. Reuses the
+# exact _schema_scan_session_note / _schema_scan_project_note lint bodies the
+# vault-wide `doctor` scan uses, plus a same-file dangling-wikilink check
+# (cmd_dangling's per-file loop, scoped to just this note).
+
+# Absolute path of $1 without requiring `realpath` (not in the tool's approved
+# dependency set). Prints nothing if the parent dir doesn't exist. Uses logical
+# `pwd` (not `-P`) so a symlinked path component (e.g. macOS /tmp ->
+# /private/tmp) stays in the same form the vault root was configured in —
+# resolving it would make an in-vault path silently fail to prefix-match.
+_abs_path() {
+	local p="$1" dir base
+	dir=$(dirname "$p")
+	base=$(basename "$p")
+	dir=$(cd "$dir" 2>/dev/null && pwd) || return 1
+	printf '%s/%s\n' "$dir" "$base"
+}
+
+# Print the vault root $1 lives under, or nothing (+ non-zero) if none. Compares
+# both the raw and symlink-resolved form of each registered vault root against
+# the (logical, unresolved) abs path, so a vault configured through a symlinked
+# parent still matches.
+_vault_root_for_path() {
+	local abs="$1" _id _p _rest _pr
+	while IFS=$'\t' read -r _id _p _rest; do
+		if [ -z "$_id" ] || [ -z "$_p" ]; then continue; fi
+		case "$abs" in
+		"$_p"/*)
+			printf '%s\n' "$_p"
+			return 0
+			;;
+		esac
+		_pr=$(cd "$_p" 2>/dev/null && pwd -P) || continue
+		case "$abs" in
+		"$_pr"/*)
+			printf '%s\n' "$_pr"
+			return 0
+			;;
+		esac
+	done <<<"$_REG"
+	return 1
+}
+
+cmd_verify() {
+	local raw="${1:-}" abs root
+	[ -n "$raw" ] || exit 0
+	abs=$(_abs_path "$raw") || exit 0
+	[ -f "$abs" ] || exit 0
+	case "$abs" in *.md) ;; *) exit 0 ;; esac
+	root=$(_vault_root_for_path "$abs") || exit 0
+
+	local rel dir name issues=""
+	rel="${abs#"$root"/}"
+	dir=$(dirname "$abs")
+
+	case "$rel" in
+	Sessions/*/_index.md)
+		case "$dir" in "$root/Sessions/_archive"/*) exit 0 ;; esac
+		name=$(basename "$dir")
+		[ "$name" = "Sessions" ] && exit 0
+		issues=$(_schema_scan_session_note "$abs" "Sessions/$name" "$name")
+		;;
+	Projects/*.md)
+		if [ "$(_fm_field "$abs" type)" != moc ]; then
+			name=$(basename "${abs%.md}")
+			issues=$(_schema_scan_project_note "$abs" "Projects/$name" "$name" "$root")
+		fi
+		;;
+	esac
+
+	local dangling="" t
+	while IFS= read -r t; do
+		[ -n "$t" ] || continue
+		_resolve_path "$t" >/dev/null 2>&1 || dangling="${dangling}DANGLING\t${rel}\t[[${t}]] does not resolve\n"
+	done < <(_outbound_targets "$abs")
+
+	local all=""
+	[ -n "$issues" ] && all="$issues"
+	if [ -n "$dangling" ]; then
+		all="${all:+$all
+}$(printf '%b' "$dangling" | grep -v '^[[:space:]]*$')"
+	fi
+
+	if [ -z "$all" ]; then
+		return 0
+	fi
+	printf '%s▸ vaultmem verify: %s%s\n' "$B" "$rel" "$R"
+	printf '%s\n' "$all" | awk -F'\t' 'NF>=3{printf "  [%s] %s\n        %s\n", $1, $2, $3}'
+	return 1
+}
+
+# --- subcommand: frontier (rank notes by knowledge-frontier score) -------------
+# score = (outbound - inbound) * exp(-days_since_updated / 30). A note that
+# points at much but is pointed at little, and was touched recently, sits on
+# the active edge of the graph — the best place to write next. Recency reads
+# `updated:` frontmatter (NOT file mtime — cloud-drive re-sync rewrites mtime
+# and would corrupt this), falling back to mtime only when `updated:` is
+# missing/unparseable, same as `_session_rows`. Home.md, MOCs/, Templates/, and
+# any `_archive/` folder are skipped: they are hubs/scaffolding/retired notes,
+# not candidate write targets.
+_frontier_scan() { # prints "note\tout\tin\tepoch" rows (tab-sep) over $(_link_roots)
+	local -a roots=()
+	local r
+	while IFS= read -r r; do roots+=("$r"); done < <(_link_roots)
+	[ "${#roots[@]}" -gt 0 ] || return 0
+
+	# List every .md file per root, then filter in bash rather than lean on rg
+	# --glob anchoring (which anchors to cwd, not to a path argument, when a
+	# root is passed explicitly — so `--glob '!Templates/**'` silently fails to
+	# exclude here). basename/root-relative checks below are the reliable form.
+	local -a files=()
+	local f rel home
+	for r in "${roots[@]}"; do
+		[ -d "$r" ] || continue
+		home="$r/Home.md"
+		while IFS= read -r f; do
+			[ -n "$f" ] || continue
+			[ "$f" = "$home" ] && continue
+			rel="${f#"$r"/}"
+			case "$rel" in
+			Templates/* | MOCs/* | */_archive/* | _archive/*) continue ;;
+			esac
+			files+=("$f")
+		done < <(rg -lN '' --glob '*.md' "$r" 2>/dev/null)
+	done
+	[ "${#files[@]}" -gt 0 ] || return 0
+
+	# Pass 1: outbound count per note + resolved target list (for pass 2 tally).
+	local tmp_out tmp_in
+	tmp_out=$(mktemp) && tmp_in=$(mktemp) || return 0
+	local t tp outc
+	for f in "${files[@]}"; do
+		outc=0
+		while IFS= read -r t; do
+			[ -n "$t" ] || continue
+			outc=$((outc + 1))
+			if tp=$(_resolve_path "$t" 2>/dev/null); then
+				printf '%s\n' "$tp" >>"$tmp_in"
+			fi
+		done < <(_outbound_targets "$f")
+		printf '%s\t%s\n' "$f" "$outc" >>"$tmp_out"
+	done
+
+	# Pass 2: inbound = how often each resolved path appears as a target.
+	local upd ts
+	while IFS=$'\t' read -r f outc; do
+		[ -n "$f" ] || continue
+		local inc
+		inc=$(grep -Fxc "$f" "$tmp_in" 2>/dev/null || true)
+		upd=$(_fm_field "$f" updated)
+		ts=$(_to_epoch "$upd")
+		if [ -z "$ts" ]; then
+			if [ "$(uname)" = Darwin ]; then ts=$(stat -f '%m' "$f"); else ts=$(stat -c '%Y' "$f"); fi
+		fi
+		printf '%s\t%s\t%s\t%s\n' "$f" "$outc" "${inc:-0}" "$ts"
+	done <"$tmp_out"
+	rm -f "$tmp_out" "$tmp_in"
+}
+cmd_frontier() {
+	local now cap="$LIMIT" rows
+	now=$(date +%s)
+	rows=$(_frontier_scan)
+	if [ -z "$rows" ]; then
+		printf '(no notes to rank — check vault path / -v selection)\n'
+		return 0
+	fi
+	printf '%s▸ Knowledge frontier — score = (out - in) · exp(-days/30); high score = active edge, write here next%s\n' "$B" "$R"
+	printf '%s\n' "$rows" | awk -F'\t' -v now="$now" -v cap="$cap" '
+    {
+      f=$1; out=$2; inn=$3; ts=$4
+      days = (now - ts) / 86400
+      if (days < 0) days = 0
+      score = (out - inn) * exp(-days / 30)
+      printf "%.4f\t%s\t%d\t%d\t%d\n", score, f, out, inn, days
+    }' | sort -t$'\t' -k1,1gr | head -n "$cap" |
+		awk -F'\t' '{ rel=$2; sub(/.*\/Obsidian\//, "", rel); printf "  %7.4f  out=%-3d in=%-3d  %3dd  %s\n", $1, $3, $4, $5, rel }'
 	return 0
 }
 
@@ -1132,6 +1950,7 @@ _init_config() {
 vault = "personal"        # fallback vault when routing finds no signal
 limit = 20                # default result cap
 cold_days = 21            # a parked session untouched this long is grooming-due
+bloat_lines = 150         # an active/parked _index.md over this many lines is checkpoint-due
 directive_file = ""       # optional: path to custom AGENT DIRECTIVE text
 
 [vault.personal]
@@ -1226,7 +2045,7 @@ while [ $# -gt 0 ]; do
 		shift 2
 		;;
 	-h | --help)
-		sed -n '4,52p' "$0"
+		sed -n '4,78p' "$0"
 		exit 0
 		;;
 	*)
@@ -1241,20 +2060,22 @@ case "$VAULT" in flosports) VAULT=flo ;; personal) VAULT=jay ;; esac # historica
 SEL=both
 [ "$VAULT" != both ] && _vault_known "$VAULT" && SEL="$VAULT"
 
-# Require a configured vault for commands that read one. status/sessions stay
-# fail-quiet (the hook path); which/init/usage are vault-independent or scaffold;
-# doctor must run its config-lint even when the config is too broken to register a
-# vault (that is exactly what it exists to report).
+# Require a configured vault for commands that read one. status/sessions/
+# verify/nudge stay fail-quiet (the hook path); which/init/usage are
+# vault-independent or scaffold; doctor must run its config-lint even when the
+# config is too broken to register a vault (that is exactly what it exists to
+# report).
 case "${ARGS[0]:-}" in
-status | sessions | which | init | doctor | "") ;;
+status | sessions | verify | nudge | which | init | doctor | "") ;;
 *) [ "${REG_HAVE_PATH:-0}" = 1 ] || die "no vault configured — create $VAULTMEM_CONFIG (run 'vaultmem init --config') or set OBS_FLO/OBS_JAY (legacy)" ;;
 esac
 
 case "${ARGS[0]:-}" in
-"") sed -n '4,52p' "$0" ;; # no args → print usage
+"") sed -n '4,78p' "$0" ;; # no args → print usage
 status) cmd_status ;;
+nudge) cmd_nudge ;;
 index) cmd_index "${ARGS[1]:-}" ;;
-doctor) cmd_doctor ;;
+doctor) cmd_doctor "${ARGS[1]:-}" ;;
 mocs) cmd_mocs ;;
 vaults) cmd_vaults ;;
 path) cmd_path "${ARGS[1]:-}" ;;
@@ -1262,12 +2083,15 @@ which) cmd_which "${ARGS[1]:-$PWD}" ;;
 sessions) cmd_sessions ;;
 projects) cmd_projects ;;
 project) cmd_project "${ARGS[*]:1}" ;;
-groom) cmd_groom ;;
+groom) cmd_groom "${ARGS[1]:-}" ;;
 init) cmd_init "${ARGS[1]:-}" "${ARGS[2]:-}" ;;
 resolve) cmd_resolve "${ARGS[*]:1}" ;;
 links) cmd_links "${ARGS[*]:1}" ;;
 backlinks) cmd_backlinks "${ARGS[*]:1}" ;;
 neighbors) cmd_neighbors "${ARGS[*]:1}" ;;
 dangling) cmd_dangling "${ARGS[*]:1}" ;;
+bookmark) cmd_bookmark "${ARGS[*]:1}" ;;
+verify) cmd_verify "${ARGS[1]:-}" ;;
+frontier) cmd_frontier ;;
 *) cmd_search "${ARGS[*]}" ;;
 esac

@@ -12,6 +12,8 @@ setup() {
   export OBS_FLO="$BATS_TEST_TMPDIR/flo"
   export OBS_JAY="$BATS_TEST_TMPDIR/jay"
   export DEV_DIR="$BATS_TEST_TMPDIR/src"
+  # Isolated cache dir so `nudge`'s stamp file never touches a real ~/.cache.
+  export XDG_CACHE_HOME="$BATS_TEST_TMPDIR/cache"
   mkdir -p "$OBS_FLO" "$OBS_JAY"
   # The vault registry the tool consumes. Two vaults flo/jay with labels + owner
   # routing, so the suite exercises the config path a real user hits.
@@ -346,6 +348,207 @@ EOF
   [[ "$output" == *"none"* ]]
 }
 
+@test "dangling default output is unchanged (source -> target lines)" {
+  seed_graph
+  run "$OM" -v flo dangling
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"▸ Dangling wikilinks"* ]]
+  [[ "$output" != *"by target"* ]]
+  [[ "$output" == *"→ [[Architecture/Ghost]]"* ]]
+}
+
+@test "dangling --by-target aggregates by missing target with inbound counts, sorted descending" {
+  seed_graph
+  # A second reference to the same dangling target, from a different note, so
+  # the target's inbound count is 2 (MOC + Widget) vs. any other target's 0/1.
+  printf -- '\nAlso see [[Architecture/Ghost]].\n' >>"$OBS_FLO/Architecture/Widget.md"
+  run "$OM" -v flo dangling --by-target
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"▸ Dangling wikilinks — by target"* ]]
+  [[ "$output" == *"2  [[Architecture/Ghost]]"* ]]
+  # Aggregated: exactly one line for the target, not one per source note.
+  ghost_lines=$(printf '%s\n' "$output" | grep -c '\[\[Architecture/Ghost\]\]')
+  [ "$ghost_lines" -eq 1 ]
+}
+
+@test "dangling --by-target collapses case-variant targets into one row" {
+  seed_graph
+  # Same missing note referenced with two different casings from two
+  # different notes. _resolve_path resolves wikilinks case-insensitively
+  # (find -iname), so these are the same dangling target and must collapse
+  # into a single aggregated row with count 2, not split into two rows of 1.
+  printf -- '\nAlso see [[Architecture/ghost]].\n' >>"$OBS_FLO/Architecture/Widget.md"
+  run "$OM" -v flo dangling --by-target
+  [ "$status" -eq 0 ]
+  ghost_lines=$(printf '%s\n' "$output" | grep -ic '\[\[Architecture/Ghost\]\]')
+  [ "$ghost_lines" -eq 1 ]
+  [[ "$output" == *"2  [[Architecture/Ghost]]"* ]]
+}
+
+@test "dangling --by-target on a clean vault reports none" {
+  mkdir -p "$OBS_FLO"
+  printf -- '# Notes\nno links here\n' >"$OBS_FLO/clean.md"
+  run "$OM" -v flo dangling --by-target
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"none"* ]]
+}
+
+@test "dangling --by-target restricts to a single note when given one" {
+  seed_graph
+  run "$OM" -v flo dangling --by-target "Demo"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"[[Architecture/Ghost]]"* ]]
+}
+
+# --- session resume: bookmark ------------------------------------------------
+
+seed_bookmark_session() {
+  mkdir -p "$OBS_JAY/Sessions/live-thread" "$OBS_JAY/Sessions/_archive/old-thread"
+  cat >"$OBS_JAY/Sessions/live-thread/_index.md" <<'EOF'
+---
+thread: live-thread
+status: active
+updated: 2026-07-20
+aliases: [live-thread]
+---
+# live-thread
+
+## Bookmark
+Last: did X
+Next: do Y
+
+## Pinned
+- constant: some value
+
+## Work log
+- did stuff
+
+## Decisions
+none
+EOF
+  cat >"$OBS_JAY/Sessions/_archive/old-thread/_index.md" <<'EOF'
+---
+thread: old-thread
+status: done
+updated: 2026-06-01
+aliases: [old-thread]
+---
+# old-thread
+
+## Bookmark
+Last: closed out
+Next: n/a
+
+## Pinned
+- constant: archived-const
+EOF
+}
+
+@test "bookmark prints only the Bookmark and Pinned sections" {
+  seed_bookmark_session
+  run "$OM" -v jay bookmark live-thread
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"## Bookmark"* ]]
+  [[ "$output" == *"Last: did X"* ]]
+  [[ "$output" == *"## Pinned"* ]]
+  [[ "$output" == *"constant: some value"* ]]
+  [[ "$output" != *"## Work log"* ]]
+  [[ "$output" != *"did stuff"* ]]
+  [[ "$output" != *"## Decisions"* ]]
+}
+
+@test "bookmark resolves an archived session under Sessions/_archive/" {
+  seed_bookmark_session
+  run "$OM" -v jay bookmark old-thread
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"## Bookmark"* ]]
+  [[ "$output" == *"Last: closed out"* ]]
+  [[ "$output" == *"## Pinned"* ]]
+  [[ "$output" == *"archived-const"* ]]
+}
+
+@test "bookmark errors clearly (nonzero) on an unknown thread" {
+  seed_bookmark_session
+  run "$OM" -v jay bookmark no-such-thread
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"no such session"* ]]
+  [[ "$output" == *"no-such-thread"* ]]
+}
+
+@test "bookmark errors (nonzero) with no thread argument" {
+  seed_bookmark_session
+  run "$OM" -v jay bookmark
+  [ "$status" -ne 0 ]
+}
+
+# --- frontier (knowledge-frontier ranking: (out-in) * exp(-days/30)) -----------
+
+@test "frontier ranks a high-fanout recently-updated hub above its low-fanout leaves" {
+  seed_graph
+  # Widget points at Ada + the MOC (out=2); Ada points at Widget (out=1). Both
+  # untouched (no updated: → mtime fallback, effectively 0d old since just
+  # written), so ranking is driven by (out - in): Widget/MOC out-rank Ada.
+  run "$OM" -v flo frontier
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"Knowledge frontier"* ]]
+  [[ "$output" == *"Architecture/Widget.md"* ]]
+  [[ "$output" == *"People/Ada.md"* ]]
+  # Widget (out=2, has both an outbound to Ada and to the MOC) ranks above Ada
+  # (out=1, in=1) in the printed order.
+  widget_line=$(echo "$output" | grep -n "Architecture/Widget.md" | head -1 | cut -d: -f1)
+  ada_line=$(echo "$output" | grep -n "People/Ada.md" | head -1 | cut -d: -f1)
+  [ "$widget_line" -lt "$ada_line" ]
+}
+
+@test "frontier excludes Home.md, MOCs/, Templates/, and _archive/" {
+  seed_graph
+  mkdir -p "$OBS_FLO/Templates" "$OBS_FLO/Sessions/_archive/old"
+  printf -- '---\nschema: 1\n---\n# Home\n<!-- AGENT-INDEX:START -->\n<!-- AGENT-INDEX:END -->\n' >"$OBS_FLO/Home.md"
+  printf -- '---\ntype: project\n---\n# Template\n' >"$OBS_FLO/Templates/Project.md"
+  printf -- '---\nthread: old\nstatus: done\nupdated: 2020-01-01\n---\n# old\n' >"$OBS_FLO/Sessions/_archive/old/_index.md"
+  run "$OM" -v flo frontier
+  [ "$status" -eq 0 ]
+  [[ "$output" != *"Home.md"* ]]
+  [[ "$output" != *"MOCs/MOC - Demo.md"* ]]
+  [[ "$output" != *"Templates/Project.md"* ]]
+  [[ "$output" != *"_archive/old"* ]]
+  # The non-excluded notes are still ranked.
+  [[ "$output" == *"Architecture/Widget.md"* ]]
+}
+
+@test "frontier scores a recently-updated high-fanout note above an old low-fanout one" {
+  mkdir -p "$OBS_FLO/Notes"
+  printf -- '---\nupdated: %s\n---\n# Hub\n[[Notes/A]] [[Notes/B]] [[Notes/C]]\n' "$(days_ago 1)" >"$OBS_FLO/Notes/Hub.md"
+  printf -- '---\nupdated: %s\n---\n# A\n' "$(days_ago 90)" >"$OBS_FLO/Notes/A.md"
+  printf -- '---\nupdated: %s\n---\n# B\n' "$(days_ago 90)" >"$OBS_FLO/Notes/B.md"
+  printf -- '---\nupdated: %s\n---\n# C\n' "$(days_ago 90)" >"$OBS_FLO/Notes/C.md"
+  run "$OM" -v flo frontier
+  [ "$status" -eq 0 ]
+  first_line=$(echo "$output" | sed -n '2p')
+  [[ "$first_line" == *"Notes/Hub.md"* ]]
+}
+
+@test "frontier -n caps the result count" {
+  mkdir -p "$OBS_FLO/Notes"
+  printf -- '# One\n' >"$OBS_FLO/Notes/One.md"
+  printf -- '# Two\n' >"$OBS_FLO/Notes/Two.md"
+  printf -- '# Three\n' >"$OBS_FLO/Notes/Three.md"
+  run "$OM" -v flo -n 1 frontier
+  [ "$status" -eq 0 ]
+  # header line + exactly one ranked row
+  [ "$(echo "$output" | wc -l | tr -d ' ')" -eq 2 ]
+}
+
+@test "frontier falls back to file mtime when updated: is missing" {
+  mkdir -p "$OBS_FLO/Notes"
+  printf -- '# NoUpdated\nplain note, no frontmatter\n' >"$OBS_FLO/Notes/NoUpdated.md"
+  run "$OM" -v flo frontier
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"Notes/NoUpdated.md"* ]]
+  # a freshly-written file's mtime is "now" → 0d in the printed row
+  [[ "$output" == *"  0d  "*"Notes/NoUpdated.md"* ]]
+}
+
 # --- project tier: projects / project verbs --------------------------------
 
 # Seed a vault with one Project note and three sessions (2 under it, 1 orphan).
@@ -625,6 +828,88 @@ EOF
   [[ "$output" == *"a3"* ]]
 }
 
+# Print $1 lines of filler text (for building an over-threshold _index.md).
+filler_lines() {
+  local i
+  for ((i = 0; i < "$1"; i++)); do printf 'line %d\n' "$i"; done
+}
+
+@test "groom reports active/parked sessions past the default 150-line bloat threshold" {
+  mkdir -p "$OBS_JAY/Sessions/big-active" "$OBS_JAY/Sessions/small-active"
+  {
+    printf -- '---\nproject: p\nstatus: active\nupdated: %s\n---\n# big-active\n' "$(days_ago 1)"
+    filler_lines 200
+  } >"$OBS_JAY/Sessions/big-active/_index.md"
+  printf -- '---\nstatus: active\nupdated: %s\n---\n# small-active\n' "$(days_ago 1)" \
+    >"$OBS_JAY/Sessions/small-active/_index.md"
+  run "$OM" -v jay groom
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"Checkpoint due"* ]]
+  [[ "$output" == *"big-active"* ]]
+  [[ "$output" == *"p"* ]]
+  [[ "$output" != *"small-active"* ]]
+}
+
+@test "groom bloat threshold honors VAULTMEM_BLOAT_LINES" {
+  mkdir -p "$OBS_JAY/Sessions/mid-parked"
+  {
+    printf -- '---\nstatus: parked\nupdated: %s\n---\n# mid-parked\n' "$(days_ago 1)"
+    filler_lines 60
+  } >"$OBS_JAY/Sessions/mid-parked/_index.md"
+  # default 150 → not over threshold
+  run "$OM" -v jay groom
+  [[ "$output" != *"mid-parked"* ]]
+  # threshold 50 → now over
+  VAULTMEM_BLOAT_LINES=50 run "$OM" -v jay groom
+  [[ "$output" == *"mid-parked"* ]]
+}
+
+@test "groom bloat threshold reads bloat_lines from the config default" {
+  cat >"$VAULTMEM_CONFIG" <<EOF
+[defaults]
+vault = "jay"
+bloat_lines = 50
+
+[vault.jay]
+label = "Personal"
+path = "$OBS_JAY"
+EOF
+  mkdir -p "$OBS_JAY/Sessions/mid-parked2"
+  {
+    printf -- '---\nstatus: parked\nupdated: %s\n---\n# mid-parked2\n' "$(days_ago 1)"
+    filler_lines 60
+  } >"$OBS_JAY/Sessions/mid-parked2/_index.md"
+  run "$OM" -v jay groom
+  [[ "$output" == *"mid-parked2"* ]]
+}
+
+@test "groom bloat check ignores done sessions and sessions under _archive/" {
+  mkdir -p "$OBS_JAY/Sessions/big-done" "$OBS_JAY/Sessions/_archive/big-archived"
+  {
+    printf -- '---\nstatus: done\nupdated: %s\n---\n# big-done\n' "$(days_ago 1)"
+    filler_lines 200
+  } >"$OBS_JAY/Sessions/big-done/_index.md"
+  {
+    printf -- '---\nstatus: active\nupdated: %s\n---\n# big-archived\n' "$(days_ago 1)"
+    filler_lines 200
+  } >"$OBS_JAY/Sessions/_archive/big-archived/_index.md"
+  run "$OM" -v jay groom
+  [ "$status" -eq 0 ]
+  [[ "$output" != *"Checkpoint due"* ]]
+}
+
+@test "status surfaces a checkpoint-due nudge when a session exceeds the bloat threshold" {
+  printf -- '---\nschema: 1\n---\n# Home\n<!-- AGENT-INDEX:START -->\n<!-- AGENT-INDEX:END -->\n' >"$OBS_FLO/Home.md"
+  mkdir -p "$OBS_JAY/Sessions/bloaty"
+  {
+    printf -- '---\nstatus: active\nupdated: %s\n---\n# bloaty\n' "$(days_ago 1)"
+    filler_lines 200
+  } >"$OBS_JAY/Sessions/bloaty/_index.md"
+  run "$OM" status
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"checkpoint due"* ]]
+}
+
 @test "status surfaces a short groom-nudge count including stale-active" {
   # status gates on the PRIMARY vault's Home.md (first vault in the registry,
   # "flo" here); the nudge itself scans every vault, so the stale session can
@@ -647,6 +932,59 @@ EOF
   printf -- '---\nstatus: done\n---\n# closed\n' >"$OBS_JAY/Sessions/closed/_index.md"
   run "$OM" sessions
   [[ "$output" == *"groom"* ]]
+}
+
+@test "nudge is silent with no vault configured (fail-quiet)" {
+  export VAULTMEM_CONFIG="$BATS_TEST_TMPDIR/absent.toml"
+  unset OBS_FLO OBS_JAY
+  run "$OM" nudge
+  [ "$status" -eq 0 ]
+  [ -z "$output" ]
+}
+
+@test "nudge is silent on first-ever call and plants the stamp" {
+  printf -- '---\nschema: 1\n---\n# Home\n<!-- AGENT-INDEX:START -->\n<!-- AGENT-INDEX:END -->\n' >"$OBS_FLO/Home.md"
+  [ ! -e "$XDG_CACHE_HOME/vaultmem/nudge-stamp" ]
+  run "$OM" nudge
+  [ "$status" -eq 0 ]
+  [ -z "$output" ]
+  [ -e "$XDG_CACHE_HOME/vaultmem/nudge-stamp" ]
+}
+
+@test "nudge stays silent when no note changed since the stamp" {
+  printf -- '---\nschema: 1\n---\n# Home\n<!-- AGENT-INDEX:START -->\n<!-- AGENT-INDEX:END -->\n' >"$OBS_FLO/Home.md"
+  run "$OM" nudge # plants the stamp
+  [ "$status" -eq 0 ]
+  run "$OM" nudge # nothing touched since → still silent
+  [ "$status" -eq 0 ]
+  [ -z "$output" ]
+}
+
+@test "nudge stays silent when the touched note is the session's own _index.md" {
+  printf -- '---\nschema: 1\n---\n# Home\n<!-- AGENT-INDEX:START -->\n<!-- AGENT-INDEX:END -->\n' >"$OBS_FLO/Home.md"
+  mkdir -p "$OBS_JAY/Sessions/live"
+  printf -- '---\nstatus: active\n---\n# live\n' >"$OBS_JAY/Sessions/live/_index.md"
+  run "$OM" nudge # plants the stamp
+  [ "$status" -eq 0 ]
+  sleep 1
+  printf -- '---\nstatus: active\nupdated: %s\n---\n# live\n## Work log\n- did stuff\n' \
+    "$(date +"%Y-%m-%d %H:%M")" >"$OBS_JAY/Sessions/live/_index.md"
+  run "$OM" nudge
+  [ "$status" -eq 0 ]
+  [ -z "$output" ]
+}
+
+@test "nudge fires when a vault note changed but no _index.md was touched" {
+  printf -- '---\nschema: 1\n---\n# Home\n<!-- AGENT-INDEX:START -->\n<!-- AGENT-INDEX:END -->\n' >"$OBS_FLO/Home.md"
+  mkdir -p "$OBS_JAY/Sessions/live" "$OBS_JAY/Projects"
+  printf -- '---\nstatus: active\n---\n# live\n' >"$OBS_JAY/Sessions/live/_index.md"
+  run "$OM" nudge # plants the stamp
+  [ "$status" -eq 0 ]
+  sleep 1
+  printf -- '---\ntype: project\nstatus: active\n---\n# Notes\nsome content\n' >"$OBS_JAY/Projects/Notes.md"
+  run "$OM" nudge
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"_index.md"* ]]
 }
 
 @test "path prints the flo vault root" {
@@ -765,6 +1103,20 @@ EOF
   [ "$status" -eq 0 ]
 }
 
+@test "doctor accepts a config carrying the bloat_lines default key" {
+  cat >"$VAULTMEM_CONFIG" <<EOF
+[defaults]
+vault = "jay"
+bloat_lines = 200
+
+[vault.jay]
+label = "Personal"
+path = "$OBS_JAY"
+EOF
+  run "$OM" doctor
+  [ "$status" -eq 0 ]
+}
+
 @test "doctor hard-errors on an unknown config key" {
   cat >"$VAULTMEM_CONFIG" <<EOF
 [vault.jay]
@@ -807,4 +1159,734 @@ EOF
   run "$OM" doctor
   [ "$status" -ne 0 ]
   [[ "$output" == *"nested section"* ]]
+}
+
+# --- doctor schema lints (P1) + exit codes (A4) ---------------------------------
+# Reusable healthy fixture: an active session that follows the real session
+# skill template exactly (aliases set, updated set, H1 glyph matches status,
+# Bookmark filled in, every other spine heading intentionally empty) — every
+# schema-lint test below starts from this and corrupts exactly one thing, so a
+# passing "does NOT fire" test proves no false positive on a normal session.
+write_healthy_session() { # $1 = thread name
+  local t="$1"
+  mkdir -p "$OBS_JAY/Sessions/$t"
+  cat >"$OBS_JAY/Sessions/$t/_index.md" <<EOF
+---
+thread: $t
+project: Demo
+status: active
+aliases: [$t]
+updated: $(days_ago 0)
+---
+# 🟢 $t
+**Goal:** test session
+
+## Bookmark
+Last: did a thing · Next: do another · Open: none
+
+## Pinned
+
+## Work log
+
+## Decisions
+
+## Git state
+| Repo | Branch / worktree | PR | State |
+|---|---|---|---|
+EOF
+}
+
+@test "doctor: clean healthy session + project produce no schema findings" {
+  write_healthy_session good-thread
+  mkdir -p "$OBS_JAY/Projects"
+  cat >"$OBS_JAY/Projects/🟢 Demo.md" <<'EOF'
+---
+type: project
+status: active
+---
+# 🟢 Demo
+
+## Sessions
+- [[good-thread]] — testing (status: active)
+EOF
+  run "$OM" doctor
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"clean"* ]]
+}
+
+@test "doctor NOALIAS: session _index.md missing aliases: [<thread>] fires" {
+  write_healthy_session no-alias-thread
+  # drop the aliases line
+  sed -i.bak '/^aliases:/d' "$OBS_JAY/Sessions/no-alias-thread/_index.md"
+  run "$OM" doctor
+  [ "$status" -eq 2 ]
+  [[ "$output" == *"NOALIAS"* ]]
+  [[ "$output" == *"no-alias-thread"* ]]
+}
+
+@test "doctor NOALIAS: does not fire when aliases include the thread name" {
+  write_healthy_session has-alias-thread
+  run "$OM" doctor
+  [[ "$output" != *"NOALIAS"* ]]
+}
+
+@test "doctor GLYPH-DESYNC: session H1 glyph disagreeing with status: fires" {
+  write_healthy_session desync-thread
+  sed -i.bak 's/^# 🟢 desync-thread/# 💤 desync-thread/' "$OBS_JAY/Sessions/desync-thread/_index.md"
+  run "$OM" doctor
+  [ "$status" -eq 2 ]
+  [[ "$output" == *"GLYPH-DESYNC"* ]]
+  [[ "$output" == *"desync-thread"* ]]
+}
+
+@test "doctor GLYPH-DESYNC: a missing H1 glyph on a status-bearing session fires" {
+  write_healthy_session noglyph-thread
+  sed -i.bak 's/^# 🟢 noglyph-thread/# noglyph-thread/' "$OBS_JAY/Sessions/noglyph-thread/_index.md"
+  run "$OM" doctor
+  [ "$status" -eq 2 ]
+  [[ "$output" == *"GLYPH-DESYNC"* ]]
+}
+
+@test "doctor GLYPH-DESYNC: project filename+H1 glyph disagreeing with status: fires" {
+  mkdir -p "$OBS_JAY/Projects"
+  cat >"$OBS_JAY/Projects/🟢 Widget.md" <<'EOF'
+---
+type: project
+status: parked
+---
+# 🟢 Widget
+EOF
+  run "$OM" doctor
+  [ "$status" -eq 2 ]
+  [[ "$output" == *"GLYPH-DESYNC"* ]]
+  [[ "$output" == *"Widget"* ]]
+}
+
+@test "doctor GLYPH-DESYNC: does not fire when session H1 glyph matches status" {
+  write_healthy_session synced-thread
+  run "$OM" doctor
+  [[ "$output" != *"GLYPH-DESYNC"* ]]
+}
+
+# The filename glyph is OPTIONAL (SCHEMA.md § Status-glyph invariants: a Project
+# filename *may* carry one). A glyph-less filename with a correct H1 is fully
+# schema-legal and must stay clean — otherwise the lint fires on every vault
+# that never adopted the filename convention.
+@test "doctor GLYPH-DESYNC: does not fire on a project with no filename glyph" {
+  mkdir -p "$OBS_JAY/Projects"
+  cat >"$OBS_JAY/Projects/Widget.md" <<'EOF'
+---
+type: project
+status: active
+---
+# 🟢 Widget
+EOF
+  run "$OM" doctor
+  [ "$status" -eq 0 ]
+  [[ "$output" != *"GLYPH-DESYNC"* ]]
+}
+
+@test "doctor GLYPH-DESYNC: fires on a wrong filename glyph even when the H1 is right" {
+  mkdir -p "$OBS_JAY/Projects"
+  cat >"$OBS_JAY/Projects/💤 Widget.md" <<'EOF'
+---
+type: project
+status: active
+---
+# 🟢 Widget
+EOF
+  run "$OM" doctor
+  [ "$status" -eq 2 ]
+  [[ "$output" == *"GLYPH-DESYNC"* ]]
+}
+
+@test "doctor GLYPHED-FOLDER: a session folder carrying a status glyph fires" {
+  write_healthy_session "glyphed-folder-thread"
+  mv "$OBS_JAY/Sessions/glyphed-folder-thread" "$OBS_JAY/Sessions/🟢 glyphed-folder-thread"
+  run "$OM" doctor
+  [ "$status" -eq 2 ]
+  [[ "$output" == *"GLYPHED-FOLDER"* ]]
+  [[ "$output" == *"glyphed-folder-thread"* ]]
+}
+
+@test "doctor GLYPHED-FOLDER: does not fire on a plain (unglyphed) session folder" {
+  write_healthy_session plain-folder-thread
+  run "$OM" doctor
+  [[ "$output" != *"GLYPHED-FOLDER"* ]]
+}
+
+@test "doctor NO-UPDATED: session _index.md missing updated: fires" {
+  write_healthy_session no-updated-thread
+  sed -i.bak '/^updated:/d' "$OBS_JAY/Sessions/no-updated-thread/_index.md"
+  run "$OM" doctor
+  [ "$status" -eq 2 ]
+  [[ "$output" == *"NO-UPDATED"* ]]
+  [[ "$output" == *"no-updated-thread"* ]]
+}
+
+@test "doctor NO-UPDATED: an unparseable updated: value fires" {
+  write_healthy_session bad-updated-thread
+  sed -i.bak 's/^updated:.*/updated: not-a-date/' "$OBS_JAY/Sessions/bad-updated-thread/_index.md"
+  run "$OM" doctor
+  [ "$status" -eq 2 ]
+  [[ "$output" == *"NO-UPDATED"* ]]
+}
+
+@test "doctor NO-UPDATED: does not fire when updated: is a valid date" {
+  write_healthy_session valid-updated-thread
+  run "$OM" doctor
+  [[ "$output" != *"NO-UPDATED"* ]]
+}
+
+@test "doctor MISSING-FM: session missing thread/status/updated all fire together" {
+  mkdir -p "$OBS_JAY/Sessions/bare-thread"
+  printf -- '---\nproject: Demo\n---\n# bare-thread\n' >"$OBS_JAY/Sessions/bare-thread/_index.md"
+  run "$OM" doctor
+  [ "$status" -eq 2 ]
+  [[ "$output" == *"MISSING-FM"* ]]
+  [[ "$output" == *"bare-thread"* ]]
+  [[ "$output" == *"thread"* ]]
+  [[ "$output" == *"status"* ]]
+  [[ "$output" == *"updated"* ]]
+}
+
+@test "doctor MISSING-FM: project missing type: and status: fires" {
+  mkdir -p "$OBS_JAY/Projects"
+  printf -- '# Untyped Project\n' >"$OBS_JAY/Projects/Untyped.md"
+  run "$OM" doctor
+  [ "$status" -eq 2 ]
+  [[ "$output" == *"MISSING-FM"* ]]
+  [[ "$output" == *"Untyped"* ]]
+  [[ "$output" == *"type"* ]]
+}
+
+@test "doctor MISSING-FM: does not fire when all required fields are present" {
+  write_healthy_session complete-thread
+  mkdir -p "$OBS_JAY/Projects"
+  cat >"$OBS_JAY/Projects/🟢 Demo2.md" <<'EOF'
+---
+type: project
+status: active
+---
+# 🟢 Demo2
+EOF
+  run "$OM" doctor
+  [[ "$output" != *"MISSING-FM"* ]]
+}
+
+@test "doctor EMPTY-BOOKMARK: an active session with an empty Bookmark fires" {
+  write_healthy_session empty-bookmark-thread
+  # Blank out only the Bookmark body, leaving the other intentionally-empty
+  # template headings (Pinned/Work log/Decisions/Git state) as-is.
+  awk '
+    /^## Bookmark/{print; print ""; f=1; next}
+    f && /^## /{f=0}
+    f{next}
+    {print}
+  ' "$OBS_JAY/Sessions/empty-bookmark-thread/_index.md" >"$OBS_JAY/Sessions/empty-bookmark-thread/_index.md.new"
+  mv "$OBS_JAY/Sessions/empty-bookmark-thread/_index.md.new" "$OBS_JAY/Sessions/empty-bookmark-thread/_index.md"
+  run "$OM" doctor
+  [ "$status" -eq 2 ]
+  [[ "$output" == *"EMPTY-BOOKMARK"* ]]
+  [[ "$output" == *"empty-bookmark-thread"* ]]
+}
+
+@test "doctor EMPTY-BOOKMARK: does not fire on a healthy new session (Pinned/Work log/Decisions/Git state empty by template, Bookmark filled)" {
+  write_healthy_session fresh-thread
+  run "$OM" doctor
+  [[ "$output" != *"EMPTY-BOOKMARK"* ]]
+}
+
+@test "doctor EMPTY-BOOKMARK: does not fire on a parked session with an empty Bookmark (active-only lint)" {
+  write_healthy_session parked-empty-bookmark
+  sed -i.bak 's/^status: active/status: parked/; s/^# 🟢 parked-empty-bookmark/# 💤 parked-empty-bookmark/' \
+    "$OBS_JAY/Sessions/parked-empty-bookmark/_index.md"
+  awk '
+    /^## Bookmark/{print; print ""; f=1; next}
+    f && /^## /{f=0}
+    f{next}
+    {print}
+  ' "$OBS_JAY/Sessions/parked-empty-bookmark/_index.md" >"$OBS_JAY/Sessions/parked-empty-bookmark/_index.md.new"
+  mv "$OBS_JAY/Sessions/parked-empty-bookmark/_index.md.new" "$OBS_JAY/Sessions/parked-empty-bookmark/_index.md"
+  run "$OM" doctor
+  [[ "$output" != *"EMPTY-BOOKMARK"* ]]
+}
+
+@test "doctor exit codes: 0 = clean" {
+  write_healthy_session clean-thread
+  run "$OM" doctor
+  [ "$status" -eq 0 ]
+}
+
+@test "doctor exit codes: 1 = config errors only, no drift" {
+  cat >"$VAULTMEM_CONFIG" <<EOF
+[vault.jay]
+label = "Personal"
+path = "$OBS_JAY"
+bogus = "nope"
+EOF
+  run "$OM" doctor
+  [ "$status" -eq 1 ]
+}
+
+@test "doctor exit codes: 2 = schema lint drift only, config clean" {
+  write_healthy_session drift-only-thread
+  sed -i.bak '/^aliases:/d' "$OBS_JAY/Sessions/drift-only-thread/_index.md"
+  run "$OM" doctor
+  [ "$status" -eq 2 ]
+}
+
+@test "doctor exit codes: 3 = both config errors and drift (bitwise OR of 1 and 2)" {
+  write_healthy_session both-thread
+  sed -i.bak '/^aliases:/d' "$OBS_JAY/Sessions/both-thread/_index.md"
+  cat >"$VAULTMEM_CONFIG" <<EOF
+[vault.jay]
+label = "Personal"
+path = "$OBS_JAY"
+bogus = "nope"
+EOF
+  run "$OM" doctor
+  [ "$status" -eq 3 ]
+}
+
+# --- doctor INDEX-DRIFT (P2: Project<->Session index drift) ---------------------
+
+@test "doctor INDEX-DRIFT: '(status: active)' row disagrees with the session's actual status: fires" {
+  write_healthy_session drift-thread
+  sed -i.bak 's/^status: active/status: parked/' "$OBS_JAY/Sessions/drift-thread/_index.md"
+  mkdir -p "$OBS_JAY/Projects"
+  cat >"$OBS_JAY/Projects/Demo.md" <<'EOF'
+---
+type: project
+status: active
+---
+# Demo
+
+## Sessions
+- [[drift-thread]] — testing (status: active)
+EOF
+  run "$OM" doctor
+  [ "$status" -eq 2 ]
+  [[ "$output" == *"INDEX-DRIFT"* ]]
+  [[ "$output" == *"drift-thread"* ]]
+}
+
+@test "doctor INDEX-DRIFT: '(PROJ-123, active)' row shape disagrees with the session's actual status: fires" {
+  write_healthy_session ticket-thread
+  sed -i.bak 's/^status: active/status: done/' "$OBS_JAY/Sessions/ticket-thread/_index.md"
+  mkdir -p "$OBS_JAY/Projects"
+  cat >"$OBS_JAY/Projects/Demo.md" <<'EOF'
+---
+type: project
+status: active
+---
+# Demo
+
+## Sessions
+- [[ticket-thread]] — testing (PROJ-123, active)
+EOF
+  run "$OM" doctor
+  [ "$status" -eq 2 ]
+  [[ "$output" == *"INDEX-DRIFT"* ]]
+  [[ "$output" == *"ticket-thread"* ]]
+}
+
+@test "doctor INDEX-DRIFT: bare '(active)' row shape disagrees with the session's actual status: fires" {
+  write_healthy_session bare-thread
+  sed -i.bak 's/^status: active/status: parked/' "$OBS_JAY/Sessions/bare-thread/_index.md"
+  mkdir -p "$OBS_JAY/Projects"
+  cat >"$OBS_JAY/Projects/Demo.md" <<'EOF'
+---
+type: project
+status: active
+---
+# Demo
+
+## Sessions
+- [[bare-thread]] — testing (active)
+EOF
+  run "$OM" doctor
+  [ "$status" -eq 2 ]
+  [[ "$output" == *"INDEX-DRIFT"* ]]
+  [[ "$output" == *"bare-thread"* ]]
+}
+
+@test "doctor INDEX-DRIFT: does not fire when the row status token agrees with the session's status:" {
+  write_healthy_session agree-thread
+  mkdir -p "$OBS_JAY/Projects"
+  cat >"$OBS_JAY/Projects/Demo.md" <<'EOF'
+---
+type: project
+status: active
+---
+# Demo
+
+## Sessions
+- [[agree-thread]] — testing (status: active)
+EOF
+  run "$OM" doctor
+  [[ "$output" != *"INDEX-DRIFT"* ]]
+}
+
+@test "doctor INDEX-DRIFT: does not fire on an archived session whose row correctly reads 'archived'" {
+  write_healthy_session archived-thread
+  sed -i.bak 's/^status: active/status: done/' "$OBS_JAY/Sessions/archived-thread/_index.md"
+  mkdir -p "$OBS_JAY/Sessions/_archive"
+  mv "$OBS_JAY/Sessions/archived-thread" "$OBS_JAY/Sessions/_archive/archived-thread"
+  mkdir -p "$OBS_JAY/Projects"
+  cat >"$OBS_JAY/Projects/Demo.md" <<'EOF'
+---
+type: project
+status: active
+---
+# Demo
+
+## Sessions
+- [[archived-thread]] — testing (status: archived)
+EOF
+  run "$OM" doctor
+  [[ "$output" != *"INDEX-DRIFT"* ]]
+}
+
+# --- doctor --deep (P3: orphans + unindexed) ------------------------------------
+
+@test "doctor --deep ORPHAN: a note with zero inbound wikilinks fires" {
+  mkdir -p "$OBS_JAY/Notes"
+  printf -- '# Lonely Note\nno one links here.\n' >"$OBS_JAY/Notes/Lonely.md"
+  run "$OM" doctor --deep
+  [ "$status" -eq 2 ]
+  [[ "$output" == *"ORPHAN"* ]]
+  [[ "$output" == *"Lonely"* ]]
+}
+
+@test "doctor --deep ORPHAN: does not fire on a note linked from elsewhere in the vault" {
+  mkdir -p "$OBS_JAY/Notes"
+  printf -- '# Linked Note\ncontent.\n' >"$OBS_JAY/Notes/Linked.md"
+  printf -- '# Linker\nsee [[Linked]].\n' >"$OBS_JAY/Notes/Linker.md"
+  run "$OM" doctor --deep
+  echo "$output" | grep -qE '^\s*\[ORPHAN\]\s+Notes/Linked(\.md)?\s*$' && exit 1
+  true
+}
+
+@test "doctor --deep ORPHAN: skips Home.md, MOCs/, Templates/, and _archive/ (hubs/retired, not orphans)" {
+  mkdir -p "$OBS_JAY/MOCs" "$OBS_JAY/Templates" "$OBS_JAY/Sessions/_archive/old-thread" "$OBS_JAY/Projects/_archive"
+  printf -- '# MOC - Topic\n' >"$OBS_JAY/MOCs/MOC - Topic.md"
+  printf -- '# Session Template\n' >"$OBS_JAY/Templates/Session _index.md"
+  printf -- '---\nthread: old-thread\nstatus: done\n---\n# old-thread\n' >"$OBS_JAY/Sessions/_archive/old-thread/_index.md"
+  printf -- '---\ntype: project\nstatus: done\n---\n# Retired\n' >"$OBS_JAY/Projects/_archive/Retired.md"
+  run "$OM" doctor --deep
+  [[ "$output" != *"MOC - Topic"* ]]
+  [[ "$output" != *"Session Template"* ]]
+  [[ "$output" != *"old-thread"* ]]
+  [[ "$output" != *"Retired"* ]]
+}
+
+@test "doctor --deep skips live (non-archived) Sessions and Projects — they are discovered via the lifecycle tier, not the wikilink graph or Agent Index/MOC" {
+  mkdir -p "$OBS_JAY/Sessions/live-thread" "$OBS_JAY/Projects"
+  cat >"$OBS_JAY/Sessions/live-thread/_index.md" <<'EOF'
+---
+thread: live-thread
+status: active
+updated: 2026-07-20 10:00
+project: Demo
+aliases: [live-thread]
+---
+# 🟢 live-thread
+
+## Bookmark
+doing stuff
+EOF
+  cat >"$OBS_JAY/Projects/Demo.md" <<'EOF'
+---
+type: project
+status: active
+---
+# 🟢 Demo
+
+## Sessions
+- [[live-thread]] — testing (status: active)
+EOF
+  run "$OM" doctor --deep
+  [[ "$output" != *"ORPHAN"* ]]
+  [[ "$output" != *"UNINDEXED"* ]]
+  [ "$status" -eq 0 ]
+}
+
+@test "doctor --deep UNINDEXED: a note absent from both the Agent Index and every MOC fires" {
+  printf -- '---\nschema: 1\n---\n# Home\n<!-- AGENT-INDEX:START -->\n<!-- AGENT-INDEX:END -->\n' >"$OBS_JAY/Home.md"
+  mkdir -p "$OBS_JAY/Notes"
+  printf -- '# Unindexed Note\ncontent.\n' >"$OBS_JAY/Notes/Unindexed.md"
+  run "$OM" doctor --deep
+  [ "$status" -eq 2 ]
+  [[ "$output" == *"UNINDEXED"* ]]
+  [[ "$output" == *"Unindexed"* ]]
+}
+
+@test "doctor --deep UNINDEXED: does not fire on a note present in the Agent Index" {
+  # flo registers first in this suite's fixture config, so it is PRIMARY — the
+  # only vault the Agent-Index-membership branch is consulted for.
+  mkdir -p "$OBS_FLO/Notes"
+  printf -- '# Indexed Note\ncontent.\n' >"$OBS_FLO/Notes/Indexed.md"
+  cat >"$OBS_FLO/Home.md" <<'EOF'
+---
+schema: 1
+---
+# Home
+<!-- AGENT-INDEX:START -->
+### Section
+| [[Notes/Indexed]] | the summary |
+<!-- AGENT-INDEX:END -->
+EOF
+  run "$OM" doctor --deep
+  echo "$output" | grep -qE '^\s*\[UNINDEXED\]\s+Notes/Indexed(\.md)?\s*$' && exit 1
+  true
+}
+
+@test "doctor --deep UNINDEXED: does not fire on a note linked from a MOC" {
+  mkdir -p "$OBS_JAY/Notes" "$OBS_JAY/MOCs"
+  printf -- '# Moc Note\ncontent.\n' >"$OBS_JAY/Notes/MocNote.md"
+  printf -- '# MOC - Topic\nSee [[MocNote]].\n' >"$OBS_JAY/MOCs/MOC - Topic.md"
+  run "$OM" doctor --deep
+  echo "$output" | grep -qE '^\s*\[UNINDEXED\]\s+Notes/MocNote(\.md)?\s*$' && exit 1
+  true
+}
+
+@test "doctor --deep is not run by base doctor (no ORPHAN/UNINDEXED without --deep)" {
+  mkdir -p "$OBS_JAY/Notes"
+  printf -- '# Lonely Note\nno one links here.\n' >"$OBS_JAY/Notes/Lonely.md"
+  run "$OM" doctor
+  [[ "$output" != *"ORPHAN"* ]]
+  [[ "$output" != *"UNINDEXED"* ]]
+}
+
+# --- verify (A1: single-file verify-on-write) -----------------------------------
+
+@test "verify exits 0 silently on a path outside any configured vault" {
+  run "$OM" verify "$BATS_TEST_TMPDIR/not-a-vault-file.md"
+  [ "$status" -eq 0 ]
+  [ -z "$output" ]
+}
+
+@test "verify exits 0 silently on a real repo source file (non-markdown, non-vault)" {
+  run "$OM" verify "$ROOT/vaultmem"
+  [ "$status" -eq 0 ]
+  [ -z "$output" ]
+}
+
+@test "verify exits 0 silently on a nonexistent path" {
+  run "$OM" verify "$OBS_JAY/Sessions/does-not-exist/_index.md"
+  [ "$status" -eq 0 ]
+  [ -z "$output" ]
+}
+
+@test "verify exits 0 silently when no file argument is given" {
+  run "$OM" verify
+  [ "$status" -eq 0 ]
+  [ -z "$output" ]
+}
+
+@test "verify is clean (exit 0, silent) on a healthy session note" {
+  write_healthy_session verify-good-thread
+  run "$OM" verify "$OBS_JAY/Sessions/verify-good-thread/_index.md"
+  [ "$status" -eq 0 ]
+  [ -z "$output" ]
+}
+
+@test "verify fires the same NOALIAS schema lint doctor would, scoped to one file" {
+  write_healthy_session verify-noalias-thread
+  sed -i.bak '/^aliases:/d' "$OBS_JAY/Sessions/verify-noalias-thread/_index.md"
+  run "$OM" verify "$OBS_JAY/Sessions/verify-noalias-thread/_index.md"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"NOALIAS"* ]]
+  [[ "$output" == *"verify-noalias-thread"* ]]
+}
+
+@test "verify does not report an unrelated broken session elsewhere in the vault" {
+  write_healthy_session verify-scope-good
+  mkdir -p "$OBS_JAY/Sessions/verify-scope-bad"
+  printf -- '---\nstatus: active\n---\n# verify-scope-bad\n' >"$OBS_JAY/Sessions/verify-scope-bad/_index.md"
+  run "$OM" verify "$OBS_JAY/Sessions/verify-scope-good/_index.md"
+  [ "$status" -eq 0 ]
+  [[ "$output" != *"verify-scope-bad"* ]]
+}
+
+@test "verify flags a dangling wikilink in the given note" {
+  mkdir -p "$OBS_JAY/Projects"
+  cat >"$OBS_JAY/Projects/dangling-note.md" <<'EOF'
+---
+type: project
+status: active
+---
+# dangling-note
+
+See [[Nowhere At All]] for context.
+EOF
+  run "$OM" verify "$OBS_JAY/Projects/dangling-note.md"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"DANGLING"* ]]
+  [[ "$output" == *"Nowhere At All"* ]]
+}
+
+@test "verify flags a project GLYPH-DESYNC scoped to that project note" {
+  mkdir -p "$OBS_JAY/Projects"
+  cat >"$OBS_JAY/Projects/Desynced.md" <<'EOF'
+---
+type: project
+status: active
+---
+# 💤 Desynced
+EOF
+  run "$OM" verify "$OBS_JAY/Projects/Desynced.md"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"GLYPH-DESYNC"* ]]
+}
+
+# --- groom --dry-run (A5) --------------------------------------------------------
+
+@test "groom --dry-run previews the would-move list without touching the filesystem" {
+  mkdir -p "$OBS_JAY/Projects" "$OBS_JAY/Sessions/keep-me" "$OBS_JAY/Sessions/wrap-up"
+  cat >"$OBS_JAY/Projects/proj.md" <<'EOF'
+---
+type: project
+status: active
+---
+# proj
+## Sessions
+- [[keep-me]] — ongoing (status: active)
+- [[wrap-up]] — shipped (status: done)
+EOF
+  printf -- '---\nproject: proj\nstatus: active\n---\n# keep-me\n' >"$OBS_JAY/Sessions/keep-me/_index.md"
+  printf -- '---\nproject: proj\nstatus: done\n---\n# wrap-up\n' >"$OBS_JAY/Sessions/wrap-up/_index.md"
+
+  # snapshot mtimes/content before, to prove --dry-run left everything untouched
+  before_proj=$(cat "$OBS_JAY/Projects/proj.md")
+  # whole-tree checksum: proves --dry-run writes NOTHING anywhere in the fixture
+  # vault, not just the one file this test happens to inspect by name.
+  before_tree=$(find "$OBS_JAY" -type f -exec shasum {} + | sort)
+
+  run "$OM" -v jay groom --dry-run
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"Sessions/wrap-up"* ]]
+  [[ "$output" == *"Sessions/_archive/wrap-up"* ]]
+  [[ "$output" == *"would flip"* ]]
+  [[ "$output" == *"dry run"* ]]
+
+  # no mv: both original session dirs still present, no _archive/ created
+  [ -d "$OBS_JAY/Sessions/keep-me" ]
+  [ -d "$OBS_JAY/Sessions/wrap-up" ]
+  [ ! -e "$OBS_JAY/Sessions/_archive" ]
+  # no write: project file byte-for-byte unchanged (status line NOT flipped)
+  after_proj=$(cat "$OBS_JAY/Projects/proj.md")
+  [ "$before_proj" = "$after_proj" ]
+  grep -q '\[\[wrap-up\]\].*status: done)' "$OBS_JAY/Projects/proj.md"
+
+  after_tree=$(find "$OBS_JAY" -type f -exec shasum {} + | sort)
+  [ "$before_tree" = "$after_tree" ]
+}
+
+@test "groom --dry-run does not claim a flip for a Sessions line with no trailing status token" {
+  # The `## Sessions` line links [[wrap-up]] but has no trailing
+  # (active|parked|done) before its closing paren — _flip_project_status's
+  # awk match requires that token, so real groom leaves this line untouched.
+  # The --dry-run preview must not claim a flip it will not perform.
+  mkdir -p "$OBS_JAY/Projects" "$OBS_JAY/Sessions/wrap-up"
+  cat >"$OBS_JAY/Projects/proj.md" <<'EOF'
+---
+type: project
+status: active
+---
+# proj
+## Sessions
+- [[wrap-up]] — shipped, no status token here
+EOF
+  printf -- '---\nproject: proj\nstatus: done\n---\n# wrap-up\n' >"$OBS_JAY/Sessions/wrap-up/_index.md"
+  before_proj=$(cat "$OBS_JAY/Projects/proj.md")
+
+  run "$OM" -v jay groom --dry-run
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"Sessions/wrap-up"* ]]
+  [[ "$output" != *"would flip"* ]]
+
+  # confirm real groom agrees: the line is truly untouched by the mutation path
+  run "$OM" -v jay groom
+  [ "$status" -eq 0 ]
+  after_proj=$(cat "$OBS_JAY/Projects/proj.md")
+  [ "$before_proj" = "$after_proj" ]
+}
+
+@test "groom --dry-run claims a flip only for a Sessions line that carries the trailing status token" {
+  mkdir -p "$OBS_JAY/Projects" "$OBS_JAY/Sessions/wrap-up"
+  cat >"$OBS_JAY/Projects/proj.md" <<'EOF'
+---
+type: project
+status: active
+---
+# proj
+## Sessions
+- [[wrap-up]] — shipped (status: done)
+EOF
+  printf -- '---\nproject: proj\nstatus: done\n---\n# wrap-up\n' >"$OBS_JAY/Sessions/wrap-up/_index.md"
+
+  run "$OM" -v jay groom --dry-run
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"would flip Projects/proj session line [[wrap-up]]"* ]]
+
+  # confirm real groom agrees: the preview's promise matches the mutation
+  run "$OM" -v jay groom
+  [ "$status" -eq 0 ]
+  grep -q '\[\[wrap-up\]\].*status: archived)' "$OBS_JAY/Projects/proj.md"
+}
+
+@test "groom --dry-run previews a done-project archive without moving it" {
+  mkdir -p "$OBS_JAY/Projects" "$OBS_JAY/Sessions/_archive/old-thread"
+  cat >"$OBS_JAY/Projects/finished.md" <<'EOF'
+---
+type: project
+status: done
+---
+# finished
+## Sessions
+- [[old-thread]] — done (status: archived)
+EOF
+  run "$OM" -v jay groom --dry-run
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"Projects/finished.md"* ]]
+  [[ "$output" == *"Projects/_archive/finished.md"* ]]
+  [ -f "$OBS_JAY/Projects/finished.md" ]
+  [ ! -e "$OBS_JAY/Projects/_archive" ]
+}
+
+@test "groom --dry-run does not archive a project blocked by a live session (same as real groom)" {
+  mkdir -p "$OBS_JAY/Projects" "$OBS_JAY/Sessions/live-one"
+  cat >"$OBS_JAY/Projects/blocked.md" <<'EOF'
+---
+type: project
+status: done
+---
+# blocked
+## Sessions
+- [[live-one]] — still going (status: active)
+EOF
+  printf -- '---\nproject: blocked\nstatus: active\n---\n# live-one\n' >"$OBS_JAY/Sessions/live-one/_index.md"
+  run "$OM" -v jay groom --dry-run
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"NOT archiving blocked"* ]]
+  [ -f "$OBS_JAY/Projects/blocked.md" ]
+}
+
+@test "groom --dry-run reports 'Nothing to archive' just like real groom when nothing is due" {
+  mkdir -p "$OBS_JAY/Sessions/active-one"
+  printf -- '---\nstatus: active\nupdated: %s\n---\n# active-one\n' "$(days_ago 0)" >"$OBS_JAY/Sessions/active-one/_index.md"
+  run "$OM" -v jay groom --dry-run
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"Nothing to archive"* ]]
+}
+
+@test "real groom (no flag) still archives normally after --dry-run is introduced" {
+  mkdir -p "$OBS_JAY/Projects" "$OBS_JAY/Sessions/wrap-up2"
+  printf -- '---\nproject: proj2\nstatus: done\n---\n# wrap-up2\n' >"$OBS_JAY/Sessions/wrap-up2/_index.md"
+  run "$OM" -v jay groom
+  [ "$status" -eq 0 ]
+  [ -d "$OBS_JAY/Sessions/_archive/wrap-up2" ]
+  [ ! -e "$OBS_JAY/Sessions/wrap-up2" ]
 }

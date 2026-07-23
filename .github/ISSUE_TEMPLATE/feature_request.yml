@@ -1,0 +1,24 @@
+name: Feature request
+description: Propose a change to vaultmem's behavior or CLI surface
+labels: [enhancement]
+body:
+  - type: textarea
+    id: use-case
+    attributes:
+      label: What are you trying to do?
+      description: The concrete workflow or vault state that's currently awkward or impossible.
+    validations:
+      required: true
+  - type: textarea
+    id: fits-the-model
+    attributes:
+      label: Why doesn't the existing no-daemon / no-database / no-index model already cover this?
+      description: >
+        vaultmem's whole bet is bash + ripgrep over plain markdown files — no
+        background process, no vector store, no build step (see README §
+        "Why not a vector DB"). A proposal that needs one of those is very
+        likely a "no" regardless of how well it's built. Explain why this
+        doesn't fit inside the existing model, or what a version of it that
+        does fit would look like.
+    validations:
+      required: true

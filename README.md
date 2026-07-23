@@ -1,5 +1,9 @@
 # vaultmem
 
+[![CI](https://github.com/jayantak/vaultmem/actions/workflows/ci.yml/badge.svg)](https://github.com/jayantak/vaultmem/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+[![Release](https://img.shields.io/github/v/tag/jayantak/vaultmem)](https://github.com/jayantak/vaultmem/releases)
+
 **Agent memory over an Obsidian vault — bash + ripgrep, no database.**
 
 Your notes are already the memory. `vaultmem` is the fast read/route path over a
@@ -7,9 +11,6 @@ plain-markdown [Obsidian](https://obsidian.md) vault: a curated Agent Index, a
 wikilink graph, and a session/project tier — all `rg` over `.md` files. Clone it,
 read it, it's one bash script. No daemon, no index to rebuild, no vector store to
 keep in sync.
-
-<!-- asciinema: replace with an asciinema cast once recorded -->
-_(demo: asciinema cast placeholder)_
 
 ## Why not a vector DB
 
@@ -20,6 +21,15 @@ store adds a daemon, an ingestion step, and an index that silently drifts from
 the notes. `vaultmem` keeps the notes as the single source of truth and stays
 auditable in five minutes. If plain ripgrep ever demonstrably hurts, add an FTS
 cache then — not before.
+
+| | vaultmem | typical vector-DB memory (mem0, cognee, basic-memory) |
+|---|---|---|
+| Daemon/background process | No | Usually yes |
+| External DB required | No | Yes (vector store, often + SQLite) |
+| Embeddings/LLM calls to write memory | No | Usually yes |
+| Works with the Obsidian app closed | Yes | N/A — most aren't Obsidian-native |
+| Auditable in one sitting | Yes (~1900 lines, one file) | No |
+| Semantic recall (vocabulary-mismatch queries) | No — lexical/wikilink only | Yes |
 
 ## Install
 
@@ -68,7 +78,9 @@ the session picker (Claude Code example):
 
 `status`/`sessions` are **fail-quiet**: if the vault isn't mounted they print
 nothing and exit 0, so the hook can never break a session start. The Codex
-equivalent and directive customization are in [docs/hooks.md](docs/hooks.md).
+equivalent and directive customization are in [docs/hooks.md](docs/hooks.md),
+which also covers wiring `vaultmem verify` to a PostToolUse `Write|Edit` hook
+for verify-on-write.
 
 ## Concepts
 
@@ -81,7 +93,8 @@ equivalent and directive customization are in [docs/hooks.md](docs/hooks.md).
   one terse row per note (`| [[Note]] | one-line summary |`), grouped in
   sections. It's a triage pointer ("which note?"), the highest-signal thing to
   read first. `index` shows the shape; `index <section>` drills in; `doctor`
-  flags rows that have rotted. See [SCHEMA.md](SCHEMA.md).
+  flags rows that have rotted, plus structural corruption in Sessions/Projects
+  themselves (see [doctor](#doctor) below). See [SCHEMA.md](SCHEMA.md).
 - **MOCs** — Maps of Content (`MOCs/MOC - <Topic>.md`), one hub note per domain,
   the top of the wikilink graph you fan out from.
 - **Projects → Sessions** — two lifecycle tiers. A **Project** (`Projects/<name>.md`,
@@ -92,8 +105,21 @@ equivalent and directive customization are in [docs/hooks.md](docs/hooks.md).
 - **Grooming** — `groom` archives `done` sessions into `Sessions/_archive/` and
   `done` Projects into `Projects/_archive/` (skipping a project still blocked by
   a live session, with a warning), flags `parked` sessions gone cold (untouched
-  past `cold_days`), and flags `active` sessions gone stale (untouched past
-  `stale_active_days`, default 7). Hygiene, on demand.
+  past `cold_days`), flags `active` sessions gone stale (untouched past
+  `stale_active_days`, default 7), and flags `active`/`parked` sessions whose
+  `_index.md` has grown past `bloat_lines` (default 150) as checkpoint-due.
+  Hygiene, on demand. `groom --dry-run` previews the exact would-move /
+  would-flip list with no `mv` and no writes.
+- **Verify-on-write** — `verify <file>` is `doctor`'s schema lints plus a
+  dangling-wikilink check, scoped to one note, fast enough for a PostToolUse
+  hook. Fail-quiet outside a configured vault, so an agent editing an ordinary
+  repo never trips it. See [docs/hooks.md](docs/hooks.md).
+- **Knowledge frontier** — `frontier` ranks notes by
+  `(outbound - inbound links) * exp(-days_since_updated / 30)`: a note that
+  points at much, is pointed at little, and was touched recently sits on the
+  active edge of the graph — usually the best place to write next. `-n` caps
+  the ranking; `Home.md`, `MOCs/`, `Templates/`, and `_archive/` are excluded
+  as hubs/scaffolding/retired, not candidate write targets.
 
 ## Command reference
 
@@ -113,6 +139,15 @@ vaultmem links <note>       outbound links, each resolved or flagged dangling
 vaultmem backlinks <note>   notes that link TO this one (alias-aware)
 vaultmem neighbors <note>   outbound + backlinks together (one-hop view)
 vaultmem dangling [note]    broken [[links]] — one note, or the whole vault
+vaultmem dangling --by-target  same scan, aggregated by missing target + inbound count
+vaultmem frontier           rank notes by knowledge-frontier score (best place to write next)
+```
+
+**verify-on-write**
+```
+vaultmem verify <file>      single-file lint: dangling links + doctor's schema
+                             lints, scoped to that note. Fail-quiet outside a
+                             configured vault. For a PostToolUse Write|Edit hook.
 ```
 
 **router**
@@ -128,15 +163,80 @@ vaultmem sessions           the grouped picker (for the SessionStart hook)
 vaultmem projects           Project notes + active/total session counts
 vaultmem project <name>     one project: repos, linear, MOC, sessions by status
 vaultmem status             one-line index summary + groom-nudge count (fail-quiet)
+vaultmem bookmark <thread>  print only ## Bookmark + ## Pinned from a session's _index.md
+vaultmem nudge              Stop-hook check: notes changed but the session's _index.md wasn't (fail-quiet)
 ```
 
 **hygiene · setup**
 ```
-vaultmem groom              archive done sessions + done projects; report cold-parked + stale-active
-vaultmem doctor             lint the config + flag drifted index rows
+vaultmem groom              archive done sessions + done projects; report cold-parked + stale-active + checkpoint-due
+vaultmem groom --dry-run    preview groom: would-move list + would-flip project lines; no writes
+vaultmem doctor             lint the config + flag drifted index rows + vault schema lints
+vaultmem doctor --deep      + vault-wide orphan/unindexed scan (slower; not run by base doctor/groom)
 vaultmem init [--vault <id>]  scaffold a compliant vault skeleton
 vaultmem init --config      write a starter config.toml
 ```
+
+## doctor
+
+`vaultmem doctor` runs three checks and reports all of them in one pass:
+
+1. **Config lint** — the registry TOML is checked against the accepted subset
+   (see [Config reference](#config-reference) below).
+2. **Index drift** — Agent Index rows in the primary vault's `Home.md` that
+   have rotted: `BROKEN` (the row's `[[wikilink]]` resolves to a missing or
+   0-byte note) and `STALE` (the note's `status:` says it's dead but the row
+   summary still reads live).
+3. **Schema lints** — every configured vault's `Sessions/` and `Projects/`
+   notes, checked directly (not via the Agent Index), for structural
+   corruption:
+
+   | Class | Fires on | Why it matters |
+   |---|---|---|
+   | `NOALIAS` | a session `_index.md` without `aliases: [<thread>]` naming its own thread | the file is `_index.md`, not `<thread>.md`, so a Project's `[[<thread>]]` back-link only resolves through this alias |
+   | `GLYPH-DESYNC` | the status glyph (H1 for a session; filename **and** H1 for a project) disagrees with `status:`, including a missing glyph | the sidebar/picker glyph is presentation, not identity — a stale one is a lie the UI tells |
+   | `GLYPHED-FOLDER` | a **session folder** name carries a leading status glyph | vaultmem keys a session by folder basename == `thread:`; a glyphed folder desyncs the picker and `groom` |
+   | `NO-UPDATED` | a session `_index.md` with missing/unparseable `updated:` | staleness/cold-parked math falls back to file mtime, which cloud-drive re-sync rewrites |
+   | `MISSING-FM` | required frontmatter absent — session: `thread`, `status`, `updated`; project: `type`, `status` | downstream commands read these fields directly and treat absence as silently-empty |
+   | `EMPTY-BOOKMARK` | an **active** session whose `## Bookmark` section has no content | only `Bookmark` is linted (and only when active) — every other template heading (`Pinned`/`Work log`/`Decisions`/`Git state`) ships intentionally empty on a fresh session |
+   | `INDEX-DRIFT` | a Project's `## Sessions` row status token (`(status: active)`, `(PROJ-123, active)`, or bare `(active)`) disagrees with the linked session's own `status:` frontmatter | the row is a human/agent-maintained summary of the session, not a live read — it rots the same way the Agent Index does. Rows reading `archived` are never flagged: that word marks the session's location (`Sessions/_archive/`), not a live status. Read-only — `doctor` never rewrites the Project file. |
+
+   Schema lints are O(sessions), a couple of `awk` passes per note — fast
+   enough to run on every `doctor` call (including the one `groom` makes
+   internally); no vault-wide full-text scan.
+
+### `doctor --deep`
+
+An opt-in fourth check, off by default: a vault-wide scan for notes with no
+inbound links or no index membership. **Never runs as part of base `doctor`**
+(or the `doctor`-adjacent scan `groom` makes internally) — it walks every note
+in the vault with an `rg` pass each, so it does not hold to the "couple of
+`awk` passes per note" budget the other lints do.
+
+| Class | Fires on | Why it matters |
+|---|---|---|
+| `ORPHAN` | a note with zero inbound `[[wikilinks]]` from anywhere else in the vault | nothing in the graph leads here — it's unreachable by `links`/`backlinks`/`neighbors` traversal |
+| `UNINDEXED` | a note absent from **both** the Agent Index and every MOC's outbound links | it has no curated entry point — an agent can only find it via full-text search, never via the triage surfaces |
+
+`Home.md`, `MOCs/`, `Templates/`, `Sessions/`, `Projects/`, and anything
+under `_archive/` are skipped as candidates (hubs, retired notes, and
+templates are meant to be unlinked/unindexed; flagging them would be a false
+positive). Sessions and Projects are excluded for the same reason: they're
+discovered through the lifecycle tier (`sessions`/`projects`/`project
+<name>`), not the wikilink graph or the Agent Index/MOC system, so
+`--deep` would otherwise flag every schema-legal Session and Project note.
+`UNINDEXED`'s Agent-Index check only applies to the primary vault's
+`Home.md` (the vault `doctor` also checks for `BROKEN`/`STALE`); MOC
+membership is checked per-vault.
+
+**Exit codes** (bitwise, so they compose):
+
+| Code | Meaning |
+|---|---|
+| `0` | clean — no config errors, no drift, no schema lint findings |
+| `1` | config errors only |
+| `2` | drift and/or schema lint findings only |
+| `3` | both config errors and drift/lint findings (`1 \| 2`) |
 
 ## Config reference
 
@@ -159,6 +259,7 @@ multiline strings, unknown keys, and unquoted strings.
 vault = "personal"        # fallback vault when routing finds no signal
 limit = 20                # default result cap
 cold_days = 21            # a parked session untouched this long is grooming-due
+bloat_lines = 150         # an active/parked _index.md over this many lines is checkpoint-due
 directive_file = ""       # optional: path to custom AGENT DIRECTIVE text
 
 [vault.personal]
@@ -170,7 +271,8 @@ path = "~/Obsidian/Personal"
 
 Every vault field, the `which` routing algorithm, and the per-vault Agent-Index
 gating are documented in the **[Config reference](docs/config.md)**. Env
-override: `VAULTMEM_COLD_DAYS` beats `cold_days`.
+overrides: `VAULTMEM_COLD_DAYS` beats `cold_days`, `VAULTMEM_BLOAT_LINES` beats
+`bloat_lines`.
 
 ## Agent skills
 
@@ -214,6 +316,41 @@ How `skills/` becomes an installable plugin (the `.claude-plugin/` manifests,
 skill discovery, the skills↔CLI drift lint) is documented in
 [docs/plugin.md](docs/plugin.md).
 
+## Cross-project routing snippet
+
+Any repo that wants its agents to consult the vault — not just this one — can
+paste the block below into its own `CLAUDE.md`/`AGENTS.md`. It teaches the
+reflex (check before you re-derive), the cost anchor (a miss is nearly free),
+and the negative trigger (current code lives in the repo, never in memory):
+
+```markdown
+## Agent memory: the vault is the default
+
+- **Reflex — check before you re-derive.** Before investigating a past
+  decision, root cause, or incident, or explaining "why is it built this
+  way," run `vaultmem <query>` first. It costs ~60ms and ~700 tokens —
+  cheaper than reading two files — so a miss is nearly free and the default
+  is to check, not to skip. Grepping the repo tells you *what* the code
+  does; the vault tells you *why*, and the history the code can't show.
+  Don't trust "I already sort of know this" for a past decision — that is
+  how a stale or invented answer ships.
+- **Current code or behavior? Read the repo, not the vault.** Never trust
+  memory for live code — it goes stale the moment the code changes. `rg`
+  and direct file reads are the source of truth for *what the code does
+  right now*.
+- **Prior decision, root cause, or project/people context? The vault.**
+  `vaultmem <query>` to search, `vaultmem index` to see the shape, the
+  `obsidian-vault` skill (if installed) to read or capture a note.
+- Capture durable knowledge back into the vault at logical stopping
+  points — decisions, root causes, and generalizable patterns — so the
+  next session gets the ~60ms answer instead of re-deriving it.
+```
+
+This is intentionally generic (no vault id, no skill assumed installed) so it
+drops into any repo's memory file as-is; adjust the skill name or add a
+`vaultmem which`/`vaultmem vaults` pointer if the repo has a specific vault it
+should route to.
+
 ## Design notes
 
 - **Fail-quiet where it counts.** `status`/`sessions` never break a session
@@ -225,6 +362,12 @@ skill discovery, the skills↔CLI drift lint) is documented in
   sitting and audit exactly what it does to your notes. A compiled rewrite trades
   that away for performance nobody needs at this scale. The one bash pain —
   config parsing — is handled by the restricted TOML subset, zero new deps.
+
+## Versioning
+
+0.x, following [Semantic Versioning](https://semver.org/spec/v2.0.0.html#spec-item-4):
+a 0.MINOR bump may break the CLI surface, config schema, or vault schema; a
+0.MINOR.PATCH bump will not. See [CHANGELOG.md](CHANGELOG.md).
 
 ## License
 
