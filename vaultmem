@@ -1853,6 +1853,93 @@ cmd_verify() {
 # missing/unparseable, same as `_session_rows`. Home.md, MOCs/, Templates/, and
 # any `_archive/` folder are skipped: they are hubs/scaffolding/retired notes,
 # not candidate write targets.
+# Per-invocation resolve cache for the whole-vault scans. `_resolve_path` costs
+# a `find` per root (and, for aliases, a vault-wide grep + an awk per hit), so
+# calling it once per wikilink is O(links × notes) — 73s on a 111-note/586-link
+# vault. These build the same lookups ONCE per run and answer from memory; the
+# tables are discarded on exit. Deliberately not persisted: a cache that
+# survives the process is an index to maintain, which the ethos forbids.
+_RESOLVE_CACHE_BUILT=""
+declare -A _RESOLVE_CACHE=()
+
+_build_resolve_cache() { # $@ = candidate files (already Templates/_archive-filtered)
+	[ -z "$_RESOLVE_CACHE_BUILT" ] || return 0
+	_RESOLVE_CACHE_BUILT=1
+	local f base lower k
+	# Basename table. `_resolve_path` step 2 takes `find | head -1`, i.e. the
+	# FIRST match wins; keep that by never overwriting an existing entry.
+	for f in "$@"; do
+		base="${f##*/}"
+		base="${base%.md}"
+		lower=$(printf '%s' "$base" | tr '[:upper:]' '[:lower:]')
+		k="b_$lower"
+		[ -n "${_RESOLVE_CACHE[$k]+x}" ] || _RESOLVE_CACHE[$k]="$f"
+	done
+	# Alias table, one awk pass over the files that actually declare aliases
+	# (step 3 is rare, but when it misses it costs a vault-wide grep per link).
+	local key
+	while IFS=$'\t' read -r key f; do
+		[ -n "$key" ] || continue
+		k="a_$key"
+		[ -n "${_RESOLVE_CACHE[$k]+x}" ] || _RESOLVE_CACHE[$k]="$f"
+	done < <(
+		grep -l "aliases:" "$@" --include='*.md' 2>/dev/null | while IFS= read -r f; do
+			[ -n "$f" ] || continue
+			awk -v file="$f" '
+        NR==1 && $0!="---"{exit} NR==1{next}
+        $0=="---"{exit}
+        /^aliases:[[:space:]]*\[/{s=$0; sub(/^aliases:[[:space:]]*\[/,"",s); sub(/\].*/,"",s);
+          n=split(s,a,","); for(i=1;i<=n;i++){gsub(/^[[:space:]"'"'"']+|[[:space:]"'"'"']+$/,"",a[i]);
+          if(a[i]!="")printf "%s\t%s\n", tolower(a[i]), file} next}
+        /^aliases:[[:space:]]*$/{al=1; next}
+        al && /^[[:space:]]*-[[:space:]]*/{v=$0; sub(/^[[:space:]]*-[[:space:]]*/,"",v);
+          gsub(/^["'"'"']+|["'"'"']+$/,"",v); gsub(/[[:space:]]+$/,"",v);
+          if(v!="")printf "%s\t%s\n", tolower(v), file; next}
+        al && /^[^[:space:]-]/{al=0}
+      ' "$f"
+		done
+	)
+}
+
+# Cache-backed twin of `_resolve_path`. MUST mirror its precedence exactly
+# (real path → exact relative path → case-insensitive basename → alias) or the
+# frontier ranking shifts.
+_resolve_path_cached() {
+	local raw
+	raw="$(_clean_target "$1")"
+	[ -n "$raw" ] || return 1
+	[ -f "$raw" ] && {
+		printf '%s\n' "$raw"
+		return 0
+	}
+	local r
+	local -a roots=()
+	while IFS= read -r r; do roots+=("$r"); done < <(_link_roots)
+	for r in "${roots[@]}"; do
+		[ -f "$r/$raw.md" ] && {
+			printf '%s\n' "$r/$raw.md"
+			return 0
+		}
+		case "$raw" in *.*) [ -f "$r/$raw" ] && {
+			printf '%s\n' "$r/$raw"
+			return 0
+		} ;; esac
+	done
+	local base="${raw##*/}" lower hit
+	lower=$(printf '%s' "$base" | tr '[:upper:]' '[:lower:]')
+	hit="${_RESOLVE_CACHE[b_$lower]:-}"
+	[ -n "$hit" ] && {
+		printf '%s\n' "$hit"
+		return 0
+	}
+	hit="${_RESOLVE_CACHE[a_$lower]:-}"
+	[ -n "$hit" ] && {
+		printf '%s\n' "$hit"
+		return 0
+	}
+	return 1
+}
+
 _frontier_scan() { # prints "note\tout\tin\tepoch" rows (tab-sep) over $(_link_roots)
 	local -a roots=()
 	local r
@@ -1880,6 +1967,8 @@ _frontier_scan() { # prints "note\tout\tin\tepoch" rows (tab-sep) over $(_link_r
 	done
 	[ "${#files[@]}" -gt 0 ] || return 0
 
+	_build_resolve_cache "${files[@]}"
+
 	# Pass 1: outbound count per note + resolved target list (for pass 2 tally).
 	local tmp_out tmp_in
 	tmp_out=$(mktemp) && tmp_in=$(mktemp) || return 0
@@ -1889,7 +1978,7 @@ _frontier_scan() { # prints "note\tout\tin\tepoch" rows (tab-sep) over $(_link_r
 		while IFS= read -r t; do
 			[ -n "$t" ] || continue
 			outc=$((outc + 1))
-			if tp=$(_resolve_path "$t" 2>/dev/null); then
+			if tp=$(_resolve_path_cached "$t" 2>/dev/null); then
 				printf '%s\n' "$tp" >>"$tmp_in"
 			fi
 		done < <(_outbound_targets "$f")
@@ -1897,11 +1986,19 @@ _frontier_scan() { # prints "note\tout\tin\tepoch" rows (tab-sep) over $(_link_r
 	done
 
 	# Pass 2: inbound = how often each resolved path appears as a target.
+	# Tally once into a map rather than re-scanning $tmp_in per note (that was
+	# the second O(n²) here).
+	local -A _inbound=()
+	while IFS= read -r tp; do
+		[ -n "$tp" ] || continue
+		_inbound["$tp"]=$((${_inbound["$tp"]:-0} + 1))
+	done <"$tmp_in"
+
 	local upd ts
 	while IFS=$'\t' read -r f outc; do
 		[ -n "$f" ] || continue
 		local inc
-		inc=$(grep -Fxc "$f" "$tmp_in" 2>/dev/null || true)
+		inc="${_inbound["$f"]:-0}"
 		upd=$(_fm_field "$f" updated)
 		ts=$(_to_epoch "$upd")
 		if [ -z "$ts" ]; then
