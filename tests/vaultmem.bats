@@ -481,6 +481,7 @@ EOF
   [ "$status" -ne 0 ]
 }
 
+<<<<<<< HEAD
 # --- cat: token-frugal sectioned/ranged note read (R9) -------------------------
 
 # A note with nested headings so the same-or-higher-level stop is exercised.
@@ -608,6 +609,87 @@ EOF
   n=$(echo "$output" | grep -cE '^  alpha-')
   [ "$n" -le 3 ]
   [ "$n" -ge 1 ]
+=======
+# --- search --format cli|json|files (R2) ---------------------------------------
+
+# Two notes with a shared search term; one line carries characters that must be
+# JSON-escaped (a double-quote, a backslash, a literal tab) so the hand-rolled
+# escaper is exercised.
+seed_search_notes() {
+  mkdir -p "$OBS_JAY/Notes"
+  printf '# One\nplain needle line\na "quoted" needle with a \\slash and\ttab\n' >"$OBS_JAY/Notes/one.md"
+  printf '# Two\nanother needle here\n' >"$OBS_JAY/Notes/two.md"
+}
+
+@test "search --format files prints bare content-hit paths, no ANSI/curated section" {
+  seed_search_notes
+  run "$OM" -v jay --format files needle
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"Notes/one.md"* ]]
+  [[ "$output" == *"Notes/two.md"* ]]
+  # no human-formatted section headers.
+  [[ "$output" != *"Note content matches"* ]]
+  [[ "$output" != *"Curated index"* ]]
+}
+
+@test "search --format json emits a {file,line,text} array with escaped text" {
+  seed_search_notes
+  run "$OM" -v jay --format json needle
+  [ "$status" -eq 0 ]
+  [[ "$output" == "["* ]]
+  [[ "$output" == *"\"file\":"* ]]
+  [[ "$output" == *"\"line\":"* ]]
+  [[ "$output" == *"\"text\":"* ]]
+  # the tricky line: a double-quote escaped as \" and a backslash as \\.
+  [[ "$output" == *'\"quoted\"'* ]]
+  [[ "$output" == *'\\slash'* ]]
+}
+
+@test "search --format json validates as JSON (parsed by awk-independent check)" {
+  seed_search_notes
+  run "$OM" -v jay --format json needle
+  [ "$status" -eq 0 ]
+  # Balanced single top-level array; every object has all three keys. Count
+  # objects by "file": occurrences and opening braces — they must match.
+  nfile=$(echo "$output" | grep -o '"file":' | grep -c .)
+  nline=$(echo "$output" | grep -o '"line":' | grep -c .)
+  ntext=$(echo "$output" | grep -o '"text":' | grep -c .)
+  [ "$nfile" -eq "$nline" ]
+  [ "$nfile" -eq "$ntext" ]
+  [ "$nfile" -ge 3 ]
+  [[ "$output" == "["* ]]
+  [[ "$output" == *"]" ]]
+}
+
+@test "search --format json prints [] on no matches" {
+  seed_search_notes
+  run "$OM" -v jay --format json zzznomatchzzz
+  [ "$status" -eq 0 ]
+  [ "$output" = "[]" ]
+}
+
+@test "search --format cli is the default (curated + content sections)" {
+  seed_search_notes
+  run "$OM" -v jay needle
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"Note content matches"* ]]
+}
+
+@test "search rejects an unknown --format value" {
+  seed_search_notes
+  run "$OM" -v jay --format xml needle
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"--format"* ]]
+}
+
+@test "search --format files honors -n limit" {
+  mkdir -p "$OBS_JAY/Notes"
+  for i in 1 2 3 4 5; do printf '# n%s\ncommon token\n' "$i" >"$OBS_JAY/Notes/n$i.md"; done
+  run "$OM" -v jay -n 2 --format files "common token"
+  [ "$status" -eq 0 ]
+  n=$(echo "$output" | grep -c 'Notes/n')
+  [ "$n" -eq 2 ]
+>>>>>>> e15bf7a (feat(search): add --format cli|json|files for machine-readable output (R2))
 }
 
 # --- frontier (knowledge-frontier ranking: (out-in) * exp(-days/30)) -----------
