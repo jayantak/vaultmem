@@ -61,6 +61,14 @@
 #   vaultmem bookmark <thread>  print only ## Bookmark + ## Pinned from a session's
 #                               _index.md — the resumable state, without the whole file
 #
+# Token-frugal note read:
+#   vaultmem cat <note> [--section '## Heading'] [--from N] [--lines M]
+#                               line-numbered read of a note (resolved like a [[wikilink]]).
+#                               --section extracts one heading block (through the next heading
+#                               of same-or-higher level); --from/--lines window the result.
+#                               A resolve miss prints up to 3 "Did you mean:" near-matches
+#                               (as does `resolve`), so an agent doesn't re-guess a path.
+#
 # Verify-on-write (for a PostToolUse Write|Edit hook — see docs/hooks.md):
 #   vaultmem verify <file>      single-file lint: dangling wikilinks + the doctor
 #                               schema lints, scoped to just this note. Fail-quiet
@@ -1429,6 +1437,61 @@ _resolve_path() {
 	return 1
 }
 
+# Did-you-mean: on a resolve miss, print up to 3 near-match note names so an
+# agent doesn't burn a round trip re-guessing. Case- and glyph-insensitive fuzzy
+# pass over every note's basename (glyph + .md stripped) plus its frontmatter
+# aliases across the in-scope vaults. Scoring is deliberately cheap (substring
+# containment either direction, then longest-common-prefix length) — this is a
+# hint, not a ranked search. Prints the suggestion names, one per line, or
+# nothing when no candidate is close. Never fails (informational).
+_suggest_notes() {
+	local raw base r
+	raw="$(_clean_target "$1")"
+	base="${raw##*/}"
+	[ -n "$base" ] || return 0
+	local -a roots=()
+	while IFS= read -r r; do roots+=("$r"); done < <(_link_roots)
+	[ "${#roots[@]}" -gt 0 ] || return 0
+	{
+		# candidate names: glyph+.md-stripped basenames …
+		find "${roots[@]}" -type f -name '*.md' \
+			-not -path '*/Templates/*' -not -path '*/_archive/*' 2>/dev/null |
+			while IFS= read -r f; do
+				local b="${f##*/}"
+				b="${b%.md}"
+				_strip_status_glyph "$b"
+				printf '\n'
+			done
+		# … plus every frontmatter alias (one alias per line, both YAML shapes).
+		grep -rl 'aliases:' "${roots[@]}" --include='*.md' 2>/dev/null |
+			while IFS= read -r f; do
+				awk '
+          NR==1 && $0!="---"{exit} NR==1{next}
+          $0=="---"{exit}
+          /^aliases:[[:space:]]*\[/{s=$0; sub(/^aliases:[[:space:]]*\[/,"",s); sub(/\].*/,"",s);
+            n=split(s,a,","); for(i=1;i<=n;i++){gsub(/^[[:space:]"'"'"']+|[[:space:]"'"'"']+$/,"",a[i]);
+            if(a[i]!="")print a[i]} next}
+          /^aliases:[[:space:]]*$/{al=1; next}
+          al && /^[[:space:]]*-[[:space:]]*/{v=$0; sub(/^[[:space:]]*-[[:space:]]*/,"",v);
+            gsub(/^["'"'"']+|["'"'"']+$/,"",v); gsub(/[[:space:]]+$/,"",v); if(v!="")print v; next}
+          al && /^[^[:space:]-]/{al=0}
+        ' "$f"
+			done
+	} | awk -v want="$base" '
+    function lc(s){return tolower(s)}
+    { name=$0; if(name=="")next; if(seen[name]++)next
+      w=lc(want); c=lc(name); score=0
+      if(index(c,w)>0){ score=1000 - (length(c)-length(w)) }        # candidate contains query
+      else if(index(w,c)>0){ score=900 - (length(w)-length(c)) }    # query contains candidate
+      else { p=0; m=(length(w)<length(c)?length(w):length(c))
+             while(p<m && substr(w,p+1,1)==substr(c,p+1,1)) p++
+             if(p>=2) score=p }                                     # shared prefix (>=2 chars)
+      if(score>0){ names[++k]=name; sc[k]=score } }
+    END{ for(i=1;i<=k;i++)for(j=i+1;j<=k;j++)if(sc[j]>sc[i]){t=sc[i];sc[i]=sc[j];sc[j]=t;s=names[i];names[i]=names[j];names[j]=s}
+         lim=(k<3?k:3); for(i=1;i<=lim;i++)print names[i] }
+  '
+}
+
 # All distinct outbound wikilink targets in a file (cleaned). Filters out
 # non-link noise: shell snippets like `[[ -d "$x" ]]`, and bare folder refs.
 _outbound_targets() {
@@ -1582,8 +1645,19 @@ cmd_resolve() {
 		printf '%s\n' "$p"
 	else
 		printf 'DANGLING: [[%s]] — no note with that path, basename, or alias\n' "$(_clean_target "$1")" >&2
+		_did_you_mean "$1"
 		return 1
 	fi
+}
+
+# Shared "Did you mean:" footer for resolve misses (resolve, cat). Prints up to 3
+# near-match names to stderr, or nothing when nothing is close. Never fails.
+_did_you_mean() {
+	local s
+	s=$(_suggest_notes "$1")
+	[ -n "$s" ] || return 0
+	printf 'Did you mean:\n' >&2
+	printf '%s\n' "$s" | sed 's/^/  /' >&2
 }
 
 cmd_links() {
@@ -1742,6 +1816,84 @@ _resolve_session_path() {
 		}
 	done
 	return 1
+}
+
+# --- subcommand: cat (token-frugal sectioned/ranged note read) -----------------
+# `cat <note> [--section '## Heading'] [--from N] [--lines M]`, line-numbered.
+# The session skill's frugality rule mandates reading ONLY `## Bookmark` +
+# `## Pinned` on resume; the only primitive before this was a harness Read with
+# offset/limit guessing, fragile because sections move as a file grows. A
+# markdown-aware section extractor makes that contract executable, and serves
+# harnesses whose read tools lack offset/limit. Read-only, resolves via the same
+# _resolve_path the graph commands use; a resolve miss prints did-you-mean.
+#
+# --section extracts the heading line through the line before the next heading of
+# the SAME-OR-HIGHER level (## stops at the next ## or #, not at a nested ###), so
+# a section with sub-headings comes out whole. --from/--lines then window the
+# selected lines (1-based, post-section). Output is line-numbered against the
+# windowed slice so the numbers match what was printed.
+cmd_cat() {
+	local note="" section="" from="" lines="" f
+	while [ $# -gt 0 ]; do
+		case "$1" in
+		--section)
+			section="$2"
+			shift 2 || die "usage: vaultmem cat <note> [--section '## Heading'] [--from N] [--lines M]"
+			;;
+		--from)
+			from="$2"
+			shift 2 || die "usage: vaultmem cat <note> [--section '## Heading'] [--from N] [--lines M]"
+			;;
+		--lines)
+			lines="$2"
+			shift 2 || die "usage: vaultmem cat <note> [--section '## Heading'] [--from N] [--lines M]"
+			;;
+		--)
+			shift
+			;;
+		-*)
+			die "vaultmem cat: unknown flag $1"
+			;;
+		*)
+			if [ -z "$note" ]; then note="$1"; else die "vaultmem cat: unexpected argument $1"; fi
+			shift
+			;;
+		esac
+	done
+	[ -n "$note" ] || die "usage: vaultmem cat <note> [--section '## Heading'] [--from N] [--lines M]"
+	case "$from" in "" | *[!0-9]*) [ -z "$from" ] || die "vaultmem cat: --from wants a positive integer" ;; esac
+	case "$lines" in "" | *[!0-9]*) [ -z "$lines" ] || die "vaultmem cat: --lines wants a positive integer" ;; esac
+	if ! f=$(_resolve_path "$note"); then
+		printf 'vaultmem cat: no note resolves to "%s"\n' "$note" >&2
+		_did_you_mean "$note"
+		return 1
+	fi
+	local body
+	if [ -n "$section" ]; then
+		body=$(awk -v want="$section" '
+      function level(h,  n){ n=0; while(substr(h,n+1,1)=="#")n++; return n }
+      function norm(s){ sub(/^[[:space:]]+/,"",s); sub(/[[:space:]]+$/,"",s); return s }
+      BEGIN{ w=norm(want); wl=level(w); found=0 }
+      /^#+[[:space:]]/ {
+        if(found && level($0)<=wl){ exit }
+        if(!found && norm($0)==w){ found=1; print; next }
+      }
+      found{ print }
+    ' "$f")
+		if [ -z "$body" ]; then
+			printf 'vaultmem cat: no section "%s" in %s\n' "$section" "${f##*/Obsidian/}" >&2
+			return 1
+		fi
+	else
+		body=$(cat "$f")
+	fi
+	# Window (post-section), then line-number the slice.
+	printf '%s\n' "$body" | awk -v from="${from:-1}" -v lim="${lines:-0}" '
+    { buf[NR]=$0 } END{
+      start=(from<1?1:from); shown=0
+      for(i=start;i<=NR;i++){ if(lim>0 && shown>=lim)break; printf "%6d\t%s\n", i, buf[i]; shown++ }
+    }'
+	return 0
 }
 
 # Print only the `## Bookmark` and `## Pinned` sections of a session's
@@ -2157,7 +2309,7 @@ while [ $# -gt 0 ]; do
 		shift 2
 		;;
 	-h | --help)
-		sed -n '4,78p' "$0"
+		sed -n '4,86p' "$0"
 		exit 0
 		;;
 	*)
@@ -2183,7 +2335,7 @@ status | sessions | verify | nudge | which | init | doctor | "") ;;
 esac
 
 case "${ARGS[0]:-}" in
-"") sed -n '4,78p' "$0" ;; # no args → print usage
+"") sed -n '4,86p' "$0" ;; # no args → print usage
 status) cmd_status ;;
 nudge) cmd_nudge ;;
 index) cmd_index "${ARGS[1]:-}" ;;
@@ -2203,6 +2355,7 @@ backlinks) cmd_backlinks "${ARGS[*]:1}" ;;
 neighbors) cmd_neighbors "${ARGS[*]:1}" ;;
 dangling) cmd_dangling "${ARGS[*]:1}" ;;
 bookmark) cmd_bookmark "${ARGS[*]:1}" ;;
+cat) cmd_cat "${ARGS[@]:1}" ;;
 verify) cmd_verify "${ARGS[1]:-}" ;;
 frontier) cmd_frontier ;;
 *) cmd_search "${ARGS[*]}" ;;
