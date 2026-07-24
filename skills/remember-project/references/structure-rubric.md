@@ -1,4 +1,4 @@
-<!-- GENERATED from the private dotfiles source repo — edit there, not here. -->
+<!-- CANONICAL SOURCE: this repo (jayantak/vaultmem). The dotfiles copy under agents-source/skills/ is synced FROM here — edit this file, not that one. -->
 
 # Project Memory — Structure & Detail Rubric
 

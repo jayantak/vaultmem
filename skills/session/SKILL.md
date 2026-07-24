@@ -4,7 +4,7 @@ description: Always-active cross-session working memory. Auto-activates every co
 allowed-tools: Bash(vaultmem *), Bash(git *), Bash(stat *), Bash(find *), Read, Write, Edit, Glob, Grep
 ---
 
-<!-- GENERATED from the private dotfiles source repo — edit there, not here. -->
+<!-- CANONICAL SOURCE: this repo (jayantak/vaultmem). The dotfiles copy under agents-source/skills/ is synced FROM here — edit this file, not that one. -->
 
 # session — cross-session working memory
 
@@ -233,6 +233,11 @@ just happened / what's next / the load-bearing constants). Read further sections
 only if the next action needs them, with `vaultmem cat <note> --section '## <Heading>'`.
 The picker's number/name selects the thread; resolve its `_index.md` path.
 
+**If the bookmark already declares completion** (Next: none / done / shipped, or
+the only Open item is a tracker link), don't resume it as if there's work left —
+flip `status: done` + ✅ right then and tell the user, rather than reopening a
+finished unit.
+
 ## Checkpoint (distill in place, keep going)
 
 Checkpoint is the pressure-release valve that keeps `_index.md` lean **without
@@ -261,6 +266,16 @@ stopping point (task list drained AND a coherent unit closed AND context
 growing), load [references/distill.md](references/distill.md) and run the **park**
 flow (checkpoint + `_meta.md` event + clear-safe). Offer: "Natural stopping point
 — distill durable bits into the vault and clear?"
+
+**At park time, decide done vs parked — don't default to parked.** If the unit
+of work is complete (the bookmark says shipped/done/nothing next, or the only
+remainder is tracked on GitHub/Linear), set `status: done` + ✅ immediately in
+the same write, not "parked" as a placeholder for later cleanup. `parked`/💤 is
+ONLY for work that will genuinely resume — a real next action you expect to
+pick up. Sessions are not ticket trackers: an open PR review, a follow-up
+issue, or a "waiting on review" state tracked on GitHub/Linear does not keep a
+session alive on its own — leave a pointer to the tracker item and retire the
+session as done.
 
 ## Lifecycle & grooming
 
@@ -294,9 +309,35 @@ nudge in short form. When you see it:
   ([references/distill.md](references/distill.md)) first; then set `status: done`
   so the next `groom` archives it.
 - It also **lists stale-active sessions for triage** — an `active` session that
-  has gone untouched this long likely stalled. Drive the same decision with the
-  user: **park** it (if paused but not abandoned), or if the bookmark shows the
-  work actually finished, set `status: done` so the next `groom` archives it.
+  has gone untouched this long likely stalled. Triage it the same way as
+  cold-parked, just from the other side of the fence: either the work actually
+  finished (a bookmark that was never flipped — set `status: done` per the
+  park-time rule above, so the next `groom` archives it), or it is genuinely
+  still live (**park** it if paused but not abandoned, or touch `updated:` and
+  keep it `active`). A stale-active entry is usually the symptom this whole rule
+  set exists to catch — the park-time done/parked decision above is what
+  prevents it from recurring.
+
+### Project retirement
+
+Projects get the same `active → done → archived` lifecycle as sessions, with one
+added precondition: a Project can only retire once its **goal is met and every
+session under it is `done` or already `archived`** — a Project with a live
+session is not done, no matter how old it looks (`groom` enforces this too: it
+refuses to archive a `done` Project a live session still points at, and names
+the blockers). When that holds:
+
+1. Distill any remaining durable content (open `## Pinned` constants, unresolved
+   `## Decisions`) up to the vault's MOC tree, same as a session distill —
+   the Project note disappears from active listings after this, so nothing
+   should be left only there.
+2. Set `status: done` in frontmatter.
+3. Glyph both the filename and the H1 (✅), keeping the plain-name `aliases:`
+   entry so existing `[[<name>]]` links keep resolving — same rule as any other
+   Project status transition (see Status glyphs above).
+4. `vaultmem groom` moves it into `Projects/_archive/` on its next run.
+   Archived is a location, not a status, exactly like sessions — wikilinks
+   keep resolving via basename/alias after the move.
 
 ## Frugality rule
 
@@ -308,6 +349,8 @@ are read-only inspection — they do not satisfy the Edit tool's read-before-wri
 precondition (see Indexed mode). The `_index.md` IS the state;
 keep it ~100–150 lines — when it grows past that, **checkpoint** (see above) to
 promote and collapse rather than letting it bloat. Search across everything with
-`vaultmem <query>`; follow `[[links]]` between notes with
+`vaultmem <query>` — run 2–3 pattern variants (exact term, synonym, adjacent
+concept), and treat match lines as leads: read the note (or its section) before
+answering, never answer from search output alone. Follow `[[links]]` between notes with
 `vaultmem links` / `backlinks` (see `obsidian-vault` § Researching by
 following wikilinks) instead of reading whole folders.

@@ -1,4 +1,4 @@
-<!-- GENERATED from the private dotfiles source repo — edit there, not here. -->
+<!-- CANONICAL SOURCE: this repo (jayantak/vaultmem). The dotfiles copy under agents-source/skills/ is synced FROM here — edit this file, not that one. -->
 
 # Distill (hot → cold)
 
@@ -76,11 +76,13 @@ Runs on explicit "park" / "wrapping up", or the stopping-point heuristic below.
    table (name, last active, status, summary), a repo map aggregated from each
    session's `## Git state`, and the last 10 park events as a timeline.
 3. **Update the parent Project.** In `Projects/<name>.md`, flip this session's
-   `## Sessions` index entry status (`active` → `parked`/`done`), bump the
-   Project's `updated:`, and — on a project with a `linear:` pointer — you
-   MAY post a Linear project-update or comment summarizing the unit of work
-   (reads/updates are supported; never attempt to write a Linear Document). Then
-   renumber the remaining steps.
+   `## Sessions` index entry status to match the session's own status — `done`
+   if the unit of work is complete, `parked` only if it will genuinely resume
+   (see `SKILL.md` § Park / end + distill for the done-vs-parked rule; don't
+   default to parked) — bump the Project's `updated:`, and — on a project with a
+   `linear:` pointer — you MAY post a Linear project-update or comment
+   summarizing the unit of work (reads/updates are supported; never attempt to
+   write a Linear Document). Then renumber the remaining steps.
 4. Tell the user `/clear` is now safe; the session resumes from the picker.
 
 Setting status `done` here does NOT move the folder — `vaultmem groom`

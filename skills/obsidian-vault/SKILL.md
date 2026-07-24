@@ -16,7 +16,7 @@ description: >
   is extensive knowledge bases for human and agent reference.
 ---
 
-<!-- GENERATED from the private dotfiles source repo — edit there, not here. -->
+<!-- CANONICAL SOURCE: this repo (jayantak/vaultmem). The dotfiles copy under agents-source/skills/ is synced FROM here — edit this file, not that one. -->
 
 # Obsidian Vault
 
@@ -61,7 +61,16 @@ why/decisions/gotchas/people the code can't tell you.
 A ripgrep-backed helper on `PATH` is the quickest way in — no need to read whole
 notes to find the right one. `vaultmem <query>` searches all vaults, curated
 Agent-Index/MOC hits first, then note-content matches; `vaultmem mocs` lists the
-domain hubs. Locate candidates first, then read only those.
+domain hubs. Locate candidates first, then read only those. Two rules make it
+reliable:
+
+- **You are the query expander.** One hopeful query is not a search. Run 2–3
+  deliberate variants — the exact term, a synonym, an adjacent concept
+  (`drainer` / `OOM` / `memory limit`). Each call is ~60ms; a missed note
+  because you stopped at one phrasing is the expensive outcome.
+- **Snippets are only leads.** Match lines locate the note; they are not the
+  answer. Read the note — or the relevant section, below — before answering.
+  Never answer from search output alone.
 
 ### Reading a note frugally
 
