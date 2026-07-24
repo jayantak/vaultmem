@@ -10,8 +10,9 @@ allowed-tools: Bash(vaultmem *), Bash(git *), Bash(stat *), Bash(find *), Read, 
 
 The hot layer above the durable Obsidian vaults. Sessions are per-thread
 worklogs that survive `/clear`. The conversation is disposable; the session
-file is the state. Pairs with `vaultmem` (search/registry/router) and
-`obsidian-vault` (durable capture).
+file is the state. Pairs with `vaultmem` (search/registry/router),
+`vault-recall` (finding what's already written), and `vault-capture` (durable
+capture).
 
 The vault layout, frontmatter fields, status vocabulary, and glyph convention
 this skill writes are the normative contract in `SCHEMA.md` (run `vaultmem
@@ -26,7 +27,7 @@ with the picker. Its wording is configurable (the registry's `directive_file`);
 the default asks the agent to route session handling through this skill. That
 directive is binding: invoke this skill FIRST, every
 conversation, before any other skill, tool call, or reply. Memory lookups
-(`obsidian-vault`, `vaultmem`) do NOT substitute — even when they read the
+(`vault-recall`, `vaultmem`) do NOT substitute — even when they read the
 same session file, route through this skill first, then continue. Be concise;
 never block the user's actual task. If the user skips, do NOT re-ask this
 conversation.
@@ -138,7 +139,7 @@ basename or alias matches. Link MOCs by filename `[[MOC - <Topic>]]` (or a
 declared alias like `[[Payments]]`); for a repo/person, link only if a real note
 exists (`vaultmem mocs` / `index` to check), else use plain text. Never
 wikilink repo artifacts (ADR IDs, file paths, PR numbers). Full rules:
-`obsidian-vault` § Linking Rules.
+`vault-capture` § Linking Rules.
 
 ### The Project note (`Projects/<name>.md`)
 
@@ -352,5 +353,5 @@ promote and collapse rather than letting it bloat. Search across everything with
 `vaultmem <query>` — run 2–3 pattern variants (exact term, synonym, adjacent
 concept), and treat match lines as leads: read the note (or its section) before
 answering, never answer from search output alone. Follow `[[links]]` between notes with
-`vaultmem links` / `backlinks` (see `obsidian-vault` § Researching by
+`vaultmem links` / `backlinks` (see `vault-recall` § Researching by
 following wikilinks) instead of reading whole folders.

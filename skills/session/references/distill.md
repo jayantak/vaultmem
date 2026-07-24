@@ -28,10 +28,10 @@ work log):
    over duplicating. To check what a candidate target already says, read just the
    relevant block — `vaultmem cat <note> --section '## Decisions'` — rather than
    the whole note. (That is inspection only; Read the file before editing it.)
-2. Write/update the atomic note via `obsidian-vault` conventions, wikilinked
+2. Write/update the atomic note via `vault-capture` conventions, wikilinked
    into the right MOC with backlinks that **resolve in-vault** — link the MOC by
    its real filename `[[MOC - <Topic>]]` or a declared alias, never a bare topic
-   guess. See `obsidian-vault` § Linking Rules.
+   guess. See `vault-capture` § Linking Rules.
 3. **Verify the note exists before pointing at it.** Run
    `vaultmem resolve "<note basename>"` — it must print a real path. This
    is non-negotiable when a subagent did the write: never collapse the source on

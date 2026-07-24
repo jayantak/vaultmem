@@ -13,9 +13,11 @@ script *is* the artifact. This repo also ships:
 
 - `install.sh` — copies `vaultmem` to `~/.local/bin` (or symlinks
   `skills/` into a harness skills dir with `--skills <dir>`).
-- `skills/` — three Claude-Code-flavored agent skills (`obsidian-vault`,
-  `session`, `remember-project`) that drive the memory workflow on top of the
-  CLI.
+- `skills/` — four Claude-Code-flavored agent skills, split by agent job:
+  `vault-recall` (check the vault before re-deriving), `session` (cross-session
+  working memory), `vault-capture` (write durable knowledge, incl. repo
+  onboarding), and `vault-curate` (what to write next / vault health). They
+  drive the memory workflow on top of the CLI.
 - `.claude-plugin/` — projects `skills/` into an installable Claude Code
   plugin/marketplace.
 - `tests/` — bats unit tests + a skills↔CLI drift lint.
