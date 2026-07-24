@@ -35,9 +35,22 @@ Default to the work vault unless content is clearly personal. If a topic could p
 
 ## Agent Index (the entry point)
 
-Each vault's `Home.md` contains an `## Agent Index` section between `<!-- AGENT-INDEX:START -->` and `<!-- AGENT-INDEX:END -->` markers. The index lists every non-Daily non-Template note as a row (`note wikilink | one-sentence summary | tags`), grouped by folder.
+Each vault's `Home.md` contains an `## Agent Index` section between
+`<!-- AGENT-INDEX:START -->` and `<!-- AGENT-INDEX:END -->` markers: one row per
+note (`| [[Folder/Note]] | one-line summary |`), grouped under `### <Section>`
+headings.
 
-**Always start here.** Reading `Home.md` is cheap; the index is small enough to triage without reading any individual note.
+**Start with `vaultmem index`, not by reading `Home.md`.** It prints the *shape*
+— section names with counts, plus the MOC list — and expands on demand. Reading
+`Home.md` whole was cheap at 20 notes and stops being cheap fast: on a real
+75-note vault `Home.md` is 19,275 bytes while `vaultmem index` gives the same
+orientation in 403 — **48× cheaper**, and the gap widens with every note.
+
+- `vaultmem index` — section counts + MOCs. The default first move.
+- `vaultmem index <section>` — expand one section's rows (e.g. `index architecture`).
+- `vaultmem index all` — full flat dump. An escape hatch, not a default.
+
+Only open `Home.md` directly when you need to *edit* it (adding an index row).
 
 These vaults **are** your agent-memory layer (see `AGENTS.md § Agent memory`).
 Read the repo on disk for live code; read the vault for the
@@ -46,14 +59,24 @@ why/decisions/gotchas/people the code can't tell you.
 ## Fast search: the `vaultmem` CLI
 
 A ripgrep-backed helper on `PATH` is the quickest way in — no need to read whole
-notes to find the right one:
+notes to find the right one. `vaultmem <query>` searches all vaults, curated
+Agent-Index/MOC hits first, then note-content matches; `vaultmem mocs` lists the
+domain hubs. Locate candidates first, then read only those.
 
-- `vaultmem <query>` — search both vaults; curated Agent-Index/MOC hits first, then note-content matches.
-- `vaultmem index` — print the default vault's Agent Index (what exists).
-- `vaultmem mocs` — list the Maps of Content (domain hubs).
+### Reading a note frugally
 
-Use it to locate candidate notes, then read only those. It is the cheap
-discovery step before any deeper read.
+Once you have a candidate, don't slurp the file — `vaultmem cat` reads it the way
+the graph commands resolve it (basename, `Folder/Name`, or alias, so you needn't
+know the path):
+
+- `vaultmem cat <note>` — line-numbered read of the whole note.
+- `vaultmem cat <note> --section '## Decisions'` — just that heading block
+  (through the next heading of same-or-higher level). Usually all you want.
+- `vaultmem cat <note> --from 40 --lines 30` — window the result.
+
+A miss prints up to 3 `Did you mean:` near-matches, so a wrong guess costs one
+call instead of a path hunt. For a session's resumable state, `vaultmem bookmark
+<thread>` prints only its `## Bookmark` + `## Pinned`.
 
 ## Researching by following wikilinks (graph traversal)
 
@@ -74,7 +97,7 @@ path, or an alias (`Payments`) — or a file path:
 
 **Traversal protocol** (keep it cheap — depth, not breadth):
 
-1. **Pick the entry hub.** `vaultmem mocs` for the domain MOC, or `Home.md`'s Agent Index, or a search hit. MOCs are built to be entry points — start there.
+1. **Pick the entry hub.** `vaultmem mocs` for the domain MOC, or `vaultmem index` for the Agent Index, or a search hit. MOCs are built to be entry points — start there.
 2. **Fan out one hop.** `vaultmem links <hub>` (or `neighbors`). Read the one-line orientation each MOC gives its links; pick the 1–3 that match the question. Don't open everything.
 3. **Read those, then traverse again only if needed.** Follow a second hop from a note you actually read. **Stop at ~2 hops** — relevance decays fast and the vault is small.
 4. **Use `backlinks` to widen or climb back.** To answer "what depends on / discusses X", `backlinks X` surfaces notes that don't mention X by keyword but point at it.
@@ -91,7 +114,7 @@ linked from the `## Maps of Content` section of `Home.md`. A MOC is a *map, not
 a duplicate*: it links its domain's notes with a line of orientation each, plus a
 "where the truth lives" section pointing to the repo and external systems.
 
-Reading order: `Home.md` Maps of Content → the relevant MOC → the specific note
+Reading order: `vaultmem mocs` → the relevant MOC → the specific note
 or the repo. **Promote** a domain to a MOC once it passes ~8 related notes, and
 add it to `Home.md`. Building a *repository's* MOC + signpost notes is automated
 by the `remember-project` skill.
@@ -101,8 +124,10 @@ by the `remember-project` skill.
 Triggered by user questions that might be answered better with prior notes — a person's name, project name, system name, debug pattern, "what do I know about X", "have I noted Y".
 
 1. **Pick the vault.** Work topics → the work vault. Personal → the personal vault. Ambiguous → both.
-2. **Read `Home.md`.** Scan only the `## Agent Index` section.
-3. **Pick candidates.** Match the topic against title, summary, and tags. Note 0-N candidate paths.
+2. **Search, then orient.** `vaultmem <query>` first — it is the fastest path to a
+   candidate. If the query is vague ("what do I know about X"), `vaultmem index`
+   for the shape, then `vaultmem index <section>` for the one section that matches.
+3. **Pick candidates.** Match the topic against title and summary. Note 0-N candidate paths.
 4. **Route by candidate count and depth:**
    - **0 candidates** → tell the user nothing relevant is in the vault, proceed without it.
    - **1-2 candidates with focused content** → read inline and synthesize directly.
@@ -111,7 +136,10 @@ Triggered by user questions that might be answered better with prior notes — a
 
 ### When to dispatch the Explore subagent
 
-Use it any time you'd otherwise be reading 3+ notes, or any single note longer than ~5KB, or any task that requires synthesizing across notes (e.g. "summarize what I know about distributed systems"). Pattern:
+Use it any time you'd otherwise be reading 3+ notes, or any task that requires
+synthesizing across notes (e.g. "summarize what I know about distributed
+systems"). For one long note, prefer `vaultmem cat --section` over a subagent.
+Pattern:
 
 ```
 Ask an explorer to read these vault notes:
@@ -131,61 +159,103 @@ note". Also triggered when a parent agent spawns you as a subagent at a logical
 stopping point (see Workflow C below).
 
 1. **Pick the vault.** Work content → the work vault. Personal/generalizable → the personal vault.
-2. **Read `Home.md`'s Agent Index first.** Search for keywords from the topic. If a related note exists and the new content is on-topic for it, **extend it** (append a dated `### YYYY-MM-DD — <subtopic>` section to the appropriate part of the note). Do not create a sibling.
-3. **If no good home exists, create a new note** in the appropriate folder:
-
-   **Work vault folders:** `Debug/`, `Incidents/`, `Meetings/`, `Projects/`, `Architecture/`, `People/`. Naming and template rules are in the vault's `CLAUDE.md`.
-
-   **Personal folders:** `Inbox/` (default if unsure), `Projects/`, `Areas/`, `Resources/`, `Zettelkasten/` (atomic notes — `YYYYMMDDHHMM <Title>.md`). Naming and template rules are in the vault's `CLAUDE.md`.
-
-   **Naming conventions (cross-vault, applied at create time):**
-   - **`Meetings/` notes MUST be date-prefixed**: `YYYY-MM-DD - <Title>.md`. Single meetings use the meeting date. Multi-meeting aggregators (timelines, recurring series logs) use the earliest date covered (the file's "since"). This makes the folder sortable chronologically by filename. Apply to subfolders too (`Meetings/Standups/2026-03-18 - platform sync.md`).
-   - `Incidents/` notes also date-prefix: `YYYY-MM-DD - <short description>.md` (per the work vault's `CLAUDE.md`).
-   - `Debug/`, `Projects/`, `Architecture/`, `People/` notes use descriptive titles, no date prefix (state-tracking notes, not events).
-   - When extending an existing un-prefixed `Meetings/` note, leave the filename alone unless the user asks for a rename — don't churn history.
-
+2. **Check for an existing home first.** `vaultmem <keywords>` from the topic. If a related note exists and the new content is on-topic for it, **extend it** (append a dated `### YYYY-MM-DD — <subtopic>` section to the appropriate part of the note). Do not create a sibling.
+3. **If no good home exists, create a new note** — see § Where notes go below for
+   how to pick the folder. Do not assume a folder exists; discover the layout.
 4. **Update the Agent Index in `Home.md`** in the same operation:
-   - New note → add a row to the relevant `### <Folder>` subsection. Wikilink, one-sentence summary, tags.
+   - New note → add a row to the relevant `### <Section>`: `| [[Folder/Note]] | one-line summary |`. Keep the summary terse — the index is a triage pointer, not a place to read the note.
    - Extended note where the summary line is no longer accurate → refresh the existing row's summary.
 
    The index update is part of the definition-of-done. A capture without an index update is incomplete.
 
-5. **Append to the daily note** in the same vault. See Daily Note Append below.
+5. **If the vault keeps a daily log, append to today's entry.** Not every vault
+   has one — see § Where notes go.
 
-### Daily Note Append
+## Where notes go
 
-In the relevant vault, append under `## Notes` in `Daily/YYYY-MM-DD.md`:
-
-```
-- **HH:MM** — Brief description → [[Folder/Note Title]]
-```
-
-If today's daily note doesn't exist, create it from the vault's `Templates/Daily Note` (work) or `Templates/Daily` (personal). Frontmatter: `title: YYYY-MM-DD`, `date: YYYY-MM-DD`, `tags: [daily]`.
-
-For a Zettelkasten capture in the personal vault, mark it as captured:
+**Never assume a folder exists.** Folder names are configurable per vault, and
+the guaranteed contract (SCHEMA.md) is small:
 
 ```
-- **HH:MM** — Captured → [[Zettelkasten/YYYYMMDDHHMM Title]]
+<vault-root>/
+  Home.md       # the Agent-Index hub
+  MOCs/         # Maps of Content — one "MOC - <Topic>.md" per domain hub
+  Projects/     # one <name>.md per project (epic); type: project
+  Sessions/     # one <thread>/_index.md per session (task)
+  Templates/    # excluded from search + resolution
 ```
 
-## Zettelkasten (personal vault only)
+That is what `vaultmem init` scaffolds and all this skill can count on. Anything
+else is that vault's own convention, so **discover the layout instead of guessing
+it**: `vaultmem vaults` (roots, sessions root, MOC, routing), `vaultmem index`
+(the section names this vault actually uses — sections generally mirror folders,
+making this the cheapest read of the layout), `vaultmem mocs` (how it carves up
+topics even when folders are flat). If the vault root has a `CLAUDE.md`/`AGENTS.md`,
+follow it — the owner's own naming/template rules win over anything here. Many
+vaults have none; don't hunt twice.
 
-Long-lived knowledge graph. Atomic notes in `Zettelkasten/` as a flat folder — structure comes from links, not hierarchy.
+**Choosing a home:**
 
-**Threshold:** liberal. Capture any idea you might want to find again in 6 months — patterns, mental models, surprising behaviors, trade-off frameworks, workflow insights. Expect 1-3 per active session. If a debug session yields a generalizable lesson (e.g. "socket exhaustion causes OOM under backpressure"), capture it as a personal-vault zettel — even if the debug context was work.
+- A note about an epic → `Projects/`. One task's working state → `Sessions/`
+  (the `session` skill owns that tier — don't hand-roll it).
+- A domain hub with 8+ related notes under it → `MOCs/MOC - <Topic>.md`.
+- Anything else → the existing section whose siblings look most like your note.
+  Matching an established section beats inventing a folder. If nothing fits and
+  there is no catch-all, put the note at the vault root and index it — a findable
+  note in the wrong place beats a perfect folder nobody searches.
 
-**Atomic note format:**
-- Filename: `YYYYMMDDHHMM <Descriptive Title>.md` (current timestamp)
-- Frontmatter: `title`, `date`, `type: zettel`, `tags`
-- Body: one idea — what is it, why does it matter, when is it useful
-- Footer: `## Related` section linking to related zettels and MOCs
+### Optional layouts — only if your vault already has them
 
-**MOCs (Maps of Content):**
-- Created when 3+ atomic notes cluster around a theme
-- Filename: `MOC - <Topic>.md`
-- Frontmatter includes `type: moc` and tag `moc`
+Richer vaults often add topical folders such as `Debug/`, `Incidents/`,
+`Meetings/`, `Architecture/`, `People/`, `Areas/`, `Resources/`, or an `Inbox/`.
+These are **examples, not requirements** — none is part of the schema. Use one
+only when `vaultmem index` or the vault's own `CLAUDE.md` shows it exists. When
+they are present: event-shaped notes (`Meetings/`, `Incidents/`) date-prefix the
+filename `YYYY-MM-DD - <Title>.md` so the folder sorts chronologically (an
+aggregator uses the earliest date it covers); state-tracking notes (`Debug/`,
+`Architecture/`, `People/`) use plain descriptive titles; extending an existing
+un-prefixed note leaves the filename alone unless asked. If the vault keeps a
+daily log (`Daily/YYYY-MM-DD.md`), append
+`- **HH:MM** — Brief description → [[Folder/Note Title]]` under `## Notes`,
+creating today's entry from its daily template if missing.
 
-**Cross-vault rule:** No cross-vault wikilinks. If a personal-vault zettel was triggered by a work session, mention it in the Related section as plain text, not a link.
+### The Zettelkasten pattern (optional)
+
+Some vaults keep a flat folder of atomic notes where structure comes from links
+rather than hierarchy — one idea per note, timestamp-named
+(`YYYYMMDDHHMM <Title>.md`), frontmatter `type: zettel`, a `## Related` footer.
+If a vault has one, it is the right home for *generalizable* insight: a pattern,
+mental model, or trade-off framework you'd want again in six months, as distinct
+from a project-specific fact. A debug session's durable lesson ("socket
+exhaustion causes OOM under backpressure") is a zettel; the ticket it came from
+is not. If the vault has no such folder, don't create one unprompted — capture
+the insight as an ordinary note and link it from the relevant MOC. The value is
+the atomicity and the links, not the folder name.
+
+**Cross-vault rule:** no cross-vault wikilinks — they always dangle. Reference
+the other vault as plain text.
+
+## Curation: what should I write next?
+
+Capture answers "record this." These answer "where is this vault thin, and what
+is missing?" — run them at a stopping point, or when the user asks what to
+document next.
+
+- `vaultmem dangling --by-target` — every broken `[[link]]` aggregated by missing
+  target, ranked by inbound count. **The most-wanted list**: a target three notes
+  point at is one the vault has already decided it needs. Write those first.
+- `vaultmem frontier` — ranks notes by frontier score (outbound minus inbound
+  links, decayed by time since `updated:`). High scorers point outward at things
+  nothing points back to — the edge of what's written down. `-n` caps it.
+- `vaultmem doctor` — hygiene: Agent-Index rows gone BROKEN (target missing or a
+  0-byte stub) or STALE (row still reads live for a note whose `status:` says it
+  was retracted), plus schema lints over Sessions/Projects. Exit 0 clean, 2 on
+  findings. `doctor --deep` adds a vault-wide ORPHAN (no inbound links) and
+  UNINDEXED (in neither the Agent Index nor any MOC) scan — slower, so run it
+  deliberately, not every session.
+
+Fixing a `--by-target` entry or a BROKEN row usually beats a new note: it
+completes something already half-written.
 
 ## Don't Document
 
@@ -225,9 +295,10 @@ dangle. Get this wrong and the link is dead (red in the graph, no backlink).
 - **MOCs** are linked by their real filename `[[MOC - <Topic>]]`, or by a short
   alias the MOC declares (e.g. a `MOC - Payments.md` that declares `aliases: [Payments]`).
   Do not link a bare topic name unless that alias exists.
-- **People** links: `[[Name]]` or `[[People/Name|Name]]` (work vault). The note
-  must exist in `People/`; if the person has no note yet, create a stub (the
-  `Templates/Person.md` shape) or use plain text — don't leave a dangling link.
+- **People** links: `[[Name]]` only if a note for that person exists (some
+  vaults keep a `People/` folder, many don't). If there is none, create a stub
+  from the vault's person template if it has one, or use plain text — don't
+  leave a dangling link.
 - **Repo artifacts are NOT vault notes.** ADR IDs (`ADR-00093`), source paths
   (`packages/…`), PR numbers (`#3383`) live in the repo, not Obsidian — write
   them as inline code or a real URL, never as `[[wikilinks]]`. `[[ADR-00093]]`
@@ -253,6 +324,10 @@ finish a capture, **verify it** — don't eyeball it:
   Non-zero exit means it dangles; fix the basename or create the target.
 - `vaultmem dangling <note>` — lists every broken outbound link in a note
   you just wrote or edited. Run it before declaring the capture done.
+- `vaultmem verify <file>` — the same dangling check plus the `doctor` schema
+  lints, scoped to one file. Useful on a Session or Project note, where the
+  frontmatter contract is enforced and a missing `aliases:` makes the note
+  unlinkable.
 
 This catches the most expensive failure mode in this system: an agent (often a
 background capture subagent) **reports creating a note it never wrote**, leaving
@@ -273,7 +348,11 @@ tags:
 ---
 ```
 
-Each vault's `CLAUDE.md` documents additional conventions (tag prefixes, type fields, etc.). Read it when working in the vault.
+Sessions and Projects carry additional **required** fields — `thread`/`status`/
+`updated` and `aliases` on a Session, `type`/`status` on a Project. SCHEMA.md is
+normative there, and `vaultmem doctor` enforces it. If the vault root has a
+`CLAUDE.md`/`AGENTS.md`, follow any further conventions it documents (tag
+prefixes, type fields); many vaults have none.
 
 ## Workflow C: Session Capture (subagent)
 
@@ -285,15 +364,15 @@ are instructed to spawn capture subagents proactively.
 1. **Invoke this skill.** The subagent must load the obsidian-vault skill to
    get vault paths, conventions, and workflows.
 2. **Parse the parent's summary.** Extract: what happened, category, vault.
-3. **Follow Workflow B** from step 1 (pick vault) onward. The category hint
-   from the parent maps to folders:
-   - `debug` → `Debug/`, `architecture` → `Architecture/`,
-     `incident` → `Incidents/`, `meeting` → `Meetings/`,
-     `project` → `Projects/`, `people` → `People/`,
-     `resource` → `Resources/` (personal), `zettel` → `Zettelkasten/` (personal)
-4. **Check for zettel opportunities.** If the work produced a generalizable
-   insight (not just a project-specific fact), also create a zettel in the
-   personal vault — even if the primary capture goes to the work vault.
+3. **Follow Workflow B** from step 1 (pick vault) onward. Treat the parent's
+   category as a *hint*, not a folder name: resolve it against the sections this
+   vault actually has (`vaultmem index`) per § Where notes go. `project` maps to
+   the schema's `Projects/`; the rest (`debug`, `architecture`, `incident`,
+   `meeting`, `people`, `zettel`, …) only have a folder if this vault made one.
+4. **Check for generalizable insight.** If the work produced a lesson that
+   outlives the project (not just a project-specific fact), capture it as its own
+   note — in the personal vault if that's where durable learning lives, even
+   when the primary capture goes to the work vault.
 5. **Complete all three artifacts:** note (new or extended), Agent Index update,
    daily note append.
 
