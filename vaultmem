@@ -16,6 +16,9 @@
 #   vaultmem --format F <query> search output format: cli (default, curated+content, ANSI) |
 #                               files (bare content-hit paths, pipeable) | json (array of
 #                               {file, line, text} content matches; escaped for bash 3.2)
+#   vaultmem --exclude P <query>  drop notes whose body also matches rg pattern P (find
+#                               notes matching <query> but NOT P). Quoted phrases/regex work
+#                               natively in <query> itself (e.g. vaultmem 'quick brown').
 #   vaultmem index              browse the Agent Index: section counts + MOCs (the shape)
 #   vaultmem index <section>    expand one section (e.g. index architecture); rows capped
 #   vaultmem index all          full flat dump (escape hatch; rows still width-capped)
@@ -288,7 +291,9 @@ _load_registry() {
 _load_registry
 
 LIMIT="${DEF_LIMIT:-20}"
-FORMAT=cli # search output format: cli (default) | json | files
+FORMAT=cli  # search output format: cli (default) | json | files
+EXCLUDE=""  # search: drop notes whose body matches this rg pattern (empty = off)
+HAVE_EXCL=0 # whether --exclude was passed (distinguishes "" pattern from unset)
 if [ -t 1 ]; then
 	B=$'\033[1m'
 	R=$'\033[0m'
@@ -1326,6 +1331,32 @@ cmd_groom() {
 }
 
 # --- subcommand: search --------------------------------------------------------
+# Candidate content-hit files for a query, capped at LIMIT and shared by all
+# three output formats (cli/json/files) so the cap and any exclusion are applied
+# once, consistently. --exclude drops notes whose BODY also matches the given rg
+# pattern (qmd's `-term` semantic: find notes matching the query but NOT the
+# excluded pattern) — a file-level filter, applied before the cap so excluded
+# notes don't consume result slots. Quoted phrases and regex work natively via rg
+# in the QUERY itself (e.g. `vaultmem 'quick brown'`), so R10 needs no phrase
+# parsing — see -h.
+_search_files() {
+	local query="$1"
+	shift
+	local -a roots=("$@") f
+	rg -ilN -e "$query" --glob '*.md' --glob '!Templates/**' "${roots[@]}" 2>/dev/null |
+		{
+			if [ "$HAVE_EXCL" = 1 ]; then
+				while IFS= read -r f; do
+					[ -n "$f" ] || continue
+					rg -qiN -e "$EXCLUDE" "$f" 2>/dev/null && continue # drop notes matching --exclude
+					printf '%s\n' "$f"
+				done
+			else
+				cat
+			fi
+		} | head -n "$LIMIT"
+}
+
 cmd_search() {
 	local query="$1"
 	shift || true
@@ -1342,7 +1373,7 @@ cmd_search() {
 	# array of {file, line, text} content matches for structured consumers.
 	case "$FORMAT" in
 	files)
-		rg -ilN -e "$query" --glob '*.md' --glob '!Templates/**' "${roots[@]}" 2>/dev/null | head -n "$LIMIT"
+		_search_files "$query" "${roots[@]}"
 		return 0
 		;;
 	json)
@@ -1374,8 +1405,7 @@ cmd_search() {
 		rel="${f##*/Obsidian/}"
 		printf '  %s\n' "$rel"
 		rg -iN --max-count 2 -e "$query" "$f" 2>/dev/null | sed 's/^/      /' | head -n 2
-	done < <(rg -ilN -e "$query" --glob '*.md' --glob '!Templates/**' "${roots[@]}" 2>/dev/null |
-		head -n "$LIMIT")
+	done < <(_search_files "$query" "${roots[@]}")
 	[ "$any" -eq 0 ] && printf '  (no content matches — try a broader term, or "vaultmem index")\n'
 	# Search always succeeds — an empty result is not an error (and a bare `[ … ]`
 	# test above must not leak its exit code as the command's). All three formats
@@ -1398,9 +1428,7 @@ _search_json() {
 	# matching lines (file:line:text) from just those files.
 	local -a files=()
 	local f
-	while IFS= read -r f; do [ -n "$f" ] && files+=("$f"); done < <(
-		rg -ilN -e "$query" --glob '*.md' --glob '!Templates/**' "${roots[@]}" 2>/dev/null | head -n "$LIMIT"
-	)
+	while IFS= read -r f; do [ -n "$f" ] && files+=("$f"); done < <(_search_files "$query" "${roots[@]}")
 	if [ "${#files[@]}" -eq 0 ]; then
 		printf '[]\n'
 		return 0
@@ -2411,8 +2439,13 @@ while [ $# -gt 0 ]; do
 		FORMAT="$2"
 		shift 2
 		;;
+	--exclude)
+		EXCLUDE="$2"
+		HAVE_EXCL=1
+		shift 2
+		;;
 	-h | --help)
-		sed -n '4,91p' "$0"
+		sed -n '4,94p' "$0"
 		exit 0
 		;;
 	*)
@@ -2438,7 +2471,7 @@ status | sessions | verify | nudge | which | init | doctor | "") ;;
 esac
 
 case "${ARGS[0]:-}" in
-"") sed -n '4,91p' "$0" ;; # no args → print usage
+"") sed -n '4,94p' "$0" ;; # no args → print usage
 status) cmd_status ;;
 nudge) cmd_nudge ;;
 index) cmd_index "${ARGS[1]:-}" ;;
