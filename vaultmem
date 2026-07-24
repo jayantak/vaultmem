@@ -13,6 +13,9 @@
 #   vaultmem <query>            search all vaults; curated index hits first
 #   vaultmem -v <id> <query>    restrict to one vault (see `vaultmem vaults`)
 #   vaultmem -n 40 <query>      cap results (default 20 files)
+#   vaultmem --format F <query> search output format: cli (default, curated+content, ANSI) |
+#                               files (bare content-hit paths, pipeable) | json (array of
+#                               {file, line, text} content matches; escaped for bash 3.2)
 #   vaultmem index              browse the Agent Index: section counts + MOCs (the shape)
 #   vaultmem index <section>    expand one section (e.g. index architecture); rows capped
 #   vaultmem index all          full flat dump (escape hatch; rows still width-capped)
@@ -285,6 +288,7 @@ _load_registry() {
 _load_registry
 
 LIMIT="${DEF_LIMIT:-20}"
+FORMAT=cli # search output format: cli (default) | json | files
 if [ -t 1 ]; then
 	B=$'\033[1m'
 	R=$'\033[0m'
@@ -1325,6 +1329,7 @@ cmd_groom() {
 cmd_search() {
 	local query="$1"
 	shift || true
+	case "$FORMAT" in cli | json | files) ;; *) die "vaultmem search: --format wants cli|json|files (got '$FORMAT')" ;; esac
 	local -a roots=()
 	local _id _p
 	case "$SEL" in
@@ -1332,6 +1337,21 @@ cmd_search() {
 	*) roots=("$(_vault_path "$SEL")") ;;
 	esac
 
+	# files / json: machine-readable, no curated section, no ANSI. `files` is the
+	# cheapest agent-useful subset (bare content-hit paths, pipeable); `json` is an
+	# array of {file, line, text} content matches for structured consumers.
+	case "$FORMAT" in
+	files)
+		rg -ilN -e "$query" --glob '*.md' --glob '!Templates/**' "${roots[@]}" 2>/dev/null | head -n "$LIMIT"
+		return 0
+		;;
+	json)
+		_search_json "$query" "${roots[@]}"
+		return 0
+		;;
+	esac
+
+	# cli (default): curated hits first, then content hits, human-formatted.
 	# 1) Curated hits: the Agent Index rows + MOC pointer lines that match.
 	local curated mocs_name
 	mocs_name=$(basename "$PRIMARY_MOCS")
@@ -1357,6 +1377,54 @@ cmd_search() {
 	done < <(rg -ilN -e "$query" --glob '*.md' --glob '!Templates/**' "${roots[@]}" 2>/dev/null |
 		head -n "$LIMIT")
 	[ "$any" -eq 0 ] && printf '  (no content matches — try a broader term, or "vaultmem index")\n'
+	# Search always succeeds — an empty result is not an error (and a bare `[ … ]`
+	# test above must not leak its exit code as the command's). All three formats
+	# return 0 so scripts can branch on `--format json|files` output, not $?.
+	return 0
+}
+
+# search --format json: emit an array of {file, line, text} content-match objects,
+# capped at LIMIT files (the same cap as the cli/files content pass). One match
+# line per object, using rg -H (with filename) + -n (line number). JSON string
+# escaping is hand-rolled in awk (bash 3.2 has no printf %q-to-JSON, no jq dep):
+# backslash and double-quote are escaped, and control chars (tab/newline/CR) are
+# emitted as their JSON escapes so a note containing quotes/backslashes/tabs is
+# still valid JSON. Emits `[]` on no matches.
+_search_json() {
+	local query="$1"
+	shift
+	local -a roots=("$@")
+	# Restrict to the same capped file set the other formats use, then pull the
+	# matching lines (file:line:text) from just those files.
+	local -a files=()
+	local f
+	while IFS= read -r f; do [ -n "$f" ] && files+=("$f"); done < <(
+		rg -ilN -e "$query" --glob '*.md' --glob '!Templates/**' "${roots[@]}" 2>/dev/null | head -n "$LIMIT"
+	)
+	if [ "${#files[@]}" -eq 0 ]; then
+		printf '[]\n'
+		return 0
+	fi
+	rg -iN -H -n --max-count 2 -e "$query" "${files[@]}" 2>/dev/null | awk '
+    function esc(s,  o,i,c) {
+      o=""
+      for(i=1;i<=length(s);i++){ c=substr(s,i,1)
+        if(c=="\\") o=o "\\\\"
+        else if(c=="\"") o=o "\\\""
+        else if(c=="\t") o=o "\\t"
+        else if(c=="\r") o=o "\\r"
+        else o=o c }
+      return o
+    }
+    {
+      # rg -H -n output is file:line:text; split on the first two colons only, so
+      # a colon in the matched text stays in the text field.
+      p1=index($0,":"); file=substr($0,1,p1-1); rest=substr($0,p1+1)
+      p2=index(rest,":"); line=substr(rest,1,p2-1); text=substr(rest,p2+1)
+      printf "%s{\"file\":\"%s\",\"line\":%s,\"text\":\"%s\"}", (n++?",\n":"[\n"), esc(file), line, esc(text)
+    }
+    END{ if(n) printf "\n]\n"; else printf "[]\n" }
+  '
 }
 
 # --- wikilink graph: resolve / links / backlinks / neighbors / dangling --------
@@ -2339,8 +2407,12 @@ while [ $# -gt 0 ]; do
 		LIMIT="$2"
 		shift 2
 		;;
+	--format)
+		FORMAT="$2"
+		shift 2
+		;;
 	-h | --help)
-		sed -n '4,88p' "$0"
+		sed -n '4,91p' "$0"
 		exit 0
 		;;
 	*)
@@ -2366,7 +2438,7 @@ status | sessions | verify | nudge | which | init | doctor | "") ;;
 esac
 
 case "${ARGS[0]:-}" in
-"") sed -n '4,88p' "$0" ;; # no args → print usage
+"") sed -n '4,91p' "$0" ;; # no args → print usage
 status) cmd_status ;;
 nudge) cmd_nudge ;;
 index) cmd_index "${ARGS[1]:-}" ;;
