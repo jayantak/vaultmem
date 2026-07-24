@@ -1,6 +1,6 @@
 {
   "name": "vaultmem",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Agent memory over an Obsidian vault: the session, obsidian-vault, and remember-project skills, paired with the vaultmem CLI.",
   "author": {
     "name": "jayantak"
