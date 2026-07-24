@@ -45,23 +45,14 @@ is_known() {
 	return 1
 }
 
-# Dispatch-table subcommands the skills are NOT expected to teach. Everything
-# else must be mentioned by at least one skill. One reason per entry.
-#
-# Permanent — not agent workflows:
+# Dispatch-table subcommands the skills are NOT expected to teach — they are
+# human or harness surfaces, not agent workflows. Everything else must be
+# mentioned by at least one skill. One reason per entry; keep this list short,
+# since every entry is a hole in the guard.
 #   init    human one-time vault scaffolding, run before any agent uses the tool
 #   nudge   Stop-hook surface, invoked by the harness and never by an agent
 #   verify  PostToolUse-hook surface, invoked by the harness and never by an agent
-#
-# TEMPORARY — remove each entry as the skill PR teaching it lands. These four
-# ARE agent-facing and SHOULD be taught; they are exempted only so this lint can
-# merge independently of the in-flight skill PRs instead of failing on drift it
-# is not itself introducing. Do not add to this group without the same plan.
-#   cat       taught by the in-flight sectioned-read skill PR
-#   bookmark  taught by the in-flight bookmark-workflow skill PR
-#   frontier  taught by the in-flight frontier skill PR
-#   doctor    taught by the in-flight hygiene skill PR
-ALLOWED="|init|nudge|verify|cat|bookmark|frontier|doctor|"
+ALLOWED="|init|nudge|verify|"
 
 if [ ! -d "$SKILLS" ]; then
 	printf 'subcommand-lint: no skills/ directory — nothing to check (ok).\n'
