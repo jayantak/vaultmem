@@ -691,6 +691,58 @@ seed_search_notes() {
   [ "$n" -eq 2 ]
 }
 
+# --- search --exclude (R10: minimal exclusion, no query language) --------------
+
+# Two notes both matching the query; only one also carries the excluded term.
+seed_exclude_notes() {
+  mkdir -p "$OBS_JAY/Notes"
+  printf '# keep\nwidget alpha notes\n' >"$OBS_JAY/Notes/keep.md"
+  printf '# drop\nwidget alpha but also a draft marker\n' >"$OBS_JAY/Notes/drop.md"
+}
+
+@test "search --exclude drops notes whose body also matches the pattern (files)" {
+  seed_exclude_notes
+  run "$OM" -v jay --format files --exclude draft widget
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"Notes/keep.md"* ]]
+  [[ "$output" != *"Notes/drop.md"* ]]
+}
+
+@test "search without --exclude keeps both matching notes (files)" {
+  seed_exclude_notes
+  run "$OM" -v jay --format files widget
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"Notes/keep.md"* ]]
+  [[ "$output" == *"Notes/drop.md"* ]]
+}
+
+@test "search --exclude applies in json format too" {
+  seed_exclude_notes
+  run "$OM" -v jay --format json --exclude draft widget
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"keep.md"* ]]
+  [[ "$output" != *"drop.md"* ]]
+}
+
+@test "search --exclude applies in the default cli format" {
+  seed_exclude_notes
+  run "$OM" -v jay --exclude draft widget
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"keep.md"* ]]
+  [[ "$output" != *"drop.md"* ]]
+}
+
+@test "search quoted phrase matches via rg regex (no phrase parsing needed)" {
+  mkdir -p "$OBS_JAY/Notes"
+  printf '# p\nthe quick brown fox\nquick then brown apart\n' >"$OBS_JAY/Notes/p.md"
+  # the phrase 'quick brown' matches only the adjacent-words line, not the
+  # 'quick then brown' line — proving rg handles phrases in the query directly.
+  run "$OM" -v jay --format json "quick brown"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"quick brown fox"* ]]
+  [[ "$output" != *"quick then brown apart"* ]]
+}
+
 # --- frontier (knowledge-frontier ranking: (out-in) * exp(-days/30)) -----------
 
 @test "frontier ranks a high-fanout recently-updated hub above its low-fanout leaves" {
