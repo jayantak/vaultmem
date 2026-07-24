@@ -200,6 +200,11 @@ section read via offset/limit satisfies this). The Edit tool rejects writes
 to never-read files — this is the top recorded tool error in past sessions.
 The same applies to the Project note and `MEMORY.md`.
 
+`vaultmem cat`/`bookmark` do NOT satisfy that precondition. They are separate
+processes; the Edit tool only counts a file as read when *you* read it with the
+Read tool. Use them for cheap inspection (resume, re-anchoring, checking a
+section before deciding), and Read the file itself before the first edit.
+
 1. Append a timestamped bullet to `## Work log`. Lead it with a status marker
    when it helps scanning — **DONE** / **BLOCKED** / **DECISION** / **NEXT**.
 2. Rewrite `## Bookmark` (Last / Next / Open) — always current, never stale.
@@ -216,16 +221,17 @@ content + Bookmark (+ Git state if it moved), same turn. Corrections edit the
 existing section in place rather than appending.
 
 **Re-anchor periodically.** On a long thread, every ~5–6 substantive turns
-re-read your own `## Bookmark` + `## Pinned` before deciding the next move — it
+re-read your own `## Bookmark` + `## Pinned` (`vaultmem bookmark <thread>`) before deciding the next move — it
 keeps you on the task instead of drifting with the conversation, and it surfaces
 when the file has bloated enough to checkpoint (below).
 
 ## Resume
 
-Read ONLY the `## Bookmark` + `## Pinned` blocks with Read offset/limit — not the
-whole file. Those two are the resumable state (what just happened / what's next /
-the load-bearing constants). Read further sections only if the next action needs
-them. The picker's number/name selects the thread; resolve its `_index.md` path.
+Run `vaultmem bookmark <thread>` — it prints exactly the `## Bookmark` +
+`## Pinned` blocks, not the whole file. Those two are the resumable state (what
+just happened / what's next / the load-bearing constants). Read further sections
+only if the next action needs them, with `vaultmem cat <note> --section '## <Heading>'`.
+The picker's number/name selects the thread; resolve its `_index.md` path.
 
 ## Checkpoint (distill in place, keep going)
 
@@ -294,7 +300,12 @@ nudge in short form. When you see it:
 
 ## Frugality rule
 
-Never read a full file when a section will do. The `_index.md` IS the state;
+Never read a full file when a section will do — `vaultmem cat <note> --section
+'## <Heading>'` extracts one heading block without guessing offsets, and
+`vaultmem bookmark <thread>` is the pre-cut Bookmark+Pinned pair (measured on a
+real vault: 2568 bytes vs 11950 for the whole `_index.md`, 4.7x cheaper). Both
+are read-only inspection — they do not satisfy the Edit tool's read-before-write
+precondition (see Indexed mode). The `_index.md` IS the state;
 keep it ~100–150 lines — when it grows past that, **checkpoint** (see above) to
 promote and collapse rather than letting it bloat. Search across everything with
 `vaultmem <query>`; follow `[[links]]` between notes with
