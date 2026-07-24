@@ -8,8 +8,8 @@
     {
       "name": "vaultmem",
       "source": "./",
-      "description": "The session, obsidian-vault, and remember-project skills (namespaced vaultmem:session, vaultmem:obsidian-vault, vaultmem:remember-project). Pairs with the vaultmem CLI.",
-      "version": "0.2.0",
+      "description": "Four agent-memory skills split by job: vault-recall (check before you re-derive), session (cross-session working memory), vault-capture (write it down), vault-curate (what to write next / vault health) — namespaced vaultmem:vault-recall, vaultmem:session, vaultmem:vault-capture, vaultmem:vault-curate. Pairs with the vaultmem CLI.",
+      "version": "0.3.0",
       "license": "MIT",
       "keywords": [
         "obsidian",

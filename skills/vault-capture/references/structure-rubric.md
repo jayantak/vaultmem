@@ -23,7 +23,7 @@ outgrows a few lines or needs to be linked from elsewhere.
 The map. Sections, each with **1–2 lines of orientation per linked item** so an
 agent knows where to dig without opening everything. Recommended sections:
 
-- **Drift anchor** *(always)* — `last_synced` + `synced_commit` in frontmatter, plus a "how to re-sync" block listing the diff baselines (ADR count, release line, active ticket areas, the synced HEAD) and the exact command to check each. This is what makes a re-run a cheap *diff* instead of a re-derive. See the `remember-project` SKILL "Re-syncing" section.
+- **Drift anchor** *(always)* — `last_synced` + `synced_commit` in frontmatter, plus a "how to re-sync" block listing the diff baselines (ADR count, release line, active ticket areas, the synced HEAD) and the exact command to check each. This is what makes a re-run a cheap *diff* instead of a re-derive. See the `vault-capture` SKILL "Re-syncing" section.
 - **Where the truth lives** — repo (+ how to fetch, e.g. `git clone <url>`), issue tracker, observability, cloud targets, datalake, console URLs. Pure routing.
 - **Architecture & design (the why)** — link the design notes / ADRs; one line each on *what mental model it gives you*.
 - **Active work** — what's in flight; link tickets/PRs.

@@ -30,7 +30,7 @@ repo root:
       "name": "vaultmem",
       "source": "./",
       "description": "...",
-      "version": "0.1.0",
+      "version": "0.3.0",
       "license": "MIT",
       "keywords": ["obsidian", "agent-memory", "skills"]
     }
@@ -50,14 +50,42 @@ either manifest enumerates them — adding a skill is just adding a directory:
 
 ```
 skills/
-  obsidian-vault/SKILL.md       → vaultmem:obsidian-vault
+  vault-recall/SKILL.md         → vaultmem:vault-recall
   session/SKILL.md              → vaultmem:session
-  remember-project/SKILL.md     → vaultmem:remember-project
+  vault-capture/SKILL.md        → vaultmem:vault-capture
+  vault-curate/SKILL.md         → vaultmem:vault-curate
 ```
 
-A skill's `references/` subdirectory (e.g. `skills/session/references/distill.md`)
-travels with it — the plugin ships the whole `skills/<name>/` tree, not just
-the `SKILL.md` file.
+A skill's `references/` subdirectory (e.g. `skills/session/references/distill.md`,
+`skills/vault-capture/references/question-tree.md`) travels with it — the plugin
+ships the whole `skills/<name>/` tree, not just the `SKILL.md` file.
+
+Because discovery is convention, a **renamed** skill directory is a breaking
+change for anyone who symlinked the old one: the new name is picked up
+automatically, but the stale symlink keeps pointing at a directory that no
+longer exists. See § The 0.3.0 rename below.
+
+## The 0.3.0 rename (breaking)
+
+0.3.0 split the skills by **agent job** rather than by artifact type, because a
+skill only fires when its description matches what the agent is about to do:
+
+| Removed | Replaced by |
+|---|---|
+| `obsidian-vault` | `vault-recall` (read/search/traverse) + `vault-capture` (write) + `vault-curate` (health & gaps) |
+| `remember-project` | `vault-capture` § Workflow D: Repo onboarding (+ its `references/`) |
+
+The motivating case: the single most valuable behavior in this system is the
+**recall reflex** — check the vault before re-deriving a past decision, since a
+miss costs ~60ms and ~700 tokens. It used to be clause `(1b)` inside
+`obsidian-vault`'s description, whose dominant framing was "reference or update
+your Obsidian vaults." That only fires once the agent has *already* decided to
+think about the vault, which is backwards. `vault-recall`'s description now
+leads with the reflex.
+
+Upgrading: Claude Code plugin users get the new skills on the next marketplace
+update. Symlink users should re-run `./install.sh --skills <dir>` and delete the
+now-dangling `obsidian-vault` and `remember-project` links.
 
 ## Install paths
 
@@ -102,7 +130,7 @@ have a vendored copy, re-sync it from this repo rather than editing it in place:
 
 ```bash
 # from a dotfiles/chezmoi checkout, with $VAULTMEM pointing at a clone of this repo
-for s in obsidian-vault session remember-project; do
+for s in vault-recall session vault-capture vault-curate; do
   rsync -a --delete "$VAULTMEM/skills/$s/" "home/agents-source/skills/$s/"
 done
 ```
@@ -115,13 +143,13 @@ handled by keeping the public copy generic than by forking it again.
 ## Bumping the plugin version
 
 `plugin.json` and `marketplace.json` both carry a `version` field
-(currently `0.1.0`); keep them in lockstep when you cut a release — the
+(currently `0.3.0`); keep them in lockstep when you cut a release — the
 marketplace entry's `version` is what `/plugin marketplace add` surfaces to
 installers.
 
 ## See also
 
-- [README.md § Agent skills](../README.md#agent-skills) — the three bundled
+- [README.md § Agent skills](../README.md#agent-skills) — the four bundled
   skills, what each does, and the two install paths.
 - [SCHEMA.md](../SCHEMA.md) — the vault contract the skills write to.
 - [docs/config.md](config.md) — the registry the skills route through

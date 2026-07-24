@@ -276,17 +276,33 @@ overrides: `VAULTMEM_COLD_DAYS` beats `cold_days`, `VAULTMEM_BLOAT_LINES` beats
 
 ## Agent skills
 
-vaultmem bundles three agent skills in `skills/` that drive the memory workflow:
+vaultmem bundles four agent skills in `skills/`, split by the **job the agent is
+about to do** — because a skill only fires if its description matches that job:
 
+- **`vault-recall`** — *check before you re-derive.* The reflex skill: before
+  reconstructing a past decision, a root cause, an incident, or "why is it built
+  this way," search the vault first (~60ms, ~700 tokens — cheaper than reading
+  two files). Owns search, the Agent Index, graph traversal
+  (`links`/`backlinks`/`neighbors`/`resolve`), and frugal note reads.
 - **`session`** — the resume/park/skip picker. Reads `vaultmem sessions`,
   routes work to the right vault, and rolls durable insights up into Project
   notes and MOCs at stopping points.
-- **`obsidian-vault`** — read and capture. Looks up prior decisions, root
-  causes, and people/project context before you re-derive them, and writes new
-  knowledge back into the vault.
-- **`remember-project`** — onboard a repo into memory: interviews you, then
-  writes a pointer-based Map of Content so future sessions route to where truth
-  lives instead of re-deriving it.
+- **`vault-capture`** — *something worth documenting happened.* Note placement,
+  the Agent-Index update that makes a capture complete, the wikilink rules, and
+  the `resolve`/`dangling` verification. Includes the repo-onboarding workflow
+  (interview → pointer-based MOC + drift anchor) so future sessions route to
+  where truth lives instead of re-deriving it.
+- **`vault-curate`** — *what should I write next, and is the vault rotting?*
+  `doctor`, `doctor --deep`, `dangling --by-target` (the most-wanted list),
+  `frontier`, and `groom`.
+
+> **Breaking rename in 0.3.0.** The former `obsidian-vault` and
+> `remember-project` skills are gone; their content lives in `vault-recall`,
+> `vault-capture`, and `vault-curate`. If you symlinked the old directories,
+> re-run `./install.sh --skills <dir>` and delete the two stale links. The split
+> exists so the recall reflex has a trigger of its own — buried inside a
+> "reference or update your vaults" description, it only fired once the agent had
+> already thought about the vault, which is backwards.
 
 The skills reference `vaultmem` subcommands and [SCHEMA.md](SCHEMA.md) rather
 than restating the contract, and CI lints that every subcommand a skill names
@@ -340,7 +356,8 @@ and the negative trigger (current code lives in the repo, never in memory):
   right now*.
 - **Prior decision, root cause, or project/people context? The vault.**
   `vaultmem <query>` to search, `vaultmem index` to see the shape, the
-  `obsidian-vault` skill (if installed) to read or capture a note.
+  `vault-recall` / `vault-capture` skills (if installed) to read or capture
+  a note.
 - Capture durable knowledge back into the vault at logical stopping
   points — decisions, root causes, and generalizable patterns — so the
   next session gets the ~60ms answer instead of re-deriving it.

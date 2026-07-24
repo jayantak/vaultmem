@@ -6,6 +6,33 @@ This project is 0.x — see [Semantic Versioning §4](https://semver.org/spec/v2
 for what that implies about stability: the CLI surface and config schema can
 still change between 0.MINOR releases.
 
+## [0.3.0] - 2026-07-24
+
+### Changed
+- **BREAKING (skills):** the bundled skills are restructured from three into
+  four, split by the **agent job** rather than by artifact type. `obsidian-vault`
+  and `remember-project` are removed; `vault-recall`, `vault-capture`, and
+  `vault-curate` join the unchanged `session`. Plugin users get the new names on
+  the next marketplace update; symlink users should re-run
+  `./install.sh --skills <dir>` and delete the two dangling links. No CLI or
+  config change. See [docs/plugin.md § The 0.3.0 rename](docs/plugin.md).
+
+### Added
+- `vault-recall` — the recall reflex gets a skill and a trigger of its own:
+  "before re-deriving a past decision, root cause, incident, or why-is-it-built-
+  this-way, check here first (~60ms, ~700 tokens)". It was previously clause
+  `(1b)` inside `obsidian-vault`'s "reference or update your vaults" framing, so
+  it only fired once the agent had already thought about the vault. Owns search,
+  the Agent Index, graph traversal, and frugal reads.
+- `vault-capture` — the write side: note placement, the Agent-Index update as
+  definition-of-done, Linking Rules, frontmatter, and the `resolve`/`dangling`
+  verification that catches the fabricated-note failure mode. Absorbs
+  `remember-project` as § Workflow D: Repo onboarding, drift anchor and both
+  `references/` files intact.
+- `vault-curate` — new job nothing taught before: what to write next and whether
+  the vault is rotting. `doctor`, `doctor --deep`, `dangling --by-target`,
+  `frontier`, `groom`.
+
 ## [0.2.0] - 2026-07-23
 
 ### Added
