@@ -481,6 +481,135 @@ EOF
   [ "$status" -ne 0 ]
 }
 
+# --- cat: token-frugal sectioned/ranged note read (R9) -------------------------
+
+# A note with nested headings so the same-or-higher-level stop is exercised.
+seed_cat_note() {
+  mkdir -p "$OBS_JAY/Notes"
+  cat >"$OBS_JAY/Notes/Doc.md" <<'EOF'
+---
+title: Doc
+aliases: [DocAlias]
+---
+# Title
+intro line
+## Alpha
+alpha body
+### Sub of Alpha
+sub body
+more sub
+## Beta
+beta body
+EOF
+}
+
+@test "cat prints the whole note line-numbered when no --section is given" {
+  seed_cat_note
+  run "$OM" -v jay cat Doc
+  [ "$status" -eq 0 ]
+  # first content line is numbered 1 (the frontmatter ---).
+  echo "$output" | grep -qE '^ *1'$'\t''---$'
+  [[ "$output" == *"beta body"* ]]
+}
+
+@test "cat --section extracts one heading block, stopping at the next same-level heading" {
+  seed_cat_note
+  run "$OM" -v jay cat Doc --section '## Alpha'
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"## Alpha"* ]]
+  [[ "$output" == *"alpha body"* ]]
+  # includes the nested ### sub-heading (lower level does not terminate)…
+  [[ "$output" == *"Sub of Alpha"* ]]
+  [[ "$output" == *"more sub"* ]]
+  # …but stops before the next same-level ## Beta.
+  [[ "$output" != *"beta body"* ]]
+}
+
+@test "cat --section on a level-1 heading runs to EOF (nothing is same-or-higher)" {
+  seed_cat_note
+  run "$OM" -v jay cat Doc --section '# Title'
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"intro line"* ]]
+  [[ "$output" == *"beta body"* ]]
+}
+
+@test "cat --from/--lines windows the selected lines" {
+  seed_cat_note
+  run "$OM" -v jay cat Doc --section '## Alpha' --from 2 --lines 1
+  [ "$status" -eq 0 ]
+  # line 2 of the Alpha block is 'alpha body'; --lines 1 keeps only it.
+  [[ "$output" == *"alpha body"* ]]
+  [[ "$output" != *"## Alpha"* ]]
+  [[ "$output" != *"Sub of Alpha"* ]]
+}
+
+@test "cat output is line-numbered (tab-separated leading number)" {
+  seed_cat_note
+  run "$OM" -v jay cat Doc --section '## Beta'
+  [ "$status" -eq 0 ]
+  echo "$output" | grep -qE $'\t''## Beta$'
+}
+
+@test "cat errors (nonzero) on a missing section" {
+  seed_cat_note
+  run "$OM" -v jay cat Doc --section '## Nope'
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"no section"* ]]
+}
+
+@test "cat errors (nonzero) with no note argument" {
+  seed_cat_note
+  run "$OM" -v jay cat
+  [ "$status" -ne 0 ]
+}
+
+@test "cat rejects a non-numeric --from" {
+  seed_cat_note
+  run "$OM" -v jay cat Doc --from abc
+  [ "$status" -ne 0 ]
+}
+
+# --- did-you-mean on a resolve miss (R9): cat + resolve ------------------------
+
+@test "cat on an unresolved note prints up to 3 did-you-mean suggestions" {
+  seed_graph
+  run "$OM" -v flo cat "Widgett"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"Did you mean"* ]]
+  [[ "$output" == *"Widget"* ]]
+}
+
+@test "resolve on a miss prints did-you-mean suggestions" {
+  seed_graph
+  run "$OM" -v flo resolve "Widgett"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"DANGLING"* ]]
+  [[ "$output" == *"Did you mean"* ]]
+  [[ "$output" == *"Widget"* ]]
+}
+
+@test "did-you-mean matches a frontmatter alias, not just basenames" {
+  seed_cat_note
+  # 'DocAlia' is close to the alias 'DocAlias' but no basename.
+  run "$OM" -v jay cat "DocAlia"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"Did you mean"* ]]
+  [[ "$output" == *"DocAlias"* ]]
+}
+
+@test "did-you-mean caps suggestions at 3" {
+  mkdir -p "$OBS_JAY/Notes"
+  for n in alpha-note alpha-mem alpha-log alpha-doc alpha-run; do
+    printf '# %s\n' "$n" >"$OBS_JAY/Notes/$n.md"
+  done
+  run "$OM" -v jay resolve "alpha"
+  [ "$status" -ne 0 ]
+  # count indented suggestion lines under the "Did you mean:" header.
+  n=$(echo "$output" | grep -cE '^  alpha-')
+  [ "$n" -le 3 ]
+  [ "$n" -ge 1 ]
+}
+
 # --- frontier (knowledge-frontier ranking: (out-in) * exp(-days/30)) -----------
 
 @test "frontier ranks a high-fanout recently-updated hub above its low-fanout leaves" {
