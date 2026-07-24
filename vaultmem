@@ -16,7 +16,9 @@
 #   vaultmem index              browse the Agent Index: section counts + MOCs (the shape)
 #   vaultmem index <section>    expand one section (e.g. index architecture); rows capped
 #   vaultmem index all          full flat dump (escape hatch; rows still width-capped)
-#   vaultmem doctor             flag drifted index rows + vault schema lints; also lint the config
+#   vaultmem doctor             flag drifted index rows + vault schema lints; also lint the config;
+#                               prints a per-vault growth line (note count + timed representative
+#                               search) — the ripgrep-vs-FTS5 tripwire, informational, never affects exit
 #                               index drift: BROKEN (missing/0-byte note) + STALE (note reverted/done but row reads live)
 #                               schema lints (walk Sessions/Projects): NOALIAS, GLYPH-DESYNC,
 #                               GLYPHED-FOLDER, NO-UPDATED, MISSING-FM, EMPTY-BOOKMARK, INDEX-DRIFT (see SCHEMA.md)
@@ -774,6 +776,31 @@ _deep_scan() { # $1 = vault root, $2 = 1 if this is the primary (agent-index) va
 	done
 }
 
+# Vault-growth watch: one line per in-scope vault, printed by `doctor` — the note
+# count plus a timed representative search, so "is ripgrep hurting yet?" is a
+# number you see every run rather than a guess. This is instrumentation for the
+# FTS5 ethos decision (search stays plain ripgrep until it demonstrably hurts),
+# NOT a step toward an index. Doctor only — never status/sessions (hot path,
+# fail-quiet hook contract). Timing uses the bash `time` builtin via TIMEFORMAT
+# (`%R` = real seconds, sub-second) so it adds no dependency beyond ripgrep. The
+# representative search mirrors cmd_search's content pass (`rg -ilN` over the
+# vault) so the number reflects real search cost, not a synthetic micro-op.
+_doctor_growth() {
+	local id path _rest n secs
+	local oldtf="${TIMEFORMAT:-}"
+	while IFS=$'\t' read -r id path _rest; do
+		[ -n "$id" ] || continue
+		case "$SEL" in both) ;; "$id") ;; *) continue ;; esac
+		[ -d "$path" ] || continue
+		n=$(find "$path" -type f -name '*.md' \
+			-not -path '*/Templates/*' -not -path '*/_archive/*' 2>/dev/null | grep -c '')
+		TIMEFORMAT='%R'
+		secs=$({ time rg -ilN -e 'the' --glob '*.md' --glob '!Templates/**' "$path" >/dev/null 2>&1; } 2>&1)
+		TIMEFORMAT="$oldtf"
+		printf '  %s: %s notes · search %ss\n' "$id" "$n" "$secs"
+	done <<<"$_REG"
+}
+
 # Exit codes (bitwise, so they compose): 0=clean 1=config errors 2=drift/lint
 # findings (index drift and/or schema lints) 3=both.
 cmd_doctor() {
@@ -855,6 +882,10 @@ ${deep_issues}"
 		printf '%s▸ Index drift — %s broken, %s stale; %s schema lint finding(s) (review)%s\n' "$B" "$nb" "$ns" "$nc" "$R"
 		printf '%s\n' "$issues" | awk -F'\t' 'NF>=3{printf "  [%s] %s\n        %s\n", $1, $2, $3}'
 	fi
+
+	# Vault-growth watch (informational; never affects rc). See _doctor_growth.
+	printf '%s▸ Vault growth (ripgrep tripwire)%s\n' "$B" "$R"
+	_doctor_growth
 	return "$rc"
 }
 
@@ -2157,7 +2188,7 @@ while [ $# -gt 0 ]; do
 		shift 2
 		;;
 	-h | --help)
-		sed -n '4,78p' "$0"
+		sed -n '4,80p' "$0"
 		exit 0
 		;;
 	*)
@@ -2183,7 +2214,7 @@ status | sessions | verify | nudge | which | init | doctor | "") ;;
 esac
 
 case "${ARGS[0]:-}" in
-"") sed -n '4,78p' "$0" ;; # no args → print usage
+"") sed -n '4,80p' "$0" ;; # no args → print usage
 status) cmd_status ;;
 nudge) cmd_nudge ;;
 index) cmd_index "${ARGS[1]:-}" ;;
