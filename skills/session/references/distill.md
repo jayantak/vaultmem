@@ -25,7 +25,9 @@ work log):
      architecture fact worth finding from anywhere) → an atomic note in the
      vault's MOC tree, wikilinked into the right `[[MOC - <Topic>]]`.
    Use `vaultmem <query>` to find an existing note first; prefer updating
-   over duplicating.
+   over duplicating. To check what a candidate target already says, read just the
+   relevant block — `vaultmem cat <note> --section '## Decisions'` — rather than
+   the whole note. (That is inspection only; Read the file before editing it.)
 2. Write/update the atomic note via `obsidian-vault` conventions, wikilinked
    into the right MOC with backlinks that **resolve in-vault** — link the MOC by
    its real filename `[[MOC - <Topic>]]` or a declared alias, never a bare topic
@@ -35,7 +37,9 @@ work log):
    is non-negotiable when a subagent did the write: never collapse the source on
    a subagent's word that the note was created (the recorded failure mode is a
    fabricated note + dangling pointer). No resolve, no collapse.
-4. **Collapse the source.** Replace the promoted work-log bullets (and the
+4. **Collapse the source.** Work from the session's own sections — pull them with
+   `vaultmem cat <thread> --section '## Work log'` instead of reading the whole
+   `_index.md`. Replace the promoted work-log bullets (and the
    distilled `## Decisions` entry) with a single one-line pointer:
    `→ promoted to [[<note>]]`, using the note's **exact saved basename** (copy
    it from the file you just wrote — do not paraphrase the title, or the pointer
