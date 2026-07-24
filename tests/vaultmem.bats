@@ -1521,6 +1521,47 @@ EOF
   [ "$status" -eq 3 ]
 }
 
+# --- doctor vault-growth watch (R6: the ripgrep/FTS5 tripwire) ------------------
+
+@test "doctor prints a per-vault growth line with a note count and search timing" {
+  # Three notes in jay; the growth line must count them and time a search.
+  mkdir -p "$OBS_JAY/Notes"
+  printf 'the quick brown fox\n' >"$OBS_JAY/Notes/a.md"
+  printf 'another the note\n' >"$OBS_JAY/Notes/b.md"
+  printf 'a third the note\n' >"$OBS_JAY/Notes/c.md"
+  run "$OM" doctor
+  [[ "$output" == *"Vault growth"* ]]
+  # jay: 3 notes · search <n>s  — count exact, timing a decimal-seconds token.
+  echo "$output" | grep -E '^  jay: 3 notes · search [0-9]+\.[0-9]+s$'
+}
+
+@test "doctor growth count excludes Templates/ and _archive/ notes" {
+  mkdir -p "$OBS_JAY/Notes" "$OBS_JAY/Templates" "$OBS_JAY/Sessions/_archive/old"
+  printf 'real\n' >"$OBS_JAY/Notes/real.md"
+  printf 'tmpl\n' >"$OBS_JAY/Templates/Session.md"
+  printf 'gone\n' >"$OBS_JAY/Sessions/_archive/old/_index.md"
+  run "$OM" doctor
+  # Only the one real note counts, not the template or the archived session.
+  echo "$output" | grep -E '^  jay: 1 notes · '
+}
+
+@test "doctor growth line is informational — it does not change the exit code" {
+  # A clean vault stays exit 0 even though the growth line prints.
+  write_healthy_session clean-growth-thread
+  run "$OM" doctor
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"Vault growth"* ]]
+}
+
+@test "doctor -v <id> scopes the growth line to the selected vault only" {
+  mkdir -p "$OBS_JAY/Notes" "$OBS_FLO/Notes"
+  printf 'j\n' >"$OBS_JAY/Notes/j.md"
+  printf 'f\n' >"$OBS_FLO/Notes/f.md"
+  run "$OM" -v jay doctor
+  [[ "$output" == *"  jay: "* ]]
+  [[ "$output" != *"  flo: "* ]]
+}
+
 # --- doctor INDEX-DRIFT (P2: Project<->Session index drift) ---------------------
 
 @test "doctor INDEX-DRIFT: '(status: active)' row disagrees with the session's actual status: fires" {
