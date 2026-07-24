@@ -481,7 +481,6 @@ EOF
   [ "$status" -ne 0 ]
 }
 
-<<<<<<< HEAD
 # --- cat: token-frugal sectioned/ranged note read (R9) -------------------------
 
 # A note with nested headings so the same-or-higher-level stop is exercised.
@@ -609,7 +608,8 @@ EOF
   n=$(echo "$output" | grep -cE '^  alpha-')
   [ "$n" -le 3 ]
   [ "$n" -ge 1 ]
-=======
+}
+
 # --- search --format cli|json|files (R2) ---------------------------------------
 
 # Two notes with a shared search term; one line carries characters that must be
@@ -689,7 +689,6 @@ seed_search_notes() {
   [ "$status" -eq 0 ]
   n=$(echo "$output" | grep -c 'Notes/n')
   [ "$n" -eq 2 ]
->>>>>>> e15bf7a (feat(search): add --format cli|json|files for machine-readable output (R2))
 }
 
 # --- frontier (knowledge-frontier ranking: (out-in) * exp(-days/30)) -----------
