@@ -1,19 +1,11 @@
 ---
 name: vault-recall
 description: >
-  Check the vault before you re-derive. Trigger FIRST — before the investigation,
-  not after — whenever you are about to reconstruct a past decision, a root
-  cause, an incident, an architecture rationale, "why is it built this way," or
-  more than a couple of tool calls' worth of project/people/system context. That
-  is the primary trigger and it fires with no memory question asked: a
-  `vaultmem <query>` costs ~60ms and ~700 tokens (cheaper than reading two
-  files), so a miss is nearly free and checking is the default, not the
-  exception. Also triggers on explicit lookups — "what do I know about X", "have
-  I noted Y", "check my notes", a person/project/system/debug-pattern name that
-  may be documented. Covers search, the Agent Index, graph traversal
-  (links/backlinks/neighbors/resolve), and frugal note reads. Negative trigger:
-  for what the code does *right now*, read the repo — the vault holds the why,
-  not the current source.
+  Check the vault before you re-derive. Trigger before reconstructing a past
+  decision, root cause, incident, architecture rationale, or "why is it built
+  this way" — even when no memory question is asked — and on explicit lookups
+  ("what do I know about X", "check my notes"). Not for what the code does now;
+  that's the repo.
 ---
 
 <!-- CANONICAL SOURCE: this repo (jayantak/vaultmem). The dotfiles copy under agents-source/skills/ is synced FROM here — edit this file, not that one. -->

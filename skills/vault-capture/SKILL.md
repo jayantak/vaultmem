@@ -2,18 +2,10 @@
 name: vault-capture
 description: >
   Write durable knowledge into the Obsidian vault. Trigger when something worth
-  documenting just happened — a debug root cause, an architecture decision and
-  what it rejected, an incident, a meeting, tool/infra setup, a project
-  milestone, people context, a generalizable pattern, or an explicit "make a
-  note" / "write this down". Also triggers when a parent agent spawns you as a
-  subagent at a logical stopping point to capture session work (the most common
-  invocation path), and when onboarding a repository into memory — "build
-  project memory", "remember this project", "set up agent memory for this repo",
-  or an agent that keeps re-deriving the same project context every session.
-  Owns note placement, the Agent-Index update that makes a capture complete,
-  wikilink resolution rules, frontmatter, and the resolve/dangling verification
-  that catches the fabricated-note failure mode. Capture liberally — an extra
-  note is cheap, a lost insight is not.
+  documenting just happened — a root cause, architecture decision, incident,
+  meeting, milestone, people context, reusable pattern — on "make a note", on a
+  subagent spawned to capture session work, and on repo onboarding ("remember
+  this project").
 ---
 
 <!-- CANONICAL SOURCE: this repo (jayantak/vaultmem). The dotfiles copy under agents-source/skills/ is synced FROM here — edit this file, not that one. -->
@@ -76,14 +68,11 @@ the guaranteed contract (SCHEMA.md) is small:
   Templates/    # excluded from search + resolution
 ```
 
-That is what `vaultmem init` scaffolds and all this skill can count on. Anything
-else is that vault's own convention, so **discover the layout instead of guessing
-it**: `vaultmem vaults` (roots, sessions root, MOC, routing), `vaultmem index`
-(the section names this vault actually uses — sections generally mirror folders,
-making this the cheapest read of the layout), `vaultmem mocs` (how it carves up
-topics even when folders are flat). If the vault root has a `CLAUDE.md`/`AGENTS.md`,
-follow it — the owner's own naming/template rules win over anything here. Many
-vaults have none; don't hunt twice.
+That is what `vaultmem init` scaffolds and all this skill can count on.
+Everything else is that vault's own convention — **discover the layout, don't
+guess it**: `vaultmem index` names the sections this vault actually uses (the
+cheapest read), `vaultmem mocs` shows how it carves up topics. A `CLAUDE.md` at
+the vault root wins over anything here.
 
 **Choosing a home:**
 
@@ -91,37 +80,13 @@ vaults have none; don't hunt twice.
   (the `session` skill owns that tier — don't hand-roll it).
 - A domain hub with 8+ related notes under it → `MOCs/MOC - <Topic>.md`.
 - Anything else → the existing section whose siblings look most like your note.
-  Matching an established section beats inventing a folder. If nothing fits and
-  there is no catch-all, put the note at the vault root and index it — a findable
-  note in the wrong place beats a perfect folder nobody searches.
+  Matching an established section beats inventing a folder. If nothing fits,
+  put the note at the vault root and index it — a findable note in the wrong
+  place beats a perfect folder nobody searches.
 
-### Optional layouts — only if your vault already has them
-
-Richer vaults often add topical folders such as `Debug/`, `Incidents/`,
-`Meetings/`, `Architecture/`, `People/`, `Areas/`, `Resources/`, or an `Inbox/`.
-These are **examples, not requirements** — none is part of the schema. Use one
-only when `vaultmem index` or the vault's own `CLAUDE.md` shows it exists. When
-they are present: event-shaped notes (`Meetings/`, `Incidents/`) date-prefix the
-filename `YYYY-MM-DD - <Title>.md` so the folder sorts chronologically (an
-aggregator uses the earliest date it covers); state-tracking notes (`Debug/`,
-`Architecture/`, `People/`) use plain descriptive titles; extending an existing
-un-prefixed note leaves the filename alone unless asked. If the vault keeps a
-daily log (`Daily/YYYY-MM-DD.md`), append
-`- **HH:MM** — Brief description → [[Folder/Note Title]]` under `## Notes`,
-creating today's entry from its daily template if missing.
-
-### The Zettelkasten pattern (optional)
-
-Some vaults keep a flat folder of atomic notes where structure comes from links
-rather than hierarchy — one idea per note, timestamp-named
-(`YYYYMMDDHHMM <Title>.md`), frontmatter `type: zettel`, a `## Related` footer.
-If a vault has one, it is the right home for *generalizable* insight: a pattern,
-mental model, or trade-off framework you'd want again in six months, as distinct
-from a project-specific fact. A debug session's durable lesson ("socket
-exhaustion causes OOM under backpressure") is a zettel; the ticket it came from
-is not. If the vault has no such folder, don't create one unprompted — capture
-the insight as an ordinary note and link it from the relevant MOC. The value is
-the atomicity and the links, not the folder name.
+Vaults that already have topical folders (`Debug/`, `Meetings/`, a daily log)
+or a Zettelkasten tier have filename and placement conventions that go with
+them: [`references/optional-layouts.md`](references/optional-layouts.md).
 
 **Cross-vault rule:** no cross-vault wikilinks — they always dangle. Reference
 the other vault as plain text.
