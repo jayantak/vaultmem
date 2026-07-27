@@ -1,18 +1,10 @@
 ---
 name: vault-curate
 description: >
-  Answer "what should I write next?" and "is the vault rotting?" — the health and
-  gap-finding side of agent memory. Trigger when the user asks what to document
-  next, where the notes are thin, whether the vault is healthy or drifting, or
-  asks for a vault cleanup / audit / "groom my memory"; when a recall attempt
-  came up empty or hit `DANGLING` targets on a topic that clearly should have
-  been written down; when a Session or Project note looks structurally wrong
-  (broken back-links, a stale status glyph, an index row disagreeing with its
-  note); and at a stopping point when you want to leave the vault better than you
-  found it. Covers `vaultmem doctor` (Agent-Index BROKEN/STALE rows + schema
-  lints), `doctor --deep` (ORPHAN/UNINDEXED reachability), `dangling --by-target`
-  (the most-wanted list), `frontier` (the edge of what's written down), and
-  `groom` (archive done work, triage cold-parked and stale-active sessions).
+  "What should I write next?" and "is the vault rotting?" — vault health and gap
+  finding. Trigger on what to document next, where notes are thin, vault
+  cleanup / audit / "groom my memory", a recall that came up empty or hit
+  `DANGLING`, or a Session/Project note that looks structurally wrong.
 ---
 
 <!-- CANONICAL SOURCE: this repo (jayantak/vaultmem). The dotfiles copy under agents-source/skills/ is synced FROM here — edit this file, not that one. -->
