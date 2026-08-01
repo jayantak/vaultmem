@@ -58,7 +58,7 @@ The five-minute path — install → configure → scaffold → search → wire 
 ```bash
 vaultmem init --config          # writes ~/.config/vaultmem/config.toml
 $EDITOR ~/.config/vaultmem/config.toml   # set your vault's path
-vaultmem init                   # scaffold Home.md + MOCs/Projects/Sessions/Templates
+vaultmem init                   # scaffold Home.md + MOCs/Projects/Sessions/Tasks/Templates
 vaultmem "search term"          # search the vault; curated index hits first
 ```
 
@@ -99,17 +99,29 @@ for verify-on-write.
   the top of the wikilink graph you fan out from.
 - **Projects → Sessions** — two lifecycle tiers. A **Project** (`Projects/<name>.md`,
   `type: project`) is an epic; a **Session** (`Sessions/<thread>/_index.md`) is one
-  task under it, with a `status` (`active`/`parked`/`done`) and an `updated:`
-  stamp. `projects` / `project <name>` roll them up; `sessions` renders the
-  picker.
-- **Grooming** — `groom` archives `done` sessions into `Sessions/_archive/` and
+  unit of work under it, with a `status` (`active`/`parked`/`done`) and an
+  `updated:` stamp. `projects` / `project <name>` roll them up; `sessions`
+  renders the picker.
+- **Tasks** — the tier *before* a session: planned work that has not started
+  (`Tasks/<slug>.md`, `type: task`, status `backlog`/`next`/`active`/`done`). A
+  session is created when work *starts*, so intent that predates it had nowhere
+  to live but checkboxes and prose bullets — invisible to every listing surface.
+  A task is a **spec**: enough context and acceptance criteria that an agent can
+  start cold. `next` is the ready queue; `task <slug> --promote` converts one
+  into a session (a conversion, not a copy — one unit of work keeps one
+  identity). `linear:` on a task is an **outbound pointer only**, never synced
+  back, so a personal backlog sits alongside Linear/Jira without the two
+  fighting over truth. See [SCHEMA.md](SCHEMA.md#tasks).
+- **Grooming** — `groom` archives `done` sessions into `Sessions/_archive/`,
   `done` Projects into `Projects/_archive/` (skipping a project still blocked by
-  a live session, with a warning), flags `parked` sessions gone cold (untouched
-  past `cold_days`), flags `active` sessions gone stale (untouched past
-  `stale_active_days`, default 7), and flags `active`/`parked` sessions whose
-  `_index.md` has grown past `bloat_lines` (default 150) as checkpoint-due.
-  Hygiene, on demand. `groom --dry-run` previews the exact would-move /
-  would-flip list with no `mv` and no writes.
+  a live session, with a warning), and `done` tasks into `Tasks/_archive/`. It
+  flags `parked` sessions gone cold (untouched past `cold_days`), `active`
+  sessions gone stale (untouched past `stale_active_days`, default 7),
+  `active`/`parked` sessions whose `_index.md` has grown past `bloat_lines`
+  (default 150) as checkpoint-due, and unblocked `backlog`/`next` tasks
+  untouched past `VAULTMEM_TASK_STALE_DAYS` (default 14). Hygiene, on demand.
+  `groom --dry-run` previews the exact would-move / would-flip list with no
+  `mv` and no writes.
 - **Verify-on-write** — `verify <file>` is `doctor`'s schema lints plus a
   dangling-wikilink check, scoped to one note, fast enough for a PostToolUse
   hook. Fail-quiet outside a configured vault, so an agent editing an ordinary
@@ -167,9 +179,19 @@ vaultmem bookmark <thread>  print only ## Bookmark + ## Pinned from a session's 
 vaultmem nudge              Stop-hook check: notes changed but the session's _index.md wasn't (fail-quiet)
 ```
 
+**backlog**
+```
+vaultmem next               ready tasks, most-ready first (`next` before `backlog`,
+                             then longest-waiting); blocked tasks listed separately
+vaultmem next -n <N>        cap the ready rows
+vaultmem task <slug>        one task: its facts + the body brief
+vaultmem task <slug> --promote
+                             print the task→session conversion recipe (read-only)
+```
+
 **hygiene · setup**
 ```
-vaultmem groom              archive done sessions + done projects; report cold-parked + stale-active + checkpoint-due
+vaultmem groom              archive done sessions/projects/tasks; report cold-parked + stale-active + checkpoint-due + stale-backlog
 vaultmem groom --dry-run    preview groom: would-move list + would-flip project lines; no writes
 vaultmem doctor             lint the config + flag drifted index rows + vault schema lints
 vaultmem doctor --deep      + vault-wide orphan/unindexed scan (slower; not run by base doctor/groom)
@@ -187,8 +209,8 @@ vaultmem init --config      write a starter config.toml
    have rotted: `BROKEN` (the row's `[[wikilink]]` resolves to a missing or
    0-byte note) and `STALE` (the note's `status:` says it's dead but the row
    summary still reads live).
-3. **Schema lints** — every configured vault's `Sessions/` and `Projects/`
-   notes, checked directly (not via the Agent Index), for structural
+3. **Schema lints** — every configured vault's `Sessions/`, `Projects/`, and
+   `Tasks/` notes, checked directly (not via the Agent Index), for structural
    corruption:
 
    | Class | Fires on | Why it matters |
@@ -197,12 +219,15 @@ vaultmem init --config      write a starter config.toml
    | `GLYPH-DESYNC` | the status glyph (H1 for a session; filename **and** H1 for a project) disagrees with `status:`, including a missing glyph | the sidebar/picker glyph is presentation, not identity — a stale one is a lie the UI tells |
    | `GLYPHED-FOLDER` | a **session folder** name carries a leading status glyph | vaultmem keys a session by folder basename == `thread:`; a glyphed folder desyncs the picker and `groom` |
    | `NO-UPDATED` | a session `_index.md` with missing/unparseable `updated:` | staleness/cold-parked math falls back to file mtime, which cloud-drive re-sync rewrites |
-   | `MISSING-FM` | required frontmatter absent — session: `thread`, `status`, `updated`; project: `type`, `status` | downstream commands read these fields directly and treat absence as silently-empty |
+   | `MISSING-FM` | required frontmatter absent — session: `thread`, `status`, `updated`; project: `type`, `status`; task: `status`, `updated` | downstream commands read these fields directly and treat absence as silently-empty |
    | `EMPTY-BOOKMARK` | an **active** session whose `## Bookmark` section has no content | only `Bookmark` is linted (and only when active) — every other template heading (`Pinned`/`Work log`/`Decisions`/`Git state`) ships intentionally empty on a fresh session |
    | `INDEX-DRIFT` | a Project's `## Sessions` row status token (`(status: active)`, `(PROJ-123, active)`, or bare `(active)`) disagrees with the linked session's own `status:` frontmatter | the row is a human/agent-maintained summary of the session, not a live read — it rots the same way the Agent Index does. Rows reading `archived` are never flagged: that word marks the session's location (`Sessions/_archive/`), not a live status. Read-only — `doctor` never rewrites the Project file. |
+   | `TASK-STATUS` | a task `status:` outside `backlog`/`next`/`active`/`done` | the task vocabulary is its own (no `parked`); a typo silently drops the task out of `next`, so it is planned work that can never be picked up |
+   | `TASK-BLOCKED-DANGLING` | `blocked_by:` names a task that exists in neither `Tasks/` nor `Tasks/_archive/` | the task is hidden behind a dependency nothing can ever satisfy — it will never surface in `next` |
+   | `TASK-NO-SESSION` | a task with `status: active` and no `session:` field | `active` means promoted, so the session owns live state; without the backlink the conversion left no trail between the two tiers |
 
-   Schema lints are O(sessions), a couple of `awk` passes per note — fast
-   enough to run on every `doctor` call (including the one `groom` makes
+   Schema lints are O(sessions + tasks), a couple of `awk` passes per note —
+   fast enough to run on every `doctor` call (including the one `groom` makes
    internally); no vault-wide full-text scan.
 
 ### `doctor --deep`
@@ -272,7 +297,9 @@ path = "~/Obsidian/Personal"
 Every vault field, the `which` routing algorithm, and the per-vault Agent-Index
 gating are documented in the **[Config reference](docs/config.md)**. Env
 overrides: `VAULTMEM_COLD_DAYS` beats `cold_days`, `VAULTMEM_BLOAT_LINES` beats
-`bloat_lines`.
+`bloat_lines`. Two thresholds are env-only (no config key yet):
+`VAULTMEM_STALE_ACTIVE_DAYS` (default 7, stale-active sessions) and
+`VAULTMEM_TASK_STALE_DAYS` (default 14, stale backlog).
 
 ## Agent skills
 

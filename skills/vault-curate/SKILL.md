@@ -64,6 +64,12 @@ anything else wants it too.
     `active` session with nothing under `## Bookmark`), and `INDEX-DRIFT` (a
     Project's `## Sessions` row whose status token disagrees with the linked
     session's own `status:`).
+  - **Task lints** on `Tasks/` — `TASK-STATUS` (a status outside
+    `backlog|next|active|done`; a typo silently drops the task out of
+    `vaultmem next`), `TASK-BLOCKED-DANGLING` (a `blocked_by:` naming a task
+    that does not exist, so the task hides behind a dependency nothing can ever
+    satisfy), and `TASK-NO-SESSION` (an `active` task with no `session:`
+    backlink — a promotion that left no trail to the session now owning it).
 - **`vaultmem verify <file>`** — the same dangling check plus the `doctor` schema
   lints, scoped to one file. The fast way to check a single Session or Project
   note you (or a subagent) just wrote, without a vault-wide scan.
@@ -101,6 +107,13 @@ surfaces stay small.
 - It **lists cold-parked sessions** (parked and untouched past `cold_days`) and
   **stale-active sessions** (`active` but untouched past `stale_active_days`) for
   triage. It never auto-retires them.
+- It archives every `done` **task** into `Tasks/_archive/` (a done task has no
+  dependents to strand, so nothing blocks the move) and **lists stale backlog** —
+  `backlog`/`next` tasks untouched past `VAULTMEM_TASK_STALE_DAYS` (default 14).
+  Blocked tasks are exempt: they are waiting on purpose, not rotting. Stale
+  backlog matters more than it looks — an unstarted task is the one note type
+  nothing else forces you to revisit, and a backlog nobody trusts makes
+  `vaultmem next` useless. Promote, re-scope, or delete.
 
 Archived is a **location, not a status**: archived notes drop out of every
 listing surface (picker, `projects`, `project`) but wikilinks keep resolving by

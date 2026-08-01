@@ -59,9 +59,79 @@ open as a stand-in for the whole project (that is what makes `_index.md`
 balloon). Tiers: **MOC** (domain map) → **Project** (epic, owns repos +
 cross-session state) → **Session** (one thread).
 
+A **Task** (`Tasks/<slug>.md`) is the state *before* a session: work that is
+planned but not started. A session is created when work **starts**, so intent
+that predates it has nowhere to live — that is what a task is for. See § The
+backlog below.
+
 List projects with `vaultmem projects`; see one with
 `vaultmem project <name>` (its repos, linear pointer, MOC, and sessions
 by status).
+
+## The backlog (Tasks/)
+
+A **Task** is a spec, not a worklog: enough context that an agent (or you, in
+three weeks) can start cold without asking a follow-up question. It is the
+answer to "I want to plan this now and have something pick it up later."
+
+- `vaultmem next` — the ready queue, most-ready first. **This is the "what
+  should I pick up" surface.** Blocked tasks are listed separately, never mixed
+  into the ready set.
+- `vaultmem task <slug>` — one task in full: its facts plus the brief.
+- `vaultmem task <slug> --promote` — prints the exact edits that convert the
+  task into an active session. Read-only; you apply them.
+
+Task status is its own vocabulary — `backlog | next | active | done`. There is
+no `parked`: an unstarted thing pausing is just `backlog`. `next` means
+explicitly queued; `active` means it was promoted and **its session now owns the
+state**.
+
+### Write a task
+
+Create `<vault_path>/Tasks/<slug>.md` (flat folder, no per-task directory):
+
+```markdown
+---
+type: task
+status: backlog       # backlog | next | active | done
+project: <plain project name>
+repos: [<repo>]       # so an agent knows where to work
+linear:               # OUTBOUND pointer only — never synced back
+blocked_by:           # slug of a task that must land first (omit when unblocked)
+updated: <YYYY-MM-DD HH:MM>
+---
+# <task title>
+
+<Why this needs doing, and the context needed to start cold.>
+
+## Acceptance criteria
+- [ ] <verifiable outcome, not an activity>
+```
+
+`linear:` is a **one-way pointer**. Linear/Jira stays the canonical team
+surface; the vault never syncs status back, so the two can't fight over truth.
+Use a task for work you don't want in the tracker, or to hold the agent-ready
+brief for a ticket that is already there.
+
+### Promote a task into a session
+
+Task → session is a **conversion, not a copy**: one unit of work keeps one
+identity from planned → active → done. Run `vaultmem task <slug> --promote`
+and apply what it prints — it creates `Sessions/<slug>/` with a `task: <slug>`
+backlink, flips the task to `status: active` with a `session: <slug>` pointer,
+and registers the session on the Project.
+
+**Do not restate the brief in the session.** The task note remains the spec;
+link it (`[[<slug>]]`) and let `## Bookmark` carry live state. Duplicating it
+is how the two drift.
+
+### Keep the backlog honest
+
+An unstarted task has no forcing function — nothing fails when it rots — and a
+stale backlog makes `next` untrustworthy, which defeats the point. `groom` and
+the SessionStart nudge flag tasks untouched past `VAULTMEM_TASK_STALE_DAYS`
+(default 14). When one surfaces: promote it, re-scope it, or delete it. Leaving
+it is the one option that costs you the tool.
 
 ## Create a session
 
@@ -291,9 +361,10 @@ and when a **Project's own** status changes, re-`mv` its file to the new glyph
 
 The SessionStart picker appends a `⚠ … run vaultmem groom` nudge when a
 vault has `done` sessions (ready to archive), `parked` sessions untouched past
-`OBSIDIAN_SESSION_COLD_DAYS` (default 21), or `active` sessions untouched past
-`VAULTMEM_STALE_ACTIVE_DAYS` (default 7). `vaultmem status` surfaces the same
-nudge in short form. When you see it:
+`OBSIDIAN_SESSION_COLD_DAYS` (default 21), `active` sessions untouched past
+`VAULTMEM_STALE_ACTIVE_DAYS` (default 7), or `backlog`/`next` **tasks**
+untouched past `VAULTMEM_TASK_STALE_DAYS` (default 14). `vaultmem status`
+surfaces the same nudge in short form. When you see it:
 
 - **`vaultmem groom`** mechanically moves every `done` session into
   `_archive/` and flips its parent Project's `## Sessions` line to `archived`.
@@ -318,6 +389,10 @@ nudge in short form. When you see it:
   keep it `active`). A stale-active entry is usually the symptom this whole rule
   set exists to catch — the park-time done/parked decision above is what
   prevents it from recurring.
+- It also **archives `done` tasks** into `Tasks/_archive/` (a done task has no
+  dependents to strand, so nothing blocks the move) and **lists stale backlog**
+  for triage. Drive that decision too: promote, re-scope, or delete. Do not
+  leave it — see § Keep the backlog honest.
 
 ### Project retirement
 

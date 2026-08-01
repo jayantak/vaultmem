@@ -16,11 +16,14 @@ future tool can warn on an unknown version.
   MOCs/                   # Maps of Content — one "MOC - <Topic>.md" per domain hub
   Projects/               # one <name>.md per project (epic); type: project
     _archive/             # groomed (done) projects move here; excluded from every listing
-  Sessions/               # one <thread>/_index.md per session (task)
+  Sessions/               # one <thread>/_index.md per session (one unit of work)
     _archive/             # groomed (done) sessions move here; excluded from every listing
+  Tasks/                  # one <slug>.md per task (planned, not started); type: task
+    _archive/             # groomed (done) tasks move here; excluded from every listing
   Templates/              # excluded from search + resolution
     Project.md
     Session _index.md
+    Task.md
 ```
 
 All folder names are configurable per vault (`sessions`, `home`, `mocs` in the
@@ -36,15 +39,18 @@ inline ` # comment`. It never parses nested YAML.
 | Field      | Where               | Meaning |
 |------------|---------------------|---------|
 | `schema`   | `Home.md`           | Schema version marker (`1`). |
-| `status`   | Projects, Sessions  | Lifecycle state — see the status vocabulary. |
-| `updated`  | Sessions            | Real last-touch, `YYYY-MM-DD[ HH:MM]`. Drives staleness/cold-parked math (NOT file mtime, which cloud-drive re-sync rewrites). |
-| `project`  | Sessions            | Plain name of the parent Project (no status glyph). `` (empty) = orphan session. |
-| `type`     | Projects            | `project` marks a Project note; `moc` marks a Map of Content. |
-| `repos`    | Projects            | Repos the project touches (shown by `project <name>`). |
-| `linear`   | Projects            | Optional issue/epic reference (shown by `project <name>`). |
+| `status`   | Projects, Sessions, Tasks | Lifecycle state — see the status vocabulary. |
+| `updated`  | Sessions, Tasks     | Real last-touch, `YYYY-MM-DD[ HH:MM]`. Drives staleness/cold-parked/stale-backlog math (NOT file mtime, which cloud-drive re-sync rewrites). |
+| `project`  | Sessions, Tasks     | Plain name of the parent Project (no status glyph). `` (empty) = orphan session/task. |
+| `type`     | Projects, Tasks     | `project` marks a Project note; `moc` marks a Map of Content; `task` marks a Task. |
+| `repos`    | Projects, Tasks     | Repos the note touches (shown by `project <name>` / `task <slug>`). |
+| `linear`   | Projects, Tasks     | Optional **outbound** issue/epic reference (shown by `project <name>` / `task <slug>`). Never synced back — see § Tasks. |
 | `moc`      | Projects            | Optional `[[MOC - <Topic>]]` backref (shown by `project <name>`). |
 | `aliases`  | any                 | Alternate names a `[[wikilink]]` may resolve through. **Required on every Session** (`aliases: [<thread>]`): the file is `_index.md`, not `<thread>.md`, so a Project's `## Sessions` line links `[[<thread>]]` and that only resolves through this alias. `doctor` flags a missing one as `NOALIAS`. |
 | `thread`   | Sessions            | The session's own slug (matches its directory name). |
+| `task`     | Sessions            | Optional slug of the Task this session was promoted from (the spec it implements). |
+| `blocked_by` | Tasks             | Slug of a task that must land first. A task with this set never appears in `next`'s ready list. |
+| `session`  | Tasks               | Slug of the session a promoted (`active`) task was converted into — the session owns live state from then on. |
 
 ### Required frontmatter
 
@@ -53,6 +59,8 @@ just an empty read, it breaks a downstream command:
 
 - **Session** (`_index.md`): `thread`, `status`, `updated`.
 - **Project** (`<name>.md`, excluding `type: moc` notes): `type`, `status`.
+- **Task** (`Tasks/<slug>.md`): `status`, `updated`. `updated` drives the
+  stale-backlog math, which is the only thing keeping a backlog honest.
 
 ### `## Bookmark` (Sessions)
 
@@ -93,6 +101,60 @@ grown past `bloat_lines` (`VAULTMEM_BLOAT_LINES`, default 150) is flagged
 checkpoint-due by `groom`: the session skill's convention is that an `_index.md`
 past ~150 lines should be checkpointed/distilled rather than left to grow
 unbounded.
+
+### Task status vocabulary
+
+Tasks carry their own `status:`, deliberately **not** the session vocabulary:
+
+- `backlog` — planned, unqueued. The default.
+- `next` — explicitly queued; sorts above `backlog` in `vaultmem next`.
+- `active` — promoted into a session. The **session** owns live state from this
+  point; the task remains as the spec and must carry a `session:` backlink
+  (`doctor` flags a missing one as `TASK-NO-SESSION`).
+- `done` — finished; archived to `Tasks/_archive/` by `groom`. Unlike a Project,
+  nothing blocks the move — a done task has no dependents to strand.
+
+There is no `parked`: an unstarted thing pausing is just `backlog`. A status
+outside this set is flagged `TASK-STATUS`, because a typo silently drops the
+task out of `next`.
+
+A `backlog`/`next` task untouched past `VAULTMEM_TASK_STALE_DAYS` (default 14)
+is reported as **stale backlog** by `groom` and the SessionStart nudge. Tasks
+with `blocked_by:` set are exempt — they are waiting deliberately, not rotting.
+
+## Tasks
+
+A Task is **planned work that has not started** — the tier before a Session. A
+Session is created when work *starts*, so intent that predates it previously had
+nowhere to live but checkboxes and prose bullets, invisible to every listing
+surface.
+
+`Tasks/<slug>.md` is a flat folder (no per-task directory) and the file basename
+is the slug — `blocked_by:`, `session:`, and `task:` all reference tasks by that
+slug, not by wikilink. The note body is the **brief**: enough context and
+acceptance criteria that an agent can start cold without a follow-up question.
+Tasks are specs, not worklogs — they do not accumulate state the way an
+`_index.md` does, so no bloat/checkpoint rule applies.
+
+**`linear:` is outbound only.** vaultmem never writes to a tracker and never
+reads status back, so the vault and Linear/Jira cannot fight over truth: the
+tracker stays canonical for team-visible work, and the task holds the
+agent-ready brief. A task may exist with no `linear:` at all — that is the
+point of a personal backlog.
+
+### Promotion (task → session)
+
+Promotion is a **conversion, not a copy**: one unit of work keeps one identity
+across the two tiers. `vaultmem task <slug> --promote` prints the recipe and
+writes nothing (a half-applied mutation across two folders would strand a task
+pointing at a session that does not exist). Applying it means:
+
+1. `Sessions/<slug>/_index.md` is created with `task: <slug>`.
+2. The task flips to `status: active` with `session: <slug>`.
+3. The Project's `## Sessions` index gains the session row.
+
+The brief is **not** restated in the session — the session links `[[<slug>]]`
+and its `## Bookmark` carries live state. Duplicating it is how the two drift.
 
 ## Status-glyph invariants
 
@@ -149,11 +211,12 @@ Three invariants keep glyph-as-presentation from becoming glyph-as-identity:
   or a 0-byte stub; **STALE** if the linked note's `status` is dead but the row
   summary still reads live (contains a live word — verdict/shipped/active/… —
   and no death word).
-- `doctor` separately walks `Sessions/` and `Projects/` directly (not via the
-  index) for structural corruption — `NOALIAS`, `GLYPH-DESYNC`,
+- `doctor` separately walks `Sessions/`, `Projects/`, and `Tasks/` directly (not
+  via the index) for structural corruption — `NOALIAS`, `GLYPH-DESYNC`,
   `GLYPHED-FOLDER`, `NO-UPDATED`, `MISSING-FM`, `EMPTY-BOOKMARK`,
-  `INDEX-DRIFT`. See the README's [doctor](README.md#doctor) section for the
-  full table and exit codes.
+  `INDEX-DRIFT`, `TASK-STATUS`, `TASK-BLOCKED-DANGLING`, `TASK-NO-SESSION`. See
+  the README's [doctor](README.md#doctor) section for the full table and exit
+  codes.
 
 ### Project `## Sessions` index rows
 
@@ -189,9 +252,9 @@ out of the graph: `ORPHAN` (zero inbound `[[wikilinks]]` from anywhere else in
 the vault) and `UNINDEXED` (absent from both the primary vault's Agent Index
 and every MOC's outbound links). `Home.md`, `MOCs/`, `Templates/`, and
 anything under `_archive/` are excluded as candidates — they are hubs,
-retired notes, or templates, not orphans by any useful definition. `Sessions/`
-and `Projects/` are excluded too: those notes are discovered through the
-Project→Session lifecycle tier (`sessions`/`projects`/`project <name>`), not
-through the wikilink graph or the Agent Index/MOC system — nothing elsewhere
-in this document requires a Session or Project to be MOC-linked or
-Agent-Index-listed, so `--deep` does not require it either.
+retired notes, or templates, not orphans by any useful definition. `Sessions/`,
+`Projects/`, and `Tasks/` are excluded too: those notes are discovered through
+the lifecycle tier (`sessions`/`projects`/`project <name>`/`next`/`task
+<slug>`), not through the wikilink graph or the Agent Index/MOC system —
+nothing elsewhere in this document requires a Session, Project, or Task to be
+MOC-linked or Agent-Index-listed, so `--deep` does not require it either.

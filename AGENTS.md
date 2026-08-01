@@ -5,11 +5,11 @@ Cursor, Copilot, and Gemini read `AGENTS.md` directly.
 
 ## What this is
 
-`vaultmem` is a single POSIX/bash script (`./vaultmem`, ~1200 lines) that
+`vaultmem` is a single POSIX/bash script (`./vaultmem`, ~2800 lines) that
 turns a plain-markdown [Obsidian](https://obsidian.md) vault into agent
 memory: search (ripgrep-backed), a curated Agent Index, a wikilink graph, and
-a Project→Session lifecycle tier. No daemon, no database, no build step — the
-script *is* the artifact. This repo also ships:
+a Project→Session lifecycle tier with a Task backlog feeding it. No daemon, no
+database, no build step — the script *is* the artifact. This repo also ships:
 
 - `install.sh` — copies `vaultmem` to `~/.local/bin` (or symlinks
   `skills/` into a harness skills dir with `--skills <dir>`).
@@ -65,9 +65,16 @@ under `$BATS_TEST_TMPDIR`) for new tests; never point a test at
 authoritative usage summary — read it before adding or renaming a
 subcommand. Broad shape: search/index (`<query>`, `index`, `mocs`), the
 wikilink graph (`resolve`/`links`/`backlinks`/`neighbors`/`dangling`), the
-router (`vaults`/`path`/`which`), the session/project tier
-(`sessions`/`projects`/`project`/`groom`/`status`), hygiene (`doctor`), and
-setup (`init`).
+router (`vaults`/`path`/`which`), the lifecycle tier
+(`sessions`/`projects`/`project`/`next`/`task`/`groom`/`status`), hygiene
+(`doctor`), and setup (`init`).
+
+**Adding usage lines? Bump the `sed` range.** The usage block is printed by a
+hardcoded `sed -n '4,Np' "$0"` in *two* places (the `-h` branch and the no-args
+branch). Add lines to the comment block without bumping `N` and the help output
+is silently truncated — no error, no test failure unless you pin it. A bats test
+("usage output ends with the final usage comment line") asserts the last line
+still renders; keep it pointed at whatever the real last line is.
 
 Subcommands dispatch from the final `case "${ARGS[0]:-}" in` block at the
 bottom of the script. **Any subcommand a skill's markdown references by name

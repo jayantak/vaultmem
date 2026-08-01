@@ -2265,3 +2265,229 @@ EOF
   [ -d "$OBS_JAY/Sessions/_archive/wrap-up2" ]
   [ ! -e "$OBS_JAY/Sessions/wrap-up2" ]
 }
+
+# --- the backlog tier (Tasks/) ------------------------------------------------
+
+# Seed a task. $1=vault root $2=slug $3=status $4=age-days $5=project $6=extra fm line
+seed_task() {
+  mkdir -p "$1/Tasks"
+  {
+    printf -- '---\ntype: task\nstatus: %s\n' "$3"
+    [ -n "${5:-}" ] && printf 'project: %s\n' "$5"
+    [ -n "${6:-}" ] && printf '%s\n' "$6"
+    printf -- 'updated: %s\n---\n# Title of %s\n\nThe brief.\n' "$(days_ago "$4")" "$2"
+  } >"$1/Tasks/$2.md"
+}
+
+@test "next lists ready tasks, 'next' status before 'backlog'" {
+  seed_task "$OBS_JAY" later-item backlog 1
+  seed_task "$OBS_JAY" queued-item next 1
+  run "$OM" -v jay next
+  [ "$status" -eq 0 ]
+  # queued-item (next) must appear before later-item (backlog)
+  [[ "$(echo "$output" | grep -n queued-item | cut -d: -f1)" -lt "$(echo "$output" | grep -n later-item | cut -d: -f1)" ]]
+}
+
+@test "next orders longest-waiting first within a status band" {
+  seed_task "$OBS_JAY" fresh backlog 1
+  seed_task "$OBS_JAY" ancient backlog 5
+  run "$OM" -v jay next
+  [ "$status" -eq 0 ]
+  [[ "$(echo "$output" | grep -n ancient | cut -d: -f1)" -lt "$(echo "$output" | grep -n fresh | cut -d: -f1)" ]]
+}
+
+# Regression: `read` with IFS=$'\t' folds consecutive tabs into ONE delimiter, so
+# an empty middle field (project / blocked_by) shifted every later field left and
+# a task's TITLE was read as its blocked_by — making every unblocked task look
+# blocked. _task_rows emits `-` for empty optional fields to prevent this.
+@test "next treats a task with no project and no blocked_by as ready, not blocked" {
+  seed_task "$OBS_JAY" bare backlog 1
+  run "$OM" -v jay next
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"Ready"* ]]
+  [[ "$output" == *"bare"* ]]
+  [[ "$output" != *"Nothing ready"* ]]
+  # the title must not be reported as a blocker
+  [[ "$output" != *"blocked by Title of bare"* ]]
+}
+
+@test "next separates blocked tasks out of the ready set" {
+  seed_task "$OBS_JAY" upstream next 1
+  seed_task "$OBS_JAY" downstream backlog 1 "" "blocked_by: upstream"
+  run "$OM" -v jay next
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"Blocked:"* ]]
+  [[ "$output" == *"downstream — blocked by upstream"* ]]
+}
+
+@test "next hides active and done tasks (only backlog/next are ready)" {
+  seed_task "$OBS_JAY" in-flight active 1 "" "session: in-flight"
+  seed_task "$OBS_JAY" shipped done 1
+  run "$OM" -v jay next
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"No tasks yet"* ]]
+}
+
+@test "next caps rows with -n and reports how many were dropped" {
+  seed_task "$OBS_JAY" t1 backlog 3
+  seed_task "$OBS_JAY" t2 backlog 2
+  seed_task "$OBS_JAY" t3 backlog 1
+  run "$OM" -v jay -n 2 next
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"1 more"* ]]
+}
+
+@test "next warns when a backlog task has gone stale" {
+  seed_task "$OBS_JAY" forgotten backlog 40
+  run "$OM" -v jay next
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"untouched >"* ]]
+}
+
+@test "next says so plainly when there are no tasks at all" {
+  run "$OM" -v jay next
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"No tasks yet"* ]]
+}
+
+@test "task <slug> prints the facts and the body brief" {
+  seed_task "$OBS_JAY" spec-me next 1 drs-v2 "linear: https://example.test/ISSUE-1"
+  run "$OM" -v jay task spec-me
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"status:  next"* ]]
+  [[ "$output" == *"project: drs-v2"* ]]
+  [[ "$output" == *"linear:  https://example.test/ISSUE-1"* ]]
+  [[ "$output" == *"The brief."* ]]
+  # frontmatter itself is not echoed back
+  [[ "$output" != *"type: task"* ]]
+}
+
+@test "task <slug> fails with a clear message on an unknown slug" {
+  run "$OM" -v jay task nope
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"no task: nope"* ]]
+}
+
+@test "task --promote prints the conversion recipe without writing anything" {
+  seed_task "$OBS_JAY" promote-me next 1 drs-v2
+  run "$OM" -v jay task promote-me --promote
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"thread: promote-me"* ]]
+  [[ "$output" == *"project: drs-v2"* ]]
+  [[ "$output" == *"aliases: [promote-me]"* ]]
+  [[ "$output" == *"CONVERTED, not copied"* ]]
+  # read-only: no session was created, task status untouched
+  [ ! -e "$OBS_JAY/Sessions/promote-me" ]
+  grep -q 'status: next' "$OBS_JAY/Tasks/promote-me.md"
+}
+
+@test "task --promote warns when the task is still blocked" {
+  seed_task "$OBS_JAY" blocked-promote backlog 1 "" "blocked_by: something-else"
+  run "$OM" -v jay task blocked-promote --promote
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"blocked by something-else"* ]]
+}
+
+@test "groom archives done tasks into Tasks/_archive/" {
+  seed_task "$OBS_JAY" finished done 1
+  run "$OM" -v jay groom
+  [ "$status" -eq 0 ]
+  [ -f "$OBS_JAY/Tasks/_archive/finished.md" ]
+  [ ! -e "$OBS_JAY/Tasks/finished.md" ]
+}
+
+@test "groom --dry-run previews a task archive without moving it" {
+  seed_task "$OBS_JAY" finished2 done 1
+  run "$OM" -v jay groom --dry-run
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"Tasks/finished2.md → Tasks/_archive/finished2.md"* ]]
+  [ -f "$OBS_JAY/Tasks/finished2.md" ]
+  [ ! -e "$OBS_JAY/Tasks/_archive/finished2.md" ]
+}
+
+@test "groom reports stale backlog separately from stale sessions" {
+  seed_task "$OBS_JAY" rotting backlog 40
+  run "$OM" -v jay groom
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"Stale backlog"* ]]
+  [[ "$output" == *"rotting"* ]]
+}
+
+@test "groom does not count a blocked task as stale backlog" {
+  seed_task "$OBS_JAY" waiting backlog 40 "" "blocked_by: upstream-thing"
+  seed_task "$OBS_JAY" upstream-thing next 1
+  run "$OM" -v jay groom
+  [ "$status" -eq 0 ]
+  [[ "$output" != *"Stale backlog"* ]]
+}
+
+@test "archived tasks drop out of next" {
+  mkdir -p "$OBS_JAY/Tasks/_archive"
+  printf -- '---\ntype: task\nstatus: backlog\nupdated: %s\n---\n# archived one\n' "$(days_ago 1)" \
+    >"$OBS_JAY/Tasks/_archive/gone.md"
+  run "$OM" -v jay next
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"No tasks yet"* ]]
+}
+
+@test "doctor flags a task status outside backlog|next|active|done" {
+  seed_task "$OBS_JAY" wrong-status parked 1
+  run "$OM" -v jay doctor
+  [[ "$output" == *"TASK-STATUS"* ]]
+  [[ "$output" == *"wrong-status"* ]]
+}
+
+@test "doctor flags a blocked_by pointing at a task that does not exist" {
+  seed_task "$OBS_JAY" orphan-dep backlog 1 "" "blocked_by: ghost"
+  run "$OM" -v jay doctor
+  [[ "$output" == *"TASK-BLOCKED-DANGLING"* ]]
+}
+
+@test "doctor accepts a blocked_by pointing at an archived task" {
+  mkdir -p "$OBS_JAY/Tasks/_archive"
+  printf -- '---\ntype: task\nstatus: done\nupdated: %s\n---\n# done dep\n' "$(days_ago 1)" \
+    >"$OBS_JAY/Tasks/_archive/landed.md"
+  seed_task "$OBS_JAY" depends-on-landed backlog 1 "" "blocked_by: landed"
+  run "$OM" -v jay doctor
+  [[ "$output" != *"TASK-BLOCKED-DANGLING"* ]]
+}
+
+@test "doctor flags an active task with no session backlink" {
+  seed_task "$OBS_JAY" promoted-nosession active 1
+  run "$OM" -v jay doctor
+  [[ "$output" == *"TASK-NO-SESSION"* ]]
+}
+
+@test "doctor flags a task missing required frontmatter" {
+  mkdir -p "$OBS_JAY/Tasks"
+  printf -- '---\ntype: task\n---\n# no status or updated\n' >"$OBS_JAY/Tasks/bare-fm.md"
+  run "$OM" -v jay doctor
+  [[ "$output" == *"MISSING-FM"* ]]
+  [[ "$output" == *"bare-fm"* ]]
+}
+
+@test "init scaffolds Tasks/ and a Task template" {
+  run "$OM" init --vault jay
+  [ "$status" -eq 0 ]
+  [ -d "$OBS_JAY/Tasks" ]
+  [ -f "$OBS_JAY/Templates/Task.md" ]
+  grep -q 'backlog | next | active | done' "$OBS_JAY/Templates/Task.md"
+}
+
+# The usage block is printed by a hardcoded `sed -n '4,Np'` line range, so adding
+# usage lines without bumping N silently truncates the help output. Pin it.
+@test "usage output ends with the final usage comment line" {
+  run "$OM"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"planned → active → done"* ]]
+}
+
+@test "doctor --deep does not flag tasks as ORPHAN/UNINDEXED" {
+  # Tasks are discovered through the lifecycle tier (next / task <slug>), never
+  # through the wikilink graph, so requiring inbound links would be a false
+  # positive on every schema-legal task.
+  printf -- '---\nschema: 1\n---\n# Home\n<!-- AGENT-INDEX:START -->\n<!-- AGENT-INDEX:END -->\n' >"$OBS_JAY/Home.md"
+  seed_task "$OBS_JAY" lonely backlog 1
+  run "$OM" -v jay doctor --deep
+  [[ "$output" != *"lonely"* ]]
+}

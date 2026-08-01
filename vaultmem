@@ -26,8 +26,9 @@
 #                               prints a per-vault growth line (note count + timed representative
 #                               search) — the ripgrep-vs-FTS5 tripwire, informational, never affects exit
 #                               index drift: BROKEN (missing/0-byte note) + STALE (note reverted/done but row reads live)
-#                               schema lints (walk Sessions/Projects): NOALIAS, GLYPH-DESYNC,
-#                               GLYPHED-FOLDER, NO-UPDATED, MISSING-FM, EMPTY-BOOKMARK, INDEX-DRIFT (see SCHEMA.md)
+#                               schema lints (walk Sessions/Projects/Tasks): NOALIAS, GLYPH-DESYNC,
+#                               GLYPHED-FOLDER, NO-UPDATED, MISSING-FM, EMPTY-BOOKMARK, INDEX-DRIFT,
+#                               TASK-STATUS, TASK-BLOCKED-DANGLING, TASK-NO-SESSION (see SCHEMA.md)
 #                               exit codes: 0=clean 1=config errors 2=drift/lint findings 3=both
 #   vaultmem doctor --deep      + vault-wide ORPHAN (no inbound links) and UNINDEXED (not in
 #                               Agent Index or any MOC) scan; slower, not run by base doctor/groom
@@ -49,6 +50,20 @@
 #   vaultmem status             one-line summary + groom-nudge count (used by the SessionStart hook)
 #   vaultmem nudge              fail-quiet Stop-hook check: vault touched but session note not updated
 #   vaultmem init [--vault <id>]  scaffold a compliant vault skeleton (see SCHEMA.md)
+#
+# Backlog (Tasks/ — planned work that has not started; the tier BEFORE a session):
+#   vaultmem next               ready backlog, most-ready first (`next` status before
+#                               `backlog`, then oldest). The "what do I pick up" surface;
+#                               each row carries slug, project, and age. Blocked tasks are
+#                               listed separately, never mixed into the ready set.
+#   vaultmem next -n 5          cap ready rows (default 20, the shared -n limit)
+#   vaultmem task <slug>        one task in full: its facts (project/linear/repos/blocked-by)
+#                               plus the body an agent needs to start cold
+#   vaultmem task <slug> --promote
+#                               print the promotion recipe — the exact edits that turn this
+#                               task into an active session. Task→session is a CONVERSION,
+#                               not a copy: one identity moving through states. Read-only;
+#                               prints the steps, never writes.
 #   vaultmem init --config      write a starter config.toml
 #
 # Wikilink graph (follow links when researching — ripgrep, no Obsidian app needed):
@@ -92,6 +107,11 @@
 #     exits 0, so they can never break a hook.
 #   - Link resolution mirrors Obsidian: strip `|display`/`#heading`/`^block`, then
 #     match relative-path → unique basename (case-insensitive) → frontmatter alias.
+#   - Tasks are the pre-work tier. A Session is created when work STARTS, so intent
+#     that predates it had nowhere to live but checkboxes and `## Pinned` bullets —
+#     invisible to every listing surface. A Task makes that intent a first-class
+#     note, and `task --promote` CONVERTS it into a session rather than copying it,
+#     so one unit of work keeps one identity from planned → active → done.
 
 DEV_DIR="${DEV_DIR:-$HOME/src}"
 die() {
@@ -651,6 +671,45 @@ _schema_scan_project_note() {
 	fi
 }
 
+# Lint one Tasks/<slug>.md. $1=note path $2=display label $3=vault root.
+# Prints "CLASS\tlabel\tdetail" lines.
+_schema_scan_task_note() {
+	local f="$1" label="$2" root="$3"
+	local status updated blocked session fmiss
+
+	status=$(_fm_field "$f" status | tr '[:upper:]' '[:lower:]')
+	updated=$(_fm_field "$f" updated)
+	blocked=$(_fm_field "$f" blocked_by)
+	session=$(_fm_field "$f" session)
+
+	# MISSING-FM — required task frontmatter: status, updated. `updated` drives
+	# the stale-backlog math, which is the only thing keeping a backlog honest.
+	fmiss=""
+	[ -n "$status" ] || fmiss="${fmiss}status "
+	[ -n "$updated" ] || fmiss="${fmiss}updated "
+	[ -n "$fmiss" ] && printf 'MISSING-FM\t%s\tmissing frontmatter: %s\n' "$label" "$fmiss"
+
+	# TASK-STATUS — the task vocabulary is its own (no `parked`); a typo here
+	# silently drops the note out of `next`.
+	case "${status:-backlog}" in
+	backlog | next | active | done) ;;
+	*) printf 'TASK-STATUS\t%s\tstatus "%s" is not backlog|next|active|done\n' "$label" "$status" ;;
+	esac
+
+	# TASK-BLOCKED-DANGLING — blocked_by naming a task that does not exist means
+	# the item is hidden from `next` by a dependency nothing can ever satisfy.
+	if [ -n "$blocked" ] && [ ! -f "$root/Tasks/$blocked.md" ] &&
+		[ ! -f "$root/Tasks/_archive/$blocked.md" ]; then
+		printf 'TASK-BLOCKED-DANGLING\t%s\tblocked_by: %s — no such task; this task can never surface in `next`\n' "$label" "$blocked"
+	fi
+
+	# TASK-NO-SESSION — an `active` task was promoted, so it must point at the
+	# session that now owns its state; without it the conversion left no trail.
+	if [ "$status" = active ] && [ -z "$session" ]; then
+		printf 'TASK-NO-SESSION\t%s\tstatus: active but no session: field — a promoted task must name the session that owns its state\n' "$label"
+	fi
+}
+
 _schema_scan() { # $1=vault root; prints "CLASS\tnote\tdetail" lines
 	local root="$1" f dir name
 
@@ -676,6 +735,15 @@ _schema_scan() { # $1=vault root; prints "CLASS\tnote\tdetail" lines
 		name=$(basename "${f%.md}")
 		_schema_scan_project_note "$f" "Projects/$name" "$name" "$root"
 	done < <(printf '%s\n' "$root/Projects"/*.md)
+
+	# Tasks ----------------------------------------------------------------------
+	# Flat folder (no per-task directory), archives excluded like everywhere else.
+	while IFS= read -r f; do
+		[ -n "$f" ] || continue
+		name=$(basename "${f%.md}")
+		[ "$name" = "_index" ] && continue
+		_schema_scan_task_note "$f" "Tasks/$name" "$root"
+	done < <(find "$root/Tasks" -maxdepth 1 -name '*.md' -type f 2>/dev/null)
 }
 
 # Deep scan (--deep only; NOT run by base `doctor`/`groom` — vault-wide, so it
@@ -687,17 +755,18 @@ _schema_scan() { # $1=vault root; prints "CLASS\tnote\tdetail" lines
 # Home.md, MOCs/, Templates/, and anything under _archive/ are skipped as
 # candidates: they are hubs/retired, not content notes, and flagging them
 # would be a false positive (Home/MOCs are meant to have no inbound links of
-# their own; Templates/_archive are intentionally unlinked). Sessions/ and
-# Projects/ are skipped too: those notes are discovered through the
-# Project→Session lifecycle tier (`sessions`/`projects`/`project <name>`,
-# keyed off folder basename and the `## Sessions` index), never through the
-# wikilink graph or the Agent Index/MOC system — nothing in SCHEMA.md or the
-# README requires a Session or Project to be MOC-linked or Agent-Index-listed,
-# so flagging them here would be a false positive on schema-legal notes.
+# their own; Templates/_archive are intentionally unlinked). Sessions/,
+# Projects/, and Tasks/ are skipped too: those notes are discovered through the
+# lifecycle tier (`sessions`/`projects`/`project <name>`/`next`/`task <slug>`,
+# keyed off folder basename, the `## Sessions` index, and task slugs), never
+# through the wikilink graph or the Agent Index/MOC system — nothing in
+# SCHEMA.md or the README requires a Session, Project, or Task to be MOC-linked
+# or Agent-Index-listed, so flagging them here would be a false positive on
+# schema-legal notes.
 _deep_scan() { # $1 = vault root, $2 = 1 if this is the primary (agent-index) vault
 	local root="$1" is_primary="$2"
 	local home="$root/Home.md" mocs_dir="$root/MOCs"
-	local sessions_dir="$root/Sessions" projects_dir="$root/Projects"
+	local sessions_dir="$root/Sessions" projects_dir="$root/Projects" tasks_dir="$root/Tasks"
 	local -a candidates=()
 	local f
 	while IFS= read -r f; do
@@ -708,6 +777,7 @@ _deep_scan() { # $1 = vault root, $2 = 1 if this is the primary (agent-index) va
 		"$root/Templates"/*) continue ;;
 		"$sessions_dir"/*) continue ;;
 		"$projects_dir"/*) continue ;;
+		"$tasks_dir"/*) continue ;;
 		*/_archive/*) continue ;;
 		esac
 		candidates+=("$f")
@@ -1088,25 +1158,31 @@ _bloat_count() { # $1 = vault root
 	printf '%s' "$n"
 }
 _groom_nudge() {
-	local now part out="" rows done_n cold_n stale_n bloat_n
+	local now part out="" rows done_n cold_n stale_n bloat_n task_n
 	now=$(date +%s)
 	_count() { # $1 = vault root, $2 = label
 		rows=$(_session_rows "$1")
 		bloat_n=$(_bloat_count "$1")
+		# Stale backlog: an unstarted task nobody has triaged. Counted here (not
+		# only in `next`) because the whole point is that nothing else forces it.
+		task_n=$(_task_rows "$1" | awk -F'\t' -v now="$now" -v sd="$TASK_STALE_DAYS" \
+			'($4=="backlog" || $4=="next") && $5=="-" && (now-$1)/86400 >= sd {c++} END{print c+0}')
 		[ -n "$rows" ] || {
-			[ "${bloat_n:-0}" -eq 0 ] && return 0
+			[ "${bloat_n:-0}" -eq 0 ] && [ "${task_n:-0}" -eq 0 ] && return 0
 		}
 		done_n=$(printf '%s\n' "$rows" | awk -F'\t' '$4=="done"{c++} END{print c+0}')
 		cold_n=$(printf '%s\n' "$rows" | awk -F'\t' -v now="$now" -v cd="$COLD_DAYS" \
 			'$4=="parked" && (now-$1)/86400 >= cd {c++} END{print c+0}')
 		stale_n=$(printf '%s\n' "$rows" | awk -F'\t' -v now="$now" -v sd="$STALE_ACTIVE_DAYS" \
 			'$4=="active" && (now-$1)/86400 >= sd {c++} END{print c+0}')
-		[ "$done_n" -eq 0 ] && [ "$cold_n" -eq 0 ] && [ "$stale_n" -eq 0 ] && [ "${bloat_n:-0}" -eq 0 ] && return 0
+		[ "$done_n" -eq 0 ] && [ "$cold_n" -eq 0 ] && [ "$stale_n" -eq 0 ] &&
+			[ "${bloat_n:-0}" -eq 0 ] && [ "${task_n:-0}" -eq 0 ] && return 0
 		local parts=""
 		[ "$done_n" -gt 0 ] && parts="${done_n} done to archive"
 		[ "$cold_n" -gt 0 ] && parts="${parts:+$parts, }${cold_n} parked cold >${COLD_DAYS}d"
 		[ "$stale_n" -gt 0 ] && parts="${parts:+$parts, }${stale_n} active stale >${STALE_ACTIVE_DAYS}d"
 		[ "${bloat_n:-0}" -gt 0 ] && parts="${parts:+$parts, }${bloat_n} checkpoint due >${BLOAT_LINES}L"
+		[ "${task_n:-0}" -gt 0 ] && parts="${parts:+$parts, }${task_n} task stale >${TASK_STALE_DAYS}d"
 		out="${out:+$out · }$2: $parts"
 	}
 	local _vid _vpath _vlabel
@@ -1165,7 +1241,7 @@ _flip_project_status() { # $1 = Project .md path, $2 = thread
 cmd_groom() {
 	local dry=0
 	[ "${1:-}" = "--dry-run" ] && dry=1
-	local now did=0 cold_lines="" stale_lines="" bloat_lines=""
+	local now did=0 cold_lines="" stale_lines="" bloat_lines="" taskstale_lines=""
 	now=$(date +%s)
 	_groom_vault() { # $1 = vault root, $2 = label
 		local root="$1/Sessions" label="$2" arc f name st proj upd ts age lines
@@ -1298,12 +1374,55 @@ cmd_groom() {
 			did=$((did + 1))
 		done
 	}
+	# Archive `done` tasks into Tasks/_archive/ and report stale backlog. A task
+	# is a spec, not a worklog: once its work shipped the note is history, and the
+	# session it was promoted into carries the record. Unlike a Project, a done
+	# task has no dependents to strand, so nothing blocks the move.
+	_groom_tasks() { # $1 = vault root, $2 = label
+		local root="$1/Tasks" label="$2" arc ts slug proj st blk title age
+		[ -d "$root" ] || return 0
+		arc="$root/_archive"
+		while IFS=$'\t' read -r ts slug proj st blk title; do
+			[ -n "$slug" ] || continue
+			case "$st" in
+			done)
+				if [ "$dry" -eq 1 ]; then
+					if [ -e "$arc/$slug.md" ]; then
+						printf '%s: skip task %s (already in Tasks/_archive/)\n' "$label" "$slug" >&2
+						continue
+					fi
+					printf '%s: Tasks/%s.md → Tasks/_archive/%s.md\n' "$label" "$slug" "$slug"
+					did=$((did + 1))
+					continue
+				fi
+				mkdir -p "$arc"
+				if [ -e "$arc/$slug.md" ]; then
+					printf '%s: skip task %s (already in Tasks/_archive/)\n' "$label" "$slug" >&2
+					continue
+				fi
+				mv "$root/$slug.md" "$arc/$slug.md" || continue
+				printf '%s: archived task %s → Tasks/_archive/\n' "$label" "$slug"
+				did=$((did + 1))
+				;;
+			backlog | next)
+				[ "$blk" = "$_TASK_NONE" ] || continue
+				[ "$proj" = "$_TASK_NONE" ] && proj=""
+				age=$(((now - ts) / 86400))
+				if [ "$age" -ge "$TASK_STALE_DAYS" ]; then
+					taskstale_lines="${taskstale_lines}  ${label}: ${slug} (${age}d, ${proj:-no project})
+"
+				fi
+				;;
+			esac
+		done <<<"$(_task_rows "$1")"
+	}
 	local _vid _vpath _vlabel
 	while IFS=$'\t' read -r _vid _vpath _vlabel _ _ _ _ _; do
 		[ -n "$_vid" ] || continue
 		case "$SEL" in both) ;; "$_vid") ;; *) continue ;; esac
 		_groom_vault "$_vpath" "$_vlabel"
 		_groom_projects "$_vpath" "$_vlabel"
+		_groom_tasks "$_vpath" "$_vlabel"
 	done <<<"$_REG"
 	if [ "$did" -eq 0 ]; then
 		printf 'Nothing to archive.\n'
@@ -1321,6 +1440,10 @@ cmd_groom() {
 	if [ -n "$bloat_lines" ]; then
 		printf 'Checkpoint due (>%dL — distill via the session skill and trim _index.md):\n' "$BLOAT_LINES"
 		printf '%s' "$bloat_lines"
+	fi
+	if [ -n "$taskstale_lines" ]; then
+		printf 'Stale backlog (>%dd untouched — promote, re-scope, or delete; nothing else forces this):\n' "$TASK_STALE_DAYS"
+		printf '%s' "$taskstale_lines"
 	fi
 	# Grooming is the deliberate cleanup moment — also flag Agent-Index drift here
 	# (broken/stale rows) so it gets triaged alongside session archiving.
@@ -1763,6 +1886,204 @@ cmd_project() {
 			printf '    %s\n' "$nm"
 		done < <(printf '%s\n' "$rows" | sort -rn)
 	done
+	return 0
+}
+
+# --- the backlog tier (Tasks/) -------------------------------------------------
+# A Task is planned work that has not started — the tier BELOW a Project and
+# BEFORE a Session. Statuses are its own vocabulary (backlog|next|active|done),
+# deliberately distinct from the session vocabulary (active|parked|done): a task
+# has no `parked` (an unstarted thing pausing is just backlog) and gains `next`
+# (explicitly queued). `active` means it was promoted and its session now owns
+# the state — the task note stays as the spec, pointing at that session.
+#
+# Enumerate tasks in a vault as TAB rows:
+#   <ts>\t<slug>\t<project>\t<status>\t<blocked_by>\t<title>
+# ts is `updated:` (falling back to mtime) exactly as _session_rows does, and for
+# the same reason: cloud-drive re-sync rewrites mtime and would corrupt age math.
+# Tasks under Tasks/_archive/ are excluded (archived = retired from every listing).
+#
+# The optional middle fields (project, blocked_by) are emitted as the literal
+# sentinel `-` when empty, NEVER as an empty string: `read` with IFS=$'\t' folds
+# consecutive tabs into one delimiter, so a genuinely-empty middle field shifts
+# every later field left — which silently read a task's title as its blocked_by
+# and made every task look blocked. Consumers map `-` back to empty.
+_TASK_NONE='-'
+_task_rows() { # $1 = vault root
+	local root="$1/Tasks" f slug proj st ts upd blocked title
+	[ -d "$root" ] || return 0
+	while IFS= read -r f; do
+		[ -n "$f" ] || continue
+		case "$f" in "$root"/_archive/*) continue ;; esac
+		slug=$(basename "${f%.md}")
+		[ "$slug" = "_index" ] && continue
+		proj=$(_fm_field "$f" project)
+		st=$(_fm_field "$f" status)
+		blocked=$(_fm_field "$f" blocked_by)
+		upd=$(_fm_field "$f" updated)
+		ts=$(_to_epoch "$upd")
+		if [ -z "$ts" ]; then
+			if [ "$(uname)" = Darwin ]; then ts=$(stat -f '%m' "$f"); else ts=$(stat -c '%Y' "$f"); fi
+		fi
+		# Title = the H1 minus any leading status glyph, falling back to the slug.
+		title=$(awk '/^# /{sub(/^# +/,""); print; exit}' "$f" 2>/dev/null)
+		title=$(_strip_status_glyph "${title:-$slug}")
+		printf '%s\t%s\t%s\t%s\t%s\t%s\n' \
+			"$ts" "$slug" "${proj:-$_TASK_NONE}" "${st:-backlog}" "${blocked:-$_TASK_NONE}" "$title"
+	done < <(find "$root" -maxdepth 1 -name '*.md' -type f 2>/dev/null)
+}
+
+# Stale-backlog threshold in days. An unstarted task has no forcing function —
+# nothing fails when it rots — so a backlog that is never triaged silently makes
+# `next` untrustworthy, which defeats the point of having it. Nagging is the
+# guard. Env override only, same shape as STALE_ACTIVE_DAYS.
+TASK_STALE_DAYS="${VAULTMEM_TASK_STALE_DAYS:-14}"
+
+# --- subcommand: next (the ready backlog) --------------------------------------
+cmd_next() {
+	local n="$LIMIT" any=0 ready="" blocked="" now
+	now=$(date +%s)
+	local _vid _vpath _vlabel rows
+	while IFS=$'\t' read -r _vid _vpath _vlabel _ _ _ _ _; do
+		[ -n "$_vid" ] || continue
+		case "$SEL" in both) ;; "$_vid") ;; *) continue ;; esac
+		rows=$(_task_rows "$_vpath")
+		[ -n "$rows" ] || continue
+		any=1
+		# Ready = next|backlog with no blocked_by. Sort key puts `next` (0) above
+		# `backlog` (1), then oldest-first inside each band: a task that has waited
+		# longer is the more urgent pick, the inverse of the sessions picker (which
+		# is newest-first because recency means "where I just was").
+		local line ts slug proj st blk title age band
+		while IFS=$'\t' read -r ts slug proj st blk title; do
+			[ -n "$slug" ] || continue
+			case "$st" in next | backlog) ;; *) continue ;; esac
+			[ "$proj" = "$_TASK_NONE" ] && proj=""
+			[ "$blk" = "$_TASK_NONE" ] && blk=""
+			age=$(((now - ts) / 86400))
+			if [ -n "$blk" ]; then
+				blocked="${blocked}  ${_vlabel}: ${slug} — blocked by ${blk}
+"
+				continue
+			fi
+			band=1
+			[ "$st" = next ] && band=0
+			line=$(printf '  %s%s%s  [%s]  %s%s  (%dd%s)' \
+				"$B" "$slug" "$R" "$st" "$title" "" "$age" "${proj:+ · $proj}")
+			ready="${ready}${band}	${ts}	${line}
+"
+		done <<<"$rows"
+	done <<<"$_REG"
+	if [ "$any" -eq 0 ] || { [ -z "$ready" ] && [ -z "$blocked" ]; }; then
+		printf 'No tasks yet — create one in Tasks/ (see `vaultmem task` / SCHEMA.md).\n'
+		return 0
+	fi
+	if [ -n "$ready" ]; then
+		printf 'Ready (%s first, then longest-waiting):\n' 'next'
+		printf '%s' "$ready" | sort -t$'\t' -k1,1n -k2,2n | cut -f3- | head -n "$n"
+		local total
+		total=$(printf '%s' "$ready" | grep -c .)
+		[ "$total" -gt "$n" ] && printf '  … %d more (raise with -n)\n' "$((total - n))"
+	else
+		printf 'Nothing ready — every task is blocked.\n'
+	fi
+	if [ -n "$blocked" ]; then
+		printf 'Blocked:\n'
+		printf '%s' "$blocked"
+	fi
+	# Stale backlog is the failure mode that makes `next` untrustworthy, so it is
+	# surfaced right where the agent reads the queue, not only in groom.
+	local stale_n=0
+	while IFS=$'\t' read -r _vid _vpath _vlabel _ _ _ _ _; do
+		[ -n "$_vid" ] || continue
+		case "$SEL" in both) ;; "$_vid") ;; *) continue ;; esac
+		stale_n=$((stale_n + $(_task_rows "$_vpath" | awk -F'\t' -v now="$now" -v sd="$TASK_STALE_DAYS" \
+			'($4=="backlog" || $4=="next") && $5=="-" && (now-$1)/86400 >= sd {c++} END{print c+0}')))
+	done <<<"$_REG"
+	[ "$stale_n" -gt 0 ] &&
+		printf '⚠ %d task(s) untouched >%dd — retire or re-scope; a stale backlog makes `next` untrustworthy.\n' \
+			"$stale_n" "$TASK_STALE_DAYS"
+	return 0
+}
+
+# --- subcommand: task <slug> [--promote] ---------------------------------------
+# Resolve a task slug to its file, searching every selected vault's Tasks/.
+_resolve_task_path() { # $1 = slug
+	local slug="$1" _vid _vpath _vlabel f
+	while IFS=$'\t' read -r _vid _vpath _vlabel _ _ _ _ _; do
+		[ -n "$_vid" ] || continue
+		case "$SEL" in both) ;; "$_vid") ;; *) continue ;; esac
+		f="$_vpath/Tasks/$slug.md"
+		[ -f "$f" ] && {
+			printf '%s\n' "$f"
+			return 0
+		}
+	done <<<"$_REG"
+	return 1
+}
+
+cmd_task() {
+	local slug="" promote=0 a
+	for a in "$@"; do
+		case "$a" in
+		--promote) promote=1 ;;
+		"") ;;
+		*) [ -z "$slug" ] && slug="$a" ;;
+		esac
+	done
+	[ -n "$slug" ] || die "usage: vaultmem task <slug> [--promote]"
+	local f
+	f=$(_resolve_task_path "$slug") || die "no task: $slug (looked in Tasks/ of every configured vault)"
+	local st proj linear repos blocked upd
+	st=$(_fm_field "$f" status)
+	proj=$(_fm_field "$f" project)
+	linear=$(_fm_field "$f" linear)
+	repos=$(_fm_field "$f" repos)
+	blocked=$(_fm_field "$f" blocked_by)
+	upd=$(_fm_field "$f" updated)
+	if [ "$promote" -eq 1 ]; then
+		# Read-only by design: promotion rewrites two notes in two folders, and a
+		# half-applied mutation would strand a task pointing at a session that does
+		# not exist. The agent applies these edits with its own Write/Edit tools,
+		# where a partial failure is visible and correctable.
+		printf '%s▸ Promote task → session: %s%s\n' "$B" "$slug" "$R"
+		[ "$st" = active ] && printf '  (already active — it should already have a session; check `session:` below)\n'
+		[ -n "$blocked" ] && printf '  ⚠ blocked by %s — resolve that first, or drop the field.\n' "$blocked"
+		printf '  task file: %s\n\n' "$f"
+		printf '  1. Create Sessions/%s/_index.md with frontmatter:\n' "$slug"
+		printf '       thread: %s\n' "$slug"
+		printf '       project: %s\n' "${proj:-<parent project, plain name>}"
+		printf '       status: active\n'
+		printf '       updated: %s\n' "$(date +'%Y-%m-%d %H:%M')"
+		printf '       aliases: [%s]\n' "$slug"
+		printf '       task: %s          # backlink to the spec this came from\n\n' "$slug"
+		printf '  2. Seed its body from this task: the task body IS the brief —\n'
+		printf '     carry the context + acceptance criteria into ## Pinned, and open\n'
+		printf '     ## Bookmark with "Last: promoted from task · Next: <first action>".\n\n'
+		printf '  3. In %s set:\n' "Tasks/$slug.md"
+		printf '       status: active\n'
+		printf '       session: %s          # the session that now owns the state\n' "$slug"
+		printf '       updated: %s\n\n' "$(date +'%Y-%m-%d %H:%M')"
+		printf '  4. Add the session to Projects/%s.md under ## Sessions:\n' "${proj:-<project>}"
+		printf '       - [[%s]] — <one-line> (status: active)\n\n' "$slug"
+		printf '  The task note stays as the spec — it is CONVERTED, not copied.\n'
+		printf '  Do not restate the brief in the session; link it: [[%s]].\n' "$slug"
+		return 0
+	fi
+	printf '%s▸ Task: %s%s\n' "$B" "$slug" "$R"
+	printf '  status:  %s\n' "${st:-backlog}"
+	[ -n "$proj" ] && printf '  project: %s\n' "$proj"
+	[ -n "$repos" ] && printf '  repos:   %s\n' "$repos"
+	[ -n "$linear" ] && printf '  linear:  %s\n' "$linear"
+	[ -n "$blocked" ] && printf '  blocked: %s\n' "$blocked"
+	local sess
+	sess=$(_fm_field "$f" session)
+	[ -n "$sess" ] && printf '  session: %s (promoted — live state lives there)\n' "$sess"
+	[ -n "$upd" ] && printf '  updated: %s\n' "$upd"
+	printf '  file:    %s\n\n' "$f"
+	# The body is the point of the note: the brief an agent starts from. Print it
+	# whole (tasks are specs, not worklogs — they do not grow like an _index.md).
+	awk 'NR==1 && $0=="---"{fm=1; next} fm && $0=="---"{fm=0; next} !fm{print}' "$f"
 	return 0
 }
 
@@ -2362,7 +2683,7 @@ _init_vault() { # $1 = vault id (optional; defaults to DEF_VAULT / first vault)
 	[ -n "$id" ] || die "no vault id — configure one first (vaultmem init --config)"
 	root=$(_vault_path "$id") || die "unknown vault id: $id (see 'vaultmem vaults')"
 	[ -n "$root" ] || die "vault '$id' has no path configured"
-	mkdir -p "$root/MOCs" "$root/Projects" "$root/Sessions" "$root/Templates" ||
+	mkdir -p "$root/MOCs" "$root/Projects" "$root/Sessions" "$root/Tasks" "$root/Templates" ||
 		die "could not scaffold under $root"
 	local home="$root/Home.md"
 	if [ ! -e "$home" ]; then
@@ -2395,6 +2716,25 @@ moc:                  # optional [[MOC - <Topic>]]
 ## Sessions
 EOF
 	fi
+	if [ ! -e "$root/Templates/Task.md" ]; then
+		cat >"$root/Templates/Task.md" <<'EOF'
+---
+type: task
+status: backlog       # backlog | next | active | done
+project:              # plain project name (no status glyph)
+repos: []             # repos this touches, so an agent knows where to work
+linear:               # optional OUTBOUND pointer to a tracker issue — never synced
+blocked_by:           # slug of a task that must land first (omit when unblocked)
+updated:              # YYYY-MM-DD HH:MM (real last-touch)
+---
+# <task title>
+
+<Why this needs doing, and the context an agent needs to start cold.>
+
+## Acceptance criteria
+- [ ] <verifiable outcome, not an activity>
+EOF
+	fi
 	if [ ! -e "$root/Templates/Session _index.md" ]; then
 		cat >"$root/Templates/Session _index.md" <<'EOF'
 ---
@@ -2407,7 +2747,7 @@ updated:              # YYYY-MM-DD HH:MM (real last-touch)
 EOF
 	fi
 	printf 'Scaffolded vault "%s" at %s\n' "$id" "$root"
-	printf '  Home.md (AGENT-INDEX markers) · MOCs/ · Projects/ · Sessions/ · Templates/\n'
+	printf '  Home.md (AGENT-INDEX markers) · MOCs/ · Projects/ · Sessions/ · Tasks/ · Templates/\n'
 }
 
 cmd_init() {
@@ -2445,7 +2785,7 @@ while [ $# -gt 0 ]; do
 		shift 2
 		;;
 	-h | --help)
-		sed -n '4,94p' "$0"
+		sed -n '4,114p' "$0"
 		exit 0
 		;;
 	*)
@@ -2471,7 +2811,7 @@ status | sessions | verify | nudge | which | init | doctor | "") ;;
 esac
 
 case "${ARGS[0]:-}" in
-"") sed -n '4,94p' "$0" ;; # no args → print usage
+"") sed -n '4,114p' "$0" ;; # no args → print usage
 status) cmd_status ;;
 nudge) cmd_nudge ;;
 index) cmd_index "${ARGS[1]:-}" ;;
@@ -2483,6 +2823,8 @@ which) cmd_which "${ARGS[1]:-$PWD}" ;;
 sessions) cmd_sessions ;;
 projects) cmd_projects ;;
 project) cmd_project "${ARGS[*]:1}" ;;
+next) cmd_next ;;
+task) cmd_task "${ARGS[@]:1}" ;;
 groom) cmd_groom "${ARGS[1]:-}" ;;
 init) cmd_init "${ARGS[1]:-}" "${ARGS[2]:-}" ;;
 resolve) cmd_resolve "${ARGS[*]:1}" ;;
