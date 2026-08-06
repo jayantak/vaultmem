@@ -64,6 +64,14 @@
 #                               task into an active session. Task→session is a CONVERSION,
 #                               not a copy: one identity moving through states. Read-only;
 #                               prints the steps, never writes.
+#   vaultmem task <slug> --promote --apply
+#                               apply the recipe: write Sessions/<slug>/_index.md, append it
+#                               to the Project's ## Sessions index, then flip the task's
+#                               status/session fields — in that order, so a mid-failure can
+#                               only ever strand a harmless orphaned session note, never a
+#                               task pointing at one that doesn't exist. Refuses (no writes)
+#                               if Sessions/<slug>/ already exists, the task is malformed, or
+#                               its project: doesn't resolve to a Project note.
 #   vaultmem init --config      write a starter config.toml
 #
 # Wikilink graph (follow links when researching — ripgrep, no Obsidian app needed):
@@ -83,6 +91,13 @@
 # Session resume:
 #   vaultmem bookmark <thread>  print only ## Bookmark + ## Pinned from a session's
 #                               _index.md — the resumable state, without the whole file
+#   vaultmem worktrees [thread] query the ## Git state tables (session skill step 5 keeps
+#                               these current). No thread = every active session's row.
+#                               Tolerant of no table, an empty table, or a placeholder row
+#                               ("(no worktree — design only)") — those sessions just emit
+#                               nothing, never a crash or a garbled row.
+#   vaultmem worktrees <t> --format json  {thread, repo, worktree, pr, state} objects
+#                               (--format is the same flag `search` uses; see above)
 #
 # Token-frugal note read:
 #   vaultmem cat <note> [--section '## Heading'] [--from N] [--lines M]
@@ -2022,18 +2037,150 @@ _resolve_task_path() { # $1 = slug
 	return 1
 }
 
+# Promote a task in place ($3 = 1). Preflight checks run FIRST and refuse before
+# any write: unlike the read-only recipe, this path mutates two notes in two
+# folders, so the write order is the whole point — see the comment at the call
+# site. $1 = task file path, $2 = slug.
+#
+# Write order (not negotiable): (1) Sessions/<slug>/_index.md first, (2) the
+# Project's ## Sessions index second, (3) the task's own status/session fields
+# LAST. If the process dies between any two steps, the only reachable failure
+# is an orphaned session note with no task pointing at it yet — harmless and
+# discoverable (it just sits there, unlinked). The failure the read-only
+# docstring warns about — a task whose `session:` field points at a session
+# that was never created — is unreachable this way: the task's own fields are
+# the last thing touched, so they are never rewritten before the thing they
+# point at exists.
+_promote_task_apply() { # $1 = task file, $2 = slug
+	local f="$1" slug="$2" proj linear repos blocked
+	proj=$(_fm_field "$f" project)
+	linear=$(_fm_field "$f" linear)
+	repos=$(_fm_field "$f" repos)
+	blocked=$(_fm_field "$f" blocked_by)
+	local root="${f%/Tasks/*}"
+	local sess_dir="$root/Sessions/$slug"
+
+	# --- preflight: refuse before writing anything -----------------------------
+	[ -n "$blocked" ] && die "task $slug is blocked by $blocked — resolve that first, or drop blocked_by, before promoting"
+	[ -e "$sess_dir" ] && die "Sessions/$slug/ already exists — refusing to promote over it (pick a different slug, or this task was already promoted)"
+	[ -n "$proj" ] || die "task $slug has no project: field — --apply needs a Project note to append the session index row to"
+	local pf
+	pf=$(_resolve_path "$proj") || die "task $slug names project \"$proj\", which does not resolve to a Project note — fix project: or create Projects/$proj.md first"
+
+	local now
+	now=$(date +'%Y-%m-%d %H:%M')
+
+	# --- 1) create the session note first ---------------------------------------
+	# The cheap failure: if everything after this dies, Sessions/<slug>/ is an
+	# orphan (no task or Project points at it yet) — inert and easy to spot on
+	# the next `sessions`/`doctor` pass, never a broken backlink.
+	mkdir -p "$sess_dir" || die "could not create $sess_dir"
+	cat >"$sess_dir/_index.md" <<EOF
+---
+thread: $slug
+project: $proj
+status: active
+aliases: [$slug]
+updated: $now
+task: $slug
+---
+# 🟢 $slug
+**Goal:** <one line>   **Project:** [[$proj]]   **MOCs:** [[<moc>]]   **People:** [[<person>]]
+**Repos:** ${repos:-[[<repo>]] (branch <branch>)}   **Related:** [[<prior-session>]]
+
+## Bookmark
+Last: promoted from task · Next: <first action> · Open: <unresolved>
+
+## Pinned
+
+## Work log
+
+## Decisions
+
+## Git state
+| Repo | Branch / worktree | PR | State |
+|---|---|---|---|
+EOF
+
+	# --- 2) register the session on the Project ---------------------------------
+	# Still recoverable if this dies: the session note exists and is complete,
+	# just not yet indexed — a `doctor`/groom pass surfaces it as unlinked, and
+	# re-running --apply is blocked by the sess_dir preflight above, so the fix
+	# is a manual index-row append, not a rerun.
+	#
+	# Insert right after the ## Sessions heading (not at end of file) — a Project
+	# body has topical sections after it (## Pinned, ## Decisions, free-form), so
+	# appending blindly could land the row under an unrelated later heading. No
+	# ## Sessions heading at all (a malformed/minimal note) falls back to end of
+	# file — the preflight already confirmed $pf resolves to a real Project note.
+	local row="- [[$slug]] — promoted from task${linear:+, $linear} (status: active)"
+	local tmp2
+	tmp2=$(mktemp) || die "could not create a temp file to update $pf"
+	if awk -v row="$row" '
+      /^## Sessions[[:space:]]*$/{ print; print row; found=1; next }
+      { print }
+      END{ if(!found) print row }
+    ' "$pf" >"$tmp2"; then
+		mv "$tmp2" "$pf"
+	else
+		rm -f "$tmp2"
+		die "could not update $pf"
+	fi
+
+	# --- 3) flip the task LAST ---------------------------------------------------
+	# Only after both notes above exist does the task get rewritten to point at
+	# them — so a task's session: field is never dangling. A single awk pass:
+	# rewrite status:/session:/updated: where present, and inject any of the
+	# three that the frontmatter didn't already have (status/updated are
+	# SCHEMA.md-required so this mainly covers session:, which is optional until
+	# promotion) right before the closing `---`.
+	local tmp
+	tmp=$(mktemp) || die "could not create a temp file to update $f"
+	if awk -v now="$now" -v slug="$slug" '
+      BEGIN{fm=0; sawstatus=0; sawsession=0; sawupdated=0}
+      NR==1 && $0=="---"{fm=1; print; next}
+      fm && $0=="---"{
+        if(!sawstatus) print "status: active"
+        if(!sawsession) print "session: " slug
+        if(!sawupdated) print "updated: " now
+        fm=0; print; next
+      }
+      fm && /^status:/{print "status: active"; sawstatus=1; next}
+      fm && /^session:/{print "session: " slug; sawsession=1; next}
+      fm && /^updated:/{print "updated: " now; sawupdated=1; next}
+      {print}
+    ' "$f" >"$tmp"; then
+		mv "$tmp" "$f"
+	else
+		rm -f "$tmp"
+		die "could not update $f"
+	fi
+
+	printf '%s▸ Promoted task → session: %s%s\n' "$B" "$slug" "$R"
+	printf '  wrote:   %s\n' "$sess_dir/_index.md"
+	printf '  updated: %s (## Sessions +1)\n' "$pf"
+	printf '  updated: %s (status: active, session: %s)\n' "$f" "$slug"
+	return 0
+}
+
 cmd_task() {
-	local slug="" promote=0 a
+	local slug="" promote=0 apply=0 a
 	for a in "$@"; do
 		case "$a" in
 		--promote) promote=1 ;;
+		--apply) apply=1 ;;
 		"") ;;
 		*) [ -z "$slug" ] && slug="$a" ;;
 		esac
 	done
-	[ -n "$slug" ] || die "usage: vaultmem task <slug> [--promote]"
+	[ -n "$slug" ] || die "usage: vaultmem task <slug> [--promote [--apply]]"
+	[ "$apply" -eq 1 ] && [ "$promote" -ne 1 ] && die "usage: vaultmem task <slug> --promote --apply (--apply requires --promote)"
 	local f
 	f=$(_resolve_task_path "$slug") || die "no task: $slug (looked in Tasks/ of every configured vault)"
+	if [ "$promote" -eq 1 ] && [ "$apply" -eq 1 ]; then
+		_promote_task_apply "$f" "$slug"
+		return $?
+	fi
 	local st proj linear repos blocked upd
 	st=$(_fm_field "$f" status)
 	proj=$(_fm_field "$f" project)
@@ -2045,7 +2192,10 @@ cmd_task() {
 		# Read-only by design: promotion rewrites two notes in two folders, and a
 		# half-applied mutation would strand a task pointing at a session that does
 		# not exist. The agent applies these edits with its own Write/Edit tools,
-		# where a partial failure is visible and correctable.
+		# where a partial failure is visible and correctable. `--apply` (above) opts
+		# into a mutating mode that preserves this by ordering the writes so the
+		# only reachable mid-failure is a harmless orphaned session note, never a
+		# task pointing at one that doesn't exist.
 		printf '%s▸ Promote task → session: %s%s\n' "$B" "$slug" "$R"
 		[ "$st" = active ] && printf '  (already active — it should already have a session; check `session:` below)\n'
 		[ -n "$blocked" ] && printf '  ⚠ blocked by %s — resolve that first, or drop the field.\n' "$blocked"
@@ -2341,6 +2491,120 @@ cmd_cat() {
       start=(from<1?1:from); shown=0
       for(i=start;i<=NR;i++){ if(lim>0 && shown>=lim)break; printf "%6d\t%s\n", i, buf[i]; shown++ }
     }'
+	return 0
+}
+
+# --- subcommand: worktrees (query the ## Git state tables) --------------------
+# vaultmem has no concept of worktrees/herdr/panes of its own — the `## Git
+# state` table in a session's _index.md (session skill step 5: "if git state
+# moved, refresh ## Git state in the same write") is already the source of
+# truth, written by agents as a matter of course. This just reads it back out
+# in a form a consuming skill (e.g. an `orchestrate` skill resolving "work on
+# AD-21231" to a worktree) can query without re-parsing markdown itself.
+#
+# Emits TAB rows: <thread>\t<repo>\t<branch/worktree>\t<pr>\t<state>. Tolerant
+# by design: no `## Git state` heading, no table under it, a table with only
+# header+separator, or a placeholder row (anything that isn't a real 4-cell
+# `| repo | branch | pr | state |` row, e.g. "(no worktree — design only)")
+# all emit zero rows for that session — never a crash, never a garbled row.
+_git_state_rows() { # $1 = _index.md path, $2 = thread
+	awk -v thread="$2" '
+    function trim(s){ gsub(/^[[:space:]]+|[[:space:]]+$/,"",s); return s }
+    /^## Git state[[:space:]]*$/{ insec=1; seenhdr=0; next }
+    insec && /^##[[:space:]]/{ insec=0 }
+    insec && /^\|/{
+      line=$0
+      sub(/^\|/,"",line); sub(/\|[[:space:]]*$/,"",line)
+      n=split(line,cell,"|")
+      if(!seenhdr){ seenhdr=1; next }          # header row
+      if(n>=1 && trim(cell[1]) ~ /^-+$/){ next } # separator row (---|---|...)
+      if(n!=4) next                            # not a real 4-column data row
+      repo=trim(cell[1]); branch=trim(cell[2]); pr=trim(cell[3]); state=trim(cell[4])
+      if(repo=="" && branch=="" && pr=="" && state=="") next
+      printf "%s\t%s\t%s\t%s\t%s\n", thread, repo, branch, pr, state
+    }
+  ' "$1"
+}
+
+# JSON-escape one field (same hand-rolled rules as _search_json: bash 3.2 has
+# no printf %q-to-JSON, no jq dep).
+_json_esc() {
+	printf '%s' "$1" | awk '
+    { s=$0; o=""
+      for(i=1;i<=length(s);i++){ c=substr(s,i,1)
+        if(c=="\\") o=o "\\\\"
+        else if(c=="\"") o=o "\\\""
+        else if(c=="\t") o=o "\\t"
+        else o=o c }
+      print o
+    }'
+}
+
+cmd_worktrees() {
+	local thread="" f
+	case "${1:-}" in "" | --*) ;; *) thread="$1" ;; esac
+	case "$FORMAT" in cli | json) ;; *) die "vaultmem worktrees: --format wants cli|json (got '$FORMAT')" ;; esac
+
+	local -a threads=() files=()
+	if [ -n "$thread" ]; then
+		f=$(_resolve_session_path "$thread") || die "no such session: $thread (looked in Sessions/ and Sessions/_archive/)"
+		threads+=("$thread")
+		files+=("$f")
+	else
+		local r name
+		while IFS= read -r r; do
+			[ -d "$r/Sessions" ] || continue
+			while IFS= read -r f; do
+				[ -n "$f" ] || continue
+				case "$f" in "$r/Sessions/_archive"/*) continue ;; esac
+				name=$(basename "$(dirname "$f")")
+				[ "$name" = Sessions ] && continue
+				[ "$(_fm_field "$f" status)" = active ] || continue
+				threads+=("$name")
+				files+=("$f")
+			done < <(find "$r/Sessions" -maxdepth 2 -name "_index.md" -type f 2>/dev/null | sort)
+		done < <(_link_roots)
+	fi
+
+	local rows="" i
+	for ((i = 0; i < ${#files[@]}; i++)); do
+		rows="${rows}$(_git_state_rows "${files[$i]}" "${threads[$i]}")"$'\n'
+	done
+	rows=$(printf '%s' "$rows" | grep -v '^$' || true)
+
+	if [ "$FORMAT" = json ]; then
+		if [ -z "$rows" ]; then
+			printf '[]\n'
+			return 0
+		fi
+		local out="[" first=1 th repo branch pr state
+		while IFS=$'\t' read -r th repo branch pr state; do
+			[ -n "$th" ] || continue
+			[ "$first" -eq 1 ] || out="${out},"
+			first=0
+			out="${out}
+  {\"thread\":\"$(_json_esc "$th")\",\"repo\":\"$(_json_esc "$repo")\",\"worktree\":\"$(_json_esc "$branch")\",\"pr\":\"$(_json_esc "$pr")\",\"state\":\"$(_json_esc "$state")\"}"
+		done <<<"$rows"
+		printf '%s\n]\n' "$out"
+		return 0
+	fi
+
+	if [ -z "$rows" ]; then
+		if [ -n "$thread" ]; then
+			printf 'vaultmem worktrees: no Git state rows for %s (no table, or placeholder-only — see ## Git state)\n' "$thread"
+		else
+			printf 'vaultmem worktrees: no active sessions carry a Git state row.\n'
+		fi
+		return 0
+	fi
+	local th repo branch pr state
+	while IFS=$'\t' read -r th repo branch pr state; do
+		[ -n "$th" ] || continue
+		printf '%s%s%s  %s  %s' "$B" "$th" "$R" "$repo" "$branch"
+		[ -n "$pr" ] && printf '  %s' "$pr"
+		[ -n "$state" ] && printf '  [%s]' "$state"
+		printf '\n'
+	done <<<"$rows"
 	return 0
 }
 
@@ -2785,7 +3049,7 @@ while [ $# -gt 0 ]; do
 		shift 2
 		;;
 	-h | --help)
-		sed -n '4,114p' "$0"
+		sed -n '4,129p' "$0"
 		exit 0
 		;;
 	*)
@@ -2811,7 +3075,7 @@ status | sessions | verify | nudge | which | init | doctor | "") ;;
 esac
 
 case "${ARGS[0]:-}" in
-"") sed -n '4,114p' "$0" ;; # no args → print usage
+"") sed -n '4,129p' "$0" ;; # no args → print usage
 status) cmd_status ;;
 nudge) cmd_nudge ;;
 index) cmd_index "${ARGS[1]:-}" ;;
@@ -2833,6 +3097,7 @@ backlinks) cmd_backlinks "${ARGS[*]:1}" ;;
 neighbors) cmd_neighbors "${ARGS[*]:1}" ;;
 dangling) cmd_dangling "${ARGS[*]:1}" ;;
 bookmark) cmd_bookmark "${ARGS[*]:1}" ;;
+worktrees) cmd_worktrees "${ARGS[1]:-}" ;;
 cat) cmd_cat "${ARGS[@]:1}" ;;
 verify) cmd_verify "${ARGS[1]:-}" ;;
 frontier) cmd_frontier ;;

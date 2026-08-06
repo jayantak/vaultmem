@@ -125,6 +125,12 @@ and registers the session on the Project.
 link it (`[[<slug>]]`) and let `## Bookmark` carry live state. Duplicating it
 is how the two drift.
 
+`vaultmem task <slug> --promote --apply` performs the same recipe itself
+(session note, then Project index, then the task's own fields — in that
+order, so a mid-failure never leaves a task pointing at a session that
+doesn't exist) for a caller that needs it done non-interactively rather than
+applied by hand.
+
 ### Keep the backlog honest
 
 An unstarted task has no forcing function — nothing fails when it rots — and a
@@ -282,6 +288,9 @@ section before deciding), and Read the file itself before the first edit.
 3. If git state moved (branch, PR, worktree, merge/push), refresh `## Git state`
    **in the same write**. The work log is the source of truth for what happened;
    the table is just the at-a-glance index — never let it contradict the log.
+   `vaultmem worktrees [thread] [--format json]` reads this table back out
+   (one thread, or every active session) for a consumer that needs "which
+   worktree is thread X on" without parsing markdown itself.
 4. Add or correct a `## Pinned` constant if this turn surfaced one (a gotcha,
    a binding decision, the canonical command/path).
 5. Keep header wikilinks current (`[[MOC]]`, `[[repo]]`, `[[person]]`,

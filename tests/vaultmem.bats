@@ -2388,6 +2388,117 @@ seed_task() {
   [[ "$output" == *"blocked by something-else"* ]]
 }
 
+# --- task --promote --apply (mutating promotion) --------------------------
+
+# Seed a minimal Project note with a ## Sessions heading, so --apply has
+# somewhere to append the session index row.
+seed_apply_project() { # $1=vault root $2=name (default drs-v2)
+  local name="${2:-drs-v2}"
+  mkdir -p "$1/Projects"
+  cat >"$1/Projects/$name.md" <<EOF
+---
+type: project
+status: active
+repos: [ofp-drs]
+---
+# $name
+
+## Sessions
+- [[old-thread]] — something (status: done)
+
+## Pinned
+- a pinned constant
+EOF
+}
+
+@test "task --promote (bare) is unchanged by the existence of --apply" {
+  seed_apply_project "$OBS_JAY"
+  seed_task "$OBS_JAY" promote-me next 1 drs-v2
+  run "$OM" -v jay task promote-me --promote
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"thread: promote-me"* ]]
+  [[ "$output" == *"CONVERTED, not copied"* ]]
+  [ ! -e "$OBS_JAY/Sessions/promote-me" ]
+  grep -q 'status: next' "$OBS_JAY/Tasks/promote-me.md"
+}
+
+@test "task --promote --apply creates the session, updates the Project index, and flips the task" {
+  seed_apply_project "$OBS_JAY"
+  seed_task "$OBS_JAY" promote-me next 1 drs-v2
+  run "$OM" -v jay task promote-me --promote --apply
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"Promoted task"* ]]
+  [[ "$output" == *"$OBS_JAY/Sessions/promote-me/_index.md"* ]]
+
+  # 1) session note
+  [ -f "$OBS_JAY/Sessions/promote-me/_index.md" ]
+  grep -q 'thread: promote-me' "$OBS_JAY/Sessions/promote-me/_index.md"
+  grep -q 'status: active' "$OBS_JAY/Sessions/promote-me/_index.md"
+  grep -q 'aliases: \[promote-me\]' "$OBS_JAY/Sessions/promote-me/_index.md"
+  grep -q 'task: promote-me' "$OBS_JAY/Sessions/promote-me/_index.md"
+  grep -q '## Git state' "$OBS_JAY/Sessions/promote-me/_index.md"
+
+  # 2) Project index — new row lands under ## Sessions, above older content
+  run grep -n 'promote-me\|old-thread' "$OBS_JAY/Projects/drs-v2.md"
+  local new_line old_line
+  new_line=$(printf '%s\n' "$output" | grep 'promote-me' | cut -d: -f1)
+  old_line=$(printf '%s\n' "$output" | grep 'old-thread' | cut -d: -f1)
+  [ "$new_line" -lt "$old_line" ]
+
+  # 3) task flips last
+  grep -q 'status: active' "$OBS_JAY/Tasks/promote-me.md"
+  grep -q 'session: promote-me' "$OBS_JAY/Tasks/promote-me.md"
+}
+
+@test "task --promote --apply refuses when Sessions/<slug>/ already exists, and writes nothing" {
+  seed_apply_project "$OBS_JAY"
+  seed_task "$OBS_JAY" taken next 1 drs-v2
+  mkdir -p "$OBS_JAY/Sessions/taken"
+  printf 'pre-existing\n' >"$OBS_JAY/Sessions/taken/marker.md"
+  run "$OM" -v jay task taken --promote --apply
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"already exists"* ]]
+  # nothing else was written
+  [ ! -f "$OBS_JAY/Sessions/taken/_index.md" ]
+  [ -f "$OBS_JAY/Sessions/taken/marker.md" ]
+  grep -q 'status: next' "$OBS_JAY/Tasks/taken.md"
+  [[ "$(cat "$OBS_JAY/Projects/drs-v2.md")" != *"[[taken]]"* ]]
+}
+
+@test "task --promote --apply refuses when the task has no project: field" {
+  seed_task "$OBS_JAY" orphan-task next 1
+  run "$OM" -v jay task orphan-task --promote --apply
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"no project"* ]]
+  [ ! -e "$OBS_JAY/Sessions/orphan-task" ]
+}
+
+@test "task --promote --apply refuses when project: does not resolve to a Project note" {
+  seed_task "$OBS_JAY" ghost-project next 1 nonexistent-project
+  run "$OM" -v jay task ghost-project --promote --apply
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"does not resolve"* ]]
+  [ ! -e "$OBS_JAY/Sessions/ghost-project" ]
+}
+
+@test "task --promote --apply refuses when the task is blocked" {
+  seed_apply_project "$OBS_JAY"
+  seed_task "$OBS_JAY" still-blocked backlog 1 drs-v2 "blocked_by: something-else"
+  run "$OM" -v jay task still-blocked --promote --apply
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"blocked by something-else"* ]]
+  [ ! -e "$OBS_JAY/Sessions/still-blocked" ]
+}
+
+@test "task --apply without --promote is a usage error" {
+  seed_apply_project "$OBS_JAY"
+  seed_task "$OBS_JAY" bare-apply next 1 drs-v2
+  run "$OM" -v jay task bare-apply --apply
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"usage:"* ]]
+  [ ! -e "$OBS_JAY/Sessions/bare-apply" ]
+}
+
 @test "groom archives done tasks into Tasks/_archive/" {
   seed_task "$OBS_JAY" finished done 1
   run "$OM" -v jay groom
@@ -2490,4 +2601,111 @@ seed_task() {
   seed_task "$OBS_JAY" lonely backlog 1
   run "$OM" -v jay doctor --deep
   [[ "$output" != *"lonely"* ]]
+}
+
+# --- worktrees (query the ## Git state tables) -----------------------------
+
+# Seed a session _index.md with a given ## Git state body (raw markdown after
+# the heading, or "" for none at all). $3 status defaults to active.
+seed_git_state_session() { # $1=vault root $2=thread $3=git-state-block $4=status
+  mkdir -p "$1/Sessions/$2"
+  {
+    printf -- '---\nthread: %s\nproject: drs-v2\nstatus: %s\naliases: [%s]\nupdated: 2026-08-06 10:00\n---\n' \
+      "$2" "${4:-active}" "$2"
+    printf '# %s\n\n## Bookmark\nLast: x · Next: y\n' "$2"
+    if [ -n "${3:-}" ]; then
+      printf '\n## Git state\n%s\n' "$3"
+    fi
+  } >"$1/Sessions/$2/_index.md"
+}
+
+@test "worktrees <thread> prints the repo/branch/pr/state row from ## Git state" {
+  seed_git_state_session "$OBS_JAY" has-wt '| Repo | Branch / worktree | PR | State |
+|---|---|---|---|
+| ofp-drs | `feature/x` (worktree: `~/src/x/ofp-drs-feature-x`) | #123 | open |'
+  run "$OM" -v jay worktrees has-wt
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"has-wt"* ]]
+  [[ "$output" == *"ofp-drs"* ]]
+  [[ "$output" == *"#123"* ]]
+  [[ "$output" == *"open"* ]]
+}
+
+@test "worktrees <thread> reports nothing (exit 0) for a placeholder-only Git state row" {
+  seed_git_state_session "$OBS_JAY" placeholder-only '(no worktree — design only)'
+  run "$OM" -v jay worktrees placeholder-only
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"no Git state rows"* ]]
+}
+
+@test "worktrees <thread> reports nothing (exit 0) when the session has no ## Git state heading at all" {
+  seed_git_state_session "$OBS_JAY" no-heading ""
+  run "$OM" -v jay worktrees no-heading
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"no Git state rows"* ]]
+}
+
+@test "worktrees <thread> reports nothing (exit 0) for a Git state table with header+separator but no data rows" {
+  seed_git_state_session "$OBS_JAY" empty-table '| Repo | Branch / worktree | PR | State |
+|---|---|---|---|'
+  run "$OM" -v jay worktrees empty-table
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"no Git state rows"* ]]
+}
+
+@test "worktrees <thread> fails clearly on an unknown thread" {
+  run "$OM" -v jay worktrees nope-thread
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"no such session: nope-thread"* ]]
+}
+
+@test "worktrees with no thread lists every active session's row, skipping placeholder/tableless ones" {
+  seed_git_state_session "$OBS_JAY" has-wt '| Repo | Branch / worktree | PR | State |
+|---|---|---|---|
+| ofp-drs | `feature/x` | #123 | open |'
+  seed_git_state_session "$OBS_JAY" placeholder-only '(no worktree — design only)'
+  seed_git_state_session "$OBS_JAY" no-heading ""
+  run "$OM" -v jay worktrees
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"has-wt"* ]]
+  [[ "$output" != *"placeholder-only"* ]]
+  [[ "$output" != *"no-heading"* ]]
+}
+
+@test "worktrees with no thread excludes parked/done sessions but a direct lookup still works" {
+  seed_git_state_session "$OBS_JAY" parked-one '| Repo | Branch / worktree | PR | State |
+|---|---|---|---|
+| ofp-drs | `feature/parked` | - | idle |' parked
+  run "$OM" -v jay worktrees
+  [ "$status" -eq 0 ]
+  [[ "$output" != *"parked-one"* ]]
+  run "$OM" -v jay worktrees parked-one
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"parked-one"* ]]
+  [[ "$output" == *"idle"* ]]
+}
+
+@test "worktrees --format json emits {thread,repo,worktree,pr,state} objects" {
+  seed_git_state_session "$OBS_JAY" has-wt '| Repo | Branch / worktree | PR | State |
+|---|---|---|---|
+| ofp-drs | `feature/x` | #123 | open |'
+  run "$OM" -v jay worktrees has-wt --format json
+  [ "$status" -eq 0 ]
+  [[ "$output" == *'"thread":"has-wt"'* ]]
+  [[ "$output" == *'"repo":"ofp-drs"'* ]]
+  [[ "$output" == *'"pr":"#123"'* ]]
+  [[ "$output" == *'"state":"open"'* ]]
+}
+
+@test "worktrees --format json prints [] for a placeholder-only session" {
+  seed_git_state_session "$OBS_JAY" placeholder-only '(no worktree — design only)'
+  run "$OM" -v jay worktrees placeholder-only --format json
+  [ "$status" -eq 0 ]
+  [[ "$output" == "[]" ]]
+}
+
+@test "worktrees rejects an unsupported --format value" {
+  run "$OM" -v jay worktrees --format files
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"--format wants cli|json"* ]]
 }
