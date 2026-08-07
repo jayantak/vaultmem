@@ -138,10 +138,26 @@ for verify-on-write.
 **search · index**
 ```
 vaultmem <query>            search all vaults; curated index hits first
+vaultmem a b                AND: notes containing every term, anywhere in the note
+vaultmem '"a b"'            phrase: inner double quotes match adjacent words
 vaultmem -v <id> <query>    restrict to one vault
 vaultmem -n <N> <query>     cap results (default 20)
 vaultmem index [section|all]  browse the Agent Index (shape → section → full dump)
 vaultmem mocs               list Maps of Content
+```
+
+Multiple terms are **ANDed at file level**: a note matches when every term
+appears somewhere in it, in any order and not necessarily on the same line —
+the convention Google, GitHub code search, SQLite FTS5, and Obsidian's own
+search box all use. Terms stay regex, so `vaultmem 'AD-4[0-9]{2}'` works.
+
+For a phrase, wrap the words in double quotes *inside* the shell quotes, so
+the quotes survive to vaultmem:
+
+```bash
+vaultmem herdr monitor        # AND — both terms, anywhere in the note
+vaultmem '"quick brown"'      # phrase — adjacent words only
+vaultmem stag '"dry run"'     # AND of a bare term and a phrase
 ```
 
 **graph**

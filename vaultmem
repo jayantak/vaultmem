@@ -10,15 +10,22 @@
 # ripgrep demonstrably hurts.
 #
 # Usage:
-#   vaultmem <query>            search all vaults; curated index hits first
+#   vaultmem <query>            search all vaults; curated index hits first.
+#                               Multiple terms are ANDed at FILE level: a note matches
+#                               when EVERY term appears somewhere in it, in any order and
+#                               not necessarily on the same line (as Obsidian/Google do).
+#                               vaultmem herdr monitor    → notes carrying both terms
+#   vaultmem '"a b"'            phrase: inner double quotes match adjacent words. Nest
+#                               them inside shell quotes so the shell does not eat them.
+#                               vaultmem stag '"dry run"' → AND of a term and a phrase
 #   vaultmem -v <id> <query>    restrict to one vault (see `vaultmem vaults`)
 #   vaultmem -n 40 <query>      cap results (default 20 files)
 #   vaultmem --format F <query> search output format: cli (default, curated+content, ANSI) |
 #                               files (bare content-hit paths, pipeable) | json (array of
 #                               {file, line, text} content matches; escaped for bash 3.2)
 #   vaultmem --exclude P <query>  drop notes whose body also matches rg pattern P (find
-#                               notes matching <query> but NOT P). Quoted phrases/regex work
-#                               natively in <query> itself (e.g. vaultmem 'quick brown').
+#                               notes matching <query> but NOT P). Terms stay regex, so
+#                               vaultmem 'AD-4[0-9]{2}' works.
 #   vaultmem index              browse the Agent Index: section counts + MOCs (the shape)
 #   vaultmem index <section>    expand one section (e.g. index architecture); rows capped
 #   vaultmem index all          full flat dump (escape hatch; rows still width-capped)
@@ -1469,19 +1476,98 @@ cmd_groom() {
 }
 
 # --- subcommand: search --------------------------------------------------------
+# Query semantics: space-separated terms are ANDed at FILE level — a note matches
+# when every term appears somewhere in it, in any order, not necessarily on the
+# same line. That is the near-universal convention (Google, DuckDuckGo, GitHub
+# code search, SQLite FTS5, fzf) and, decisively here, what Obsidian's own core
+# search does — this tool searches an Obsidian vault, so it should not contradict
+# the search box the same notes live behind.
+#
+# The escape hatch is a phrase: a term wrapped in INNER double quotes matches
+# those words adjacently, as Obsidian/Google spell it. The quotes must survive
+# the shell, so in practice they are nested inside shell quotes:
+#
+#   vaultmem herdr monitor        → AND: both terms, anywhere in the note
+#   vaultmem '"quick brown"'      → phrase: adjacent words only
+#   vaultmem herdr '"dry run"'    → AND of a term and a phrase
+#
+# This replaced whole-query-as-one-regex, where `vaultmem monitor stag run`
+# searched for that literal adjacent phrase and silently returned nothing — a
+# result indistinguishable from an empty vault. See -h.
+#
+# Split a query into terms on whitespace, honoring "…" as a phrase (one term,
+# inner spaces kept). Emits one term per line, so callers read it with the same
+# `while read` idiom used elsewhere. Bash 3.2: no arrays returned from functions,
+# no ${x,,} — hand-roll the scan.
+_search_terms() {
+	local q="$1" term="" ch inq=0 i=1 n
+	# Separate statement: within a single `local`, ${#q} expands against the
+	# OUTER q (or empty), not the one being assigned — silently yielding 0 and
+	# skipping the whole scan.
+	n=${#q}
+	while [ "$i" -le "$n" ]; do
+		ch="${q:i-1:1}"
+		if [ "$ch" = '"' ]; then
+			# Toggle phrase mode. A closing quote ends the term even when empty,
+			# so `""` does not silently swallow the next word.
+			if [ "$inq" = 1 ]; then
+				inq=0
+				[ -n "$term" ] && printf '%s\n' "$term"
+				term=""
+			else
+				inq=1
+			fi
+		elif [ "$inq" = 0 ] && case "$ch" in [[:space:]]) true ;; *) false ;; esac then
+			[ -n "$term" ] && printf '%s\n' "$term"
+			term=""
+		else
+			term="$term$ch"
+		fi
+		i=$((i + 1))
+	done
+	# Trailing term, including an unterminated phrase (treated as if closed —
+	# a stray quote should narrow the search, never drop the words after it).
+	[ -n "$term" ] && printf '%s\n' "$term"
+	return 0
+}
+
 # Candidate content-hit files for a query, capped at LIMIT and shared by all
 # three output formats (cli/json/files) so the cap and any exclusion are applied
 # once, consistently. --exclude drops notes whose BODY also matches the given rg
 # pattern (qmd's `-term` semantic: find notes matching the query but NOT the
 # excluded pattern) — a file-level filter, applied before the cap so excluded
-# notes don't consume result slots. Quoted phrases and regex work natively via rg
-# in the QUERY itself (e.g. `vaultmem 'quick brown'`), so R10 needs no phrase
-# parsing — see -h.
+# notes don't consume result slots.
+#
+# File-level AND is a chain of `rg -l` passes (BurntSushi's documented idiom;
+# ripgrep has no --and, and its multi-`-e` form is OR). Pass 1 searches the vault
+# roots; each later pass searches only the files that survived, so the set
+# shrinks monotonically and N terms cost far less than N full scans. The cap is
+# applied last, after every term has filtered, so `-n` limits results rather than
+# truncating the set the next term still has to filter.
 _search_files() {
 	local query="$1"
 	shift
-	local -a roots=("$@") f
-	rg -ilN -e "$query" --glob '*.md' --glob '!Templates/**' "${roots[@]}" 2>/dev/null |
+	local -a roots=("$@")
+	local f term first=1 acc=""
+	while IFS= read -r term; do
+		[ -n "$term" ] || continue
+		if [ "$first" = 1 ]; then
+			acc=$(rg -ilN -e "$term" --glob '*.md' --glob '!Templates/**' "${roots[@]}" 2>/dev/null)
+			first=0
+		else
+			[ -n "$acc" ] || break # already empty: no later term can re-add a file
+			# -F is not used: terms stay regex, matching the pre-AND behavior and
+			# keeping `vaultmem 'AD-4[0-9]{2}'` working.
+			acc=$(printf '%s\n' "$acc" | tr '\n' '\0' | xargs -0 rg -ilN -e "$term" 2>/dev/null)
+		fi
+	done <<EOF
+$(_search_terms "$query")
+EOF
+	# An all-whitespace query never ran a pass; emit nothing rather than the
+	# whole vault.
+	[ "$first" = 1 ] && return 0
+	[ -n "$acc" ] || return 0
+	printf '%s\n' "$acc" |
 		{
 			if [ "$HAVE_EXCL" = 1 ]; then
 				while IFS= read -r f; do
@@ -1493,6 +1579,49 @@ _search_files() {
 				cat
 			fi
 		} | head -n "$LIMIT"
+}
+
+# The terms as one alternation, for the passes that must HIGHLIGHT or EXCERPT
+# matches rather than select files (`rg --max-count 2` context lines, the curated
+# index scan, the json line pull). Selecting files is AND; showing why a file
+# matched is OR — an excerpt pass with the AND chain would print nothing for a
+# note whose terms live on different lines, which is exactly the case AND exists
+# to find. Terms are alternated in a group: `herdr|dry run`.
+_search_alt() {
+	local term alt=""
+	while IFS= read -r term; do
+		[ -n "$term" ] || continue
+		if [ -n "$alt" ]; then alt="$alt|$term"; else alt="$term"; fi
+	done <<EOF
+$(_search_terms "$1")
+EOF
+	printf '%s\n' "$alt"
+}
+
+# Filter stdin to lines containing EVERY term (per-line AND), for the curated
+# index rows — each row is one self-contained record, so the AND applies within
+# the line rather than across a file. A chain of `grep -i` is the whole trick;
+# terms stay regex, matching the file-level pass.
+_filter_all_terms() {
+	local term
+	local -a chain=()
+	while IFS= read -r term; do
+		[ -n "$term" ] && chain[${#chain[@]}]="$term"
+	done <<EOF
+$(_search_terms "$1")
+EOF
+	if [ "${#chain[@]}" -eq 0 ]; then
+		cat
+		return 0
+	fi
+	local out
+	out=$(cat)
+	for term in "${chain[@]}"; do
+		out=$(printf '%s\n' "$out" | grep -i -e "$term" 2>/dev/null) || {
+			return 0 # a term matched nothing: no curated rows survive
+		}
+	done
+	printf '%s\n' "$out"
 }
 
 cmd_search() {
@@ -1521,13 +1650,18 @@ cmd_search() {
 	esac
 
 	# cli (default): curated hits first, then content hits, human-formatted.
-	# 1) Curated hits: the Agent Index rows + MOC pointer lines that match.
-	local curated mocs_name
+	# 1) Curated hits: the Agent Index rows + MOC pointer lines that match. An
+	# index row is a self-contained record (one line describing one note), so AND
+	# applies per ROW: every term must appear in the same row. Alternation here
+	# would make a long query match nearly every row — these lines are paragraph-
+	# sized, so any one term hits — burying the result in a wall of index dump.
+	local curated mocs_name alt term
+	alt=$(_search_alt "$query")
 	mocs_name=$(basename "$PRIMARY_MOCS")
 	curated=$({
-		[ -f "$PRIMARY_HOME" ] && rg -iN -e "$query" "$PRIMARY_HOME" 2>/dev/null
-		[ -d "$PRIMARY_MOCS" ] && rg -iN -e "$query" "$PRIMARY_MOCS"/*.md 2>/dev/null | sed -E "s#^.*/$mocs_name/#MOC: #"
-	} | grep -E '\[\[' | head -n "$LIMIT")
+		[ -f "$PRIMARY_HOME" ] && rg -iN -e "$alt" "$PRIMARY_HOME" 2>/dev/null
+		[ -d "$PRIMARY_MOCS" ] && rg -iN -e "$alt" "$PRIMARY_MOCS"/*.md 2>/dev/null | sed -E "s#^.*/$mocs_name/#MOC: #"
+	} | grep -E '\[\[' | _filter_all_terms "$query" | head -n "$LIMIT")
 	if [ -n "$curated" ]; then
 		printf '%s▸ Curated index (primary Home.md + MOCs)%s\n' "$B" "$R"
 		printf '%s\n\n' "$curated"
@@ -1542,9 +1676,21 @@ cmd_search() {
 		local rel
 		rel="${f##*/Obsidian/}"
 		printf '  %s\n' "$rel"
-		rg -iN --max-count 2 -e "$query" "$f" 2>/dev/null | sed 's/^/      /' | head -n 2
+		rg -iN --max-count 2 -e "$alt" "$f" 2>/dev/null | sed 's/^/      /' | head -n 2
 	done < <(_search_files "$query" "${roots[@]}")
-	[ "$any" -eq 0 ] && printf '  (no content matches — try a broader term, or "vaultmem index")\n'
+	# On an empty multi-term result, name the likeliest cause: terms are ANDed, so
+	# one term too many is a far more common miss than wrong wording. Without this
+	# the output is indistinguishable from an empty vault — the failure mode that
+	# made the old whole-query-as-phrase behavior so expensive to diagnose.
+	if [ "$any" -eq 0 ]; then
+		local nterms
+		nterms=$(_search_terms "$query" | grep -c .)
+		if [ "${nterms:-0}" -gt 1 ]; then
+			printf '  (no note contains all %s terms — drop one, or "vaultmem index")\n' "$nterms"
+		else
+			printf '  (no content matches — try a broader term, or "vaultmem index")\n'
+		fi
+	fi
 	# Search always succeeds — an empty result is not an error (and a bare `[ … ]`
 	# test above must not leak its exit code as the command's). All three formats
 	# return 0 so scripts can branch on `--format json|files` output, not $?.
@@ -1565,13 +1711,16 @@ _search_json() {
 	# Restrict to the same capped file set the other formats use, then pull the
 	# matching lines (file:line:text) from just those files.
 	local -a files=()
-	local f
+	local f alt
 	while IFS= read -r f; do [ -n "$f" ] && files+=("$f"); done < <(_search_files "$query" "${roots[@]}")
 	if [ "${#files[@]}" -eq 0 ]; then
 		printf '[]\n'
 		return 0
 	fi
-	rg -iN -H -n --max-count 2 -e "$query" "${files[@]}" 2>/dev/null | awk '
+	# File selection was AND; the line pull is OR (see _search_alt) so a note
+	# whose terms sit on different lines still yields excerpt objects.
+	alt=$(_search_alt "$query")
+	rg -iN -H -n --max-count 2 -e "$alt" "${files[@]}" 2>/dev/null | awk '
     function esc(s,  o,i,c) {
       o=""
       for(i=1;i<=length(s);i++){ c=substr(s,i,1)
@@ -3049,7 +3198,7 @@ while [ $# -gt 0 ]; do
 		shift 2
 		;;
 	-h | --help)
-		sed -n '4,129p' "$0"
+		sed -n '4,136p' "$0"
 		exit 0
 		;;
 	*)
@@ -3075,7 +3224,7 @@ status | sessions | verify | nudge | which | init | doctor | "") ;;
 esac
 
 case "${ARGS[0]:-}" in
-"") sed -n '4,129p' "$0" ;; # no args → print usage
+"") sed -n '4,136p' "$0" ;; # no args → print usage
 status) cmd_status ;;
 nudge) cmd_nudge ;;
 index) cmd_index "${ARGS[1]:-}" ;;

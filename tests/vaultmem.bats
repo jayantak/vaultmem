@@ -691,6 +691,110 @@ seed_search_notes() {
   [ "$n" -eq 2 ]
 }
 
+# --- search AND semantics (multi-term queries) ---------------------------------
+
+# Three notes: one carries both terms on DIFFERENT lines (the file-level AND
+# case), one carries only the first, one only the second.
+seed_and_notes() {
+  mkdir -p "$OBS_JAY/Notes"
+  printf '# both\nherdr pane setup\n\nlater a monitor loop\n' >"$OBS_JAY/Notes/both.md"
+  printf '# only-a\nherdr pane setup\n' >"$OBS_JAY/Notes/onlya.md"
+  printf '# only-b\na monitor loop\n' >"$OBS_JAY/Notes/onlyb.md"
+}
+
+@test "search ANDs multiple terms at file level (terms may be on different lines)" {
+  seed_and_notes
+  run "$OM" -v jay --format files "herdr monitor"
+  [ "$status" -eq 0 ]
+  # both.md has the terms on separate lines — the pre-AND whole-query-as-one-regex
+  # missed it entirely, and a line-level AND would miss it too.
+  [[ "$output" == *"Notes/both.md"* ]]
+  [[ "$output" != *"Notes/onlya.md"* ]]
+  [[ "$output" != *"Notes/onlyb.md"* ]]
+}
+
+@test "search AND is order-independent" {
+  seed_and_notes
+  run "$OM" -v jay --format files "monitor herdr"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"Notes/both.md"* ]]
+  [[ "$output" != *"Notes/onlya.md"* ]]
+}
+
+@test "search AND narrows: an unmatched term yields no results" {
+  seed_and_notes
+  run "$OM" -v jay --format files "herdr monitor zzznomatchzzz"
+  [ "$status" -eq 0 ]
+  [ -z "$output" ]
+}
+
+@test "search collapses repeated whitespace between terms" {
+  seed_and_notes
+  run "$OM" -v jay --format files "herdr    monitor"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"Notes/both.md"* ]]
+}
+
+@test "search AND applies in json and cli formats too" {
+  seed_and_notes
+  run "$OM" -v jay --format json "herdr monitor"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"both.md"* ]]
+  [[ "$output" != *"onlya.md"* ]]
+  # excerpts are OR-matched within the AND-selected files, so a note whose terms
+  # sit on different lines still yields match objects.
+  [[ "$output" == *"\"text\":"* ]]
+  run "$OM" -v jay "herdr monitor"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"both.md"* ]]
+  [[ "$output" != *"onlya.md"* ]]
+}
+
+@test "search names the AND as the cause when a multi-term query finds nothing" {
+  seed_and_notes
+  run "$OM" -v jay "herdr monitor zzznomatchzzz"
+  [ "$status" -eq 0 ]
+  # the empty result must be distinguishable from an empty vault.
+  [[ "$output" == *"all 3 terms"* ]]
+}
+
+@test "search keeps the generic empty message for a single-term miss" {
+  seed_and_notes
+  run "$OM" -v jay zzznomatchzzz
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"no content matches"* ]]
+  [[ "$output" != *"terms"* ]]
+}
+
+@test "search single-term queries are unaffected (no regression)" {
+  seed_and_notes
+  run "$OM" -v jay --format files herdr
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"Notes/both.md"* ]]
+  [[ "$output" == *"Notes/onlya.md"* ]]
+  [[ "$output" != *"Notes/onlyb.md"* ]]
+}
+
+@test "search keeps regex working in a term" {
+  mkdir -p "$OBS_JAY/Notes"
+  printf '# r\nticket AD-459 landed\n' >"$OBS_JAY/Notes/r.md"
+  printf '# s\nticket AD-12 landed\n' >"$OBS_JAY/Notes/s.md"
+  run "$OM" -v jay --format files 'AD-4[0-9]{2}'
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"Notes/r.md"* ]]
+  [[ "$output" != *"Notes/s.md"* ]]
+}
+
+@test "search --exclude still applies to a multi-term AND query" {
+  mkdir -p "$OBS_JAY/Notes"
+  printf '# keep\nherdr pane\nmonitor loop\n' >"$OBS_JAY/Notes/keep2.md"
+  printf '# drop\nherdr pane\nmonitor loop\ndraft marker\n' >"$OBS_JAY/Notes/drop2.md"
+  run "$OM" -v jay --format files --exclude draft "herdr monitor"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"Notes/keep2.md"* ]]
+  [[ "$output" != *"Notes/drop2.md"* ]]
+}
+
 # --- search --exclude (R10: minimal exclusion, no query language) --------------
 
 # Two notes both matching the query; only one also carries the excluded term.
@@ -732,15 +836,49 @@ seed_exclude_notes() {
   [[ "$output" != *"drop.md"* ]]
 }
 
-@test "search quoted phrase matches via rg regex (no phrase parsing needed)" {
+# --- search phrases (inner double quotes, Obsidian/Google style) ---------------
+
+# adjacent.md has the words next to each other; apart.md only has them scattered.
+seed_phrase_notes() {
   mkdir -p "$OBS_JAY/Notes"
-  printf '# p\nthe quick brown fox\nquick then brown apart\n' >"$OBS_JAY/Notes/p.md"
-  # the phrase 'quick brown' matches only the adjacent-words line, not the
-  # 'quick then brown' line — proving rg handles phrases in the query directly.
-  run "$OM" -v jay --format json "quick brown"
+  printf '# adjacent\nthe quick brown fox\n' >"$OBS_JAY/Notes/adjacent.md"
+  printf '# apart\nquick then brown, far apart\n' >"$OBS_JAY/Notes/apart.md"
+}
+
+@test "search treats inner double quotes as a phrase (adjacent words only)" {
+  seed_phrase_notes
+  run "$OM" -v jay --format files '"quick brown"'
   [ "$status" -eq 0 ]
-  [[ "$output" == *"quick brown fox"* ]]
-  [[ "$output" != *"quick then brown apart"* ]]
+  [[ "$output" == *"Notes/adjacent.md"* ]]
+  [[ "$output" != *"Notes/apart.md"* ]]
+}
+
+@test "search without quotes ANDs the same words, matching both notes" {
+  seed_phrase_notes
+  # the contrast that defines the feature: unquoted = AND (both notes carry both
+  # words), quoted = phrase (only the adjacent one).
+  run "$OM" -v jay --format files "quick brown"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"Notes/adjacent.md"* ]]
+  [[ "$output" == *"Notes/apart.md"* ]]
+}
+
+@test "search mixes a bare term and a phrase in one query" {
+  mkdir -p "$OBS_JAY/Notes"
+  printf '# hit\nstag environment\nrunning a dry run now\n' >"$OBS_JAY/Notes/hit.md"
+  printf '# miss\nstag environment\ndry then run, apart\n' >"$OBS_JAY/Notes/miss.md"
+  run "$OM" -v jay --format files 'stag "dry run"'
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"Notes/hit.md"* ]]
+  [[ "$output" != *"Notes/miss.md"* ]]
+}
+
+@test "search recovers from an unterminated quote instead of dropping terms" {
+  seed_phrase_notes
+  # a stray quote should still search the words after it, never silently drop them.
+  run "$OM" -v jay --format files '"quick brown'
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"Notes/adjacent.md"* ]]
 }
 
 # --- frontier (knowledge-frontier ranking: (out-in) * exp(-days/30)) -----------

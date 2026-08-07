@@ -57,13 +57,20 @@ plausibly be in either, check both — they're small.
 A ripgrep-backed helper on `PATH` is the quickest way in — no need to read whole
 notes to find the right one. `vaultmem <query>` searches all vaults, curated
 Agent-Index/MOC hits first, then note-content matches; `vaultmem mocs` lists the
-domain hubs. Locate candidates first, then read only those. Two rules make it
+domain hubs. Locate candidates first, then read only those. Three rules make it
 reliable:
 
+- **Terms are ANDed; keep queries short.** Every term must appear in the note,
+  so each word you add narrows the result set. Search *keywords*, not a sentence
+  — `herdr monitor` finds the note, `how do I monitor a run with herdr` demands
+  all seven words and finds nothing. Two or three distinctive terms is the sweet
+  spot. For an exact phrase, quote it inside the shell quotes: `'"dry run"'`.
 - **You are the query expander.** One hopeful query is not a search. Run 2–3
   deliberate variants — the exact term, a synonym, an adjacent concept
   (`drainer` / `OOM` / `memory limit`). Each call is ~60ms; a missed note
-  because you stopped at one phrasing is the expensive outcome.
+  because you stopped at one phrasing is the expensive outcome. When a query
+  returns nothing, **drop a term before you rephrase** — an empty result is
+  usually one term too many, not the wrong wording.
 - **Snippets are only leads.** Match lines locate the note; they are not the
   answer. Read the note — or the relevant section, below — before answering.
   Never answer from search output alone.
