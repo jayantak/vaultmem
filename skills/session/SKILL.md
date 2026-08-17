@@ -318,6 +318,15 @@ the only Open item is a tracker link), don't resume it as if there's work left �
 flip `status: done` + ✅ right then and tell the user, rather than reopening a
 finished unit.
 
+**Resume-time verification fans out; it never runs inline.** When the next
+step requires re-establishing facts against a repo — verifying a ticket's
+claims, grep sweeps, multi-file reads, `git show` archaeology — delegate the
+whole read phase to one read-only subagent (Explore / general-purpose) carrying
+the claim list and repo paths; only verdicts with file:line evidence return.
+The main context keeps the judgment work (rulings, ticket patches, logging).
+Inline verification is the top context burner on resume (measured: 125k of a
+200k window on a single step). Same rule mid-session for any bulk read phase.
+
 ## Checkpoint (distill in place, keep going)
 
 Checkpoint is the pressure-release valve that keeps `_index.md` lean **without
