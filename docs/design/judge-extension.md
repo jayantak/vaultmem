@@ -87,7 +87,15 @@ Response:
 }
 ```
 
-Errors: `{ "message": "...", "error_type": "invalid_request" }` plus an HTTP status.
+Errors (verified live, see below): an HTTP status plus
+
+```json
+{ "error": { "message": "...", "param": null, "type": "invalid_request_error" } }
+```
+
+The envelope is OpenAI-style, nested under `error`, and the discriminator is
+`type`. Vercel's docs show a flat `{ "message", "error_type" }` object; the live
+gateway does not return that. `param` is absent on the billing error.
 
 Naming differs from TypeSafe's native API: there the yes/no type is `noul` and
 its answer field is also `noul`; here they are `boolean` and `probability`, and
@@ -98,22 +106,58 @@ longest question, text only, up to 255 choice options, 2 to 10 score levels,
 1,200 requests/min. Input $0.042/M tokens, output free. Typical latency ~100ms
 (vendor claim).
 
-### Unverified. The implementer must check these first.
+### Verified 2026-09-21 (partial: the account has no card on file)
 
-> **Phase 0 blocked, 2026-09-21.** The verification run found
-> `AI_GATEWAY_API_KEY` unset in its environment, so no call was made against the
-> gateway. Everything below is still unverified. Rerun Phase 0 with the key
-> exported.
+Throwaway `curl` calls against `https://ai-gateway.vercel.sh` with synthetic
+state only. The key authenticates, but the gateway refuses every evaluation
+until the Vercel team has a credit card on file, so no evaluation has succeeded
+yet. What follows is split into facts and what is still open.
 
-- Whether `zeroDataRetention: true` needs a paid Vercel plan. A secondary source
-  says Pro/Enterprise. If the gateway rejects the flag, the extension reports
-  unavailable. **Never retry without the flag.**
-- Whether a version-pinned slug exists (for example `typesafe-ai/jev-1.13.0`).
-  Vercel's examples show only `typesafe-ai/jev`, and the response echoes that
-  slug, so model drift may be invisible. `GET /typesafe/v1/models` lists what is
-  available. If no pin exists, the bench (section 10) is the drift detector.
-- All latency, cost, and calibration numbers are vendor or blog claims. Nothing
-  here was called against the live API.
+Facts:
+
+- **Error envelope.** `{"error":{"message","param","type"}}`, corrected above.
+- **Check order on `POST /v1/evaluate`:** request schema (400), then
+  authentication (401), then billing (403). A malformed question returns 400
+  even with an invalid key, so a 400 says nothing about the key.
+- **Invalid or missing key:** `401`,
+  `{"error":{"message":"Authentication failed","param":null,"type":"authentication_error"}}`.
+- **Malformed question** (`"type":"bogus"`): `400`,
+  `{"error":{"message":"questions.q.type: Invalid discriminator value. Expected 'boolean' | 'choice' | 'score'","param":null,"type":"invalid_request_error"}}`.
+  This confirms the three gateway type names.
+- **Body is not JSON:** `400`,
+  `{"error":{"message":"Invalid JSON in request body","param":null,"type":"invalid_request_error"}}`.
+- **Valid key, no card on file:** `403`,
+  `{"error":{"message":"AI Gateway requires a valid credit card on file to service requests. ...","type":"customer_verification_required"}}`
+  (no `param` key). Returned for a well-formed request with or without
+  `providerOptions.gateway.zeroDataRetention`, and also for an unknown model
+  slug, so the billing check runs before model resolution and before any ZDR
+  plan check.
+- **No version-pinned slug is listed.** `GET /typesafe/v1/models` (200) returns
+  exactly one model: `{"name":"jev","release_date":"2026-09-15"}` plus a
+  description. `GET /v1/models` (200, needs no auth) lists exactly one
+  `typesafe-ai/*` id: `typesafe-ai/jev`. Its entry carries `"type":"evaluation"`,
+  `"context_window":32000`, `"max_tokens":0`, `"zdr":"all"`,
+  `"no_training":"all"`, `"released":1789430400`, and pricing
+  `"input":"0.000000042"`, `"output":"0"` per token, which matches $0.042/M
+  input and free output. `release_date` / `released` is the only version signal
+  the gateway exposes; `judge doctor --live` and the bench should record it.
+- `"zdr":"all"` says every provider of this model supports zero data retention.
+  It does not say whether this account's plan may request it.
+
+Still unverified, all blocked on the card:
+
+- The success response shape. The response example above is still from
+  Vercel's docs.
+- Whether `zeroDataRetention: true` is accepted on this plan. The rule
+  stands: if the gateway rejects the flag, the extension reports unavailable.
+  **Never retry without the flag.**
+- Whether the evaluate response ever reports a versioned
+  model id, and whether an unlisted slug such as `typesafe-ai/jev-1.13.0`
+  resolves. If no pin exists, the bench (section 10) is the drift detector.
+- The `choice` and `score` answer shapes and the `score`
+  `probabilities` key format.
+- Latency. All latency and calibration numbers remain vendor or blog
+  claims.
 
 ## 5. Architecture
 
@@ -185,10 +229,16 @@ Exit codes (the contract core and hooks rely on):
 | 0 | ok; with `--gate`, the answer is yes (probability ≥ `yes` threshold) |
 | 1 | `--gate` only: the answer is no (probability ≤ `no` threshold) |
 | 2 | abstain: between thresholds, or top choice probability below `min_confidence` |
-| 3 | unavailable: disabled, not installed, no key, egress denied, timeout, HTTP error, bad response |
+| 3 | unavailable: disabled, not installed, no key, egress denied, timeout, HTTP error (verified: 400, 401, 403), bad response |
 | 64 | usage error |
 
 Without `--gate`, stdout is the normalized answers JSON and the code is 0 or 3.
+
+Every non-2xx maps to 3. The extension reads `.error.type` and `.error.message`
+(section 4) for the log and for `judge doctor --live`, which must print them:
+`authentication_error` (401) and `customer_verification_required` (403, no card
+on file) are setup faults the owner has to fix, and a silent exit 3 hides them.
+A 400 `invalid_request_error` means a bad judge file, not a bad key.
 
 ### 5.3 Judge files
 
@@ -401,8 +451,9 @@ not by feel. `vaultmem judge bench` makes that real:
   - `judge = false` vault: exit 3 and the curl shim was **not** invoked.
   - mixed-consent search: non-consenting vault's content absent from the
     recorded request body.
-  - timeout, HTTP 4xx/5xx, malformed JSON, ZDR refusal: exit 3, caller output
-    unchanged, nothing on stdout from hooks.
+  - timeout, HTTP 4xx/5xx (canned bodies from section 4: 400, 401, 403),
+    malformed JSON, ZDR refusal: exit 3, caller output unchanged, nothing on
+    stdout from hooks.
   - threshold mapping to exit 0 / 1 / 2.
   - request bodies match golden files per judge.
   - the key never appears in argv, stdout, stderr, or the log.
@@ -425,7 +476,7 @@ not by feel. `vaultmem judge bench` makes that real:
 
 | Phase | Scope | Done when |
 |---|---|---|
-| 0 | Resolve section 4 unknowns with a throwaway curl. Record findings here. | ZDR behavior and model pinning are known facts |
+| 0 | Resolve section 4 unknowns with a throwaway curl. Record findings here. **Partial 2026-09-21:** errors and model listing verified; success shape, ZDR, and timing wait on a card on file. | ZDR behavior and model pinning are known facts |
 | 1 | Core shim, config keys + lint, `_ext_exec`, `_judge`, extension skeleton, egress gate, exit codes, log, `doctor`, tests with curl shim, `install.sh --ext` | `vaultmem judge <name>` works end to end against the shim; all CI jobs green |
 | 2 | `groom --judge` + `groom-triage` judge, `feedback`, `calibration` | owner runs it on a consenting vault for two weeks and reviews calibration |
 | 3 | `nudge --judge`, `judge route`, `judge dupes` | hook stays silent and under `timeout_ms` in every failure mode |
@@ -441,7 +492,11 @@ One PR per phase. Phase 1 must not change any existing command's output.
    This design assumes yes.
 3. Decision-log retention: unbounded append, or rotate at a size?
 4. Is a paid Vercel plan acceptable if ZDR requires one? If not, is `zdr = false`
-   acceptable for the personal vault?
+   acceptable for the personal vault? Still open: Phase 0 could not reach the
+   ZDR check.
+5. The gateway returns 403 `customer_verification_required` until the Vercel
+   team has a credit card on file, even for the free credits. Add a card so
+   Phase 0 can finish?
 
 ## Sources
 
