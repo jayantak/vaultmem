@@ -65,25 +65,33 @@ jobs:
       # 3.2 floor. /bin/bash is the shell real users and the SessionStart hooks
       # get. A bash-4 construct that only breaks a specific code path (rather
       # than erroring at load time) is invisible to every other job.
-      - name: Confirm /bin/bash really is 3.2
-        run: /bin/bash --version | head -1 | grep -q 'version 3\.2' || exit 1
-      - name: Run tests under bash 3.2
-        env:
-          BASH: /bin/bash
-        run: bats tests/vaultmem.bats
-      # bash resets $BASH at startup, so the env var above cannot select the
-      # shell a test's subject runs under. For the judge suite, a `bash` that
-      # is /bin/bash goes first on PATH (bats, the stubs, and every
-      # `#!/usr/bin/env bash` then run on 3.2), and VAULTMEM_TEST_BASH makes
-      # the suite invoke the extension with /bin/bash explicitly.
-      - name: Run judge extension tests under bash 3.2
-        env:
-          BASH: /bin/bash
-          VAULTMEM_TEST_BASH: /bin/bash
+      #
+      # `BASH=/bin/bash bats …` does NOT do this: bash resets $BASH at startup,
+      # so bats and every `#!/usr/bin/env bash` under it kept running Homebrew
+      # bash 5 and this job passed vacuously. What selects the shell is PATH: a
+      # `bash` that is /bin/bash goes first, for every later step.
+      - name: Put /bin/bash first on PATH as `bash`
         run: |
           mkdir -p "$RUNNER_TEMP/bash32"
           ln -sf /bin/bash "$RUNNER_TEMP/bash32/bash"
-          PATH="$RUNNER_TEMP/bash32:$PATH" bats tests/judge.bats
+          echo "$RUNNER_TEMP/bash32" >>"$GITHUB_PATH"
+      # Fails the job if the PATH trick ever stops working (a runner image that
+      # ships a newer /bin/bash, a step that reorders PATH), instead of letting
+      # the suites below pass on the wrong shell.
+      - name: Assert `bash` on PATH is 3.2
+        run: |
+          command -v bash
+          bash --version | head -1
+          bash --version | head -1 | grep -q 'version 3\.2\.' || exit 1
+          env bash -c 'case "$BASH_VERSION" in 3.2.*) ;; *) echo "env bash is $BASH_VERSION" >&2; exit 1 ;; esac'
+      - name: Run tests under bash 3.2
+        run: bats tests/vaultmem.bats </dev/null
+      # VAULTMEM_TEST_BASH also makes the suite invoke the extension with
+      # /bin/bash explicitly, independent of PATH.
+      - name: Run judge extension tests under bash 3.2
+        env:
+          VAULTMEM_TEST_BASH: /bin/bash
+        run: bats tests/judge.bats </dev/null
       - name: Run the shipped lints under bash 3.2
         run: |
           /bin/bash ./tests/subcommand-lint.sh
