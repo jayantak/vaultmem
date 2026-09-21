@@ -1,0 +1,14 @@
+{
+  "model": "typesafe-ai/jev",
+  "state": "The build failed with exit code 1.",
+  "questions": {
+    "failed": {
+      "type": "boolean",
+      "instructions": "The text reports that something failed.",
+      "criteria": {
+        "true": "The text says a build, test, command, or task failed.",
+        "false": "The text reports success, or does not mention an outcome."
+      }
+    }
+  }
+}
