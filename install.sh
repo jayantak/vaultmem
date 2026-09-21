@@ -7,6 +7,7 @@
 # Or from a clone:
 #   ./install.sh
 #   ./install.sh --skills ~/.claude/skills   # also symlink the bundled skills/
+#   ./install.sh --ext judge                 # also symlink the optional judge extension
 #
 # It copies the `vaultmem` script next to this file into the bin dir, checks that
 # ripgrep is present, and prints the SessionStart hook snippet. It does not touch
@@ -16,6 +17,7 @@ set -euo pipefail
 PREFIX="${VAULTMEM_PREFIX:-$HOME/.local}"
 BIN="$PREFIX/bin"
 SKILLS_DEST=""
+EXT_NAME=""
 
 while [ $# -gt 0 ]; do
 	case "$1" in
@@ -28,8 +30,12 @@ while [ $# -gt 0 ]; do
 		SKILLS_DEST="$2"
 		shift 2
 		;;
+	--ext)
+		EXT_NAME="$2"
+		shift 2
+		;;
 	-h | --help)
-		sed -n '2,13p' "$0"
+		sed -n '2,14p' "$0"
 		exit 0
 		;;
 	*)
@@ -73,6 +79,26 @@ if [ -n "$SKILLS_DEST" ]; then
 		done
 	else
 		printf '! no skills/ directory in this release yet — nothing to link (skipping --skills)\n' >&2
+	fi
+fi
+
+# Optional: symlink a bundled extension into the XDG data dir, the second place
+# `vaultmem` looks for one (after $VAULTMEM_EXT_DIR). A symlink, like --skills, so
+# a `git pull` in the clone updates it. ext/<name>/ may not exist in this release.
+if [ -n "$EXT_NAME" ]; then
+	case "$EXT_NAME" in
+	*/* | .*)
+		printf 'install.sh: invalid extension name: %s\n' "$EXT_NAME" >&2
+		exit 2
+		;;
+	esac
+	EXT_DEST="${XDG_DATA_HOME:-$HOME/.local/share}/vaultmem/ext"
+	if [ -d "$SRC_DIR/ext/$EXT_NAME" ]; then
+		mkdir -p "$EXT_DEST"
+		ln -sfn "$SRC_DIR/ext/$EXT_NAME" "$EXT_DEST/$EXT_NAME"
+		printf '✓ linked extension %s → %s/%s\n' "$EXT_NAME" "$EXT_DEST" "$EXT_NAME"
+	else
+		printf '! no ext/%s directory in this release yet — nothing to link (skipping --ext)\n' "$EXT_NAME" >&2
 	fi
 fi
 

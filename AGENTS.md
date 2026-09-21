@@ -20,6 +20,10 @@ database, no build step — the script *is* the artifact. This repo also ships:
   drive the memory workflow on top of the CLI.
 - `.claude-plugin/` — projects `skills/` into an installable Claude Code
   plugin/marketplace.
+- `ext/judge/` — the optional `judge` extension (`vaultmem-judge`, bash 3.2 +
+  `curl` + `jq`): typed yes/no, choice, and score answers from a remote
+  evaluation model. A separate executable, never sourced by core. See
+  § The extension model.
 - `tests/` — bats unit tests + a skills↔CLI drift lint.
 
 Read the script top-to-bottom before making non-trivial changes — that's the
@@ -67,7 +71,7 @@ subcommand. Broad shape: search/index (`<query>`, `index`, `mocs`), the
 wikilink graph (`resolve`/`links`/`backlinks`/`neighbors`/`dangling`), the
 router (`vaults`/`path`/`which`), the lifecycle tier
 (`sessions`/`projects`/`project`/`next`/`task`/`groom`/`status`), hygiene
-(`doctor`), and setup (`init`).
+(`doctor`), setup (`init`), and the extension shim (`judge`).
 
 **Adding usage lines? Bump the `sed` range.** The usage block is printed by a
 hardcoded `sed -n '4,Np' "$0"` in *two* places (the `-h` branch and the no-args
@@ -114,6 +118,46 @@ Full wiring examples for both harnesses, and how to customize the printed
 `directive_file` line: [docs/hooks.md](docs/hooks.md). Never change
 `cmd_status`/`cmd_sessions` to error on a missing vault — that contract is
 load-bearing for every downstream hook config.
+
+## The extension model
+
+**Core opens no socket.** `./vaultmem` never makes a network call and never gains
+a dependency; anything that needs either lives in an extension, a separate
+executable under `ext/<name>/vaultmem-<name>`. `judge` is the only one, and
+`judge` is the only dispatch word extensions take: do not add git-style "any
+`vaultmem-<x>` on `$PATH` is a subcommand", because search is the default
+dispatch case and that makes every query ambiguous.
+
+- `_ext_exec <name> [args]` resolves the executable in a fixed order:
+  `$VAULTMEM_EXT_DIR/<name>/`, then
+  `${XDG_DATA_HOME:-~/.local/share}/vaultmem/ext/<name>/`, then `ext/<name>/`
+  beside the symlink-resolved script. Never `$PATH`. Not found: one stderr line,
+  exit 3. It exports `VAULTMEM_BIN` (absolute, symlink-resolved) and
+  `VAULTMEM_CONFIG`; the extension reads vault data only by calling
+  `"$VAULTMEM_BIN"`, never by parsing the registry.
+- Args after `judge` pass to the extension verbatim: the arg loop stops parsing
+  core flags (`--vault`, `--format`, `-n`, `-h`) once the first positional is
+  `judge`.
+- `_judge <judge-name> <vault-id> [args]` is the helper integrated commands
+  will call (no caller yet). State on stdin. It returns 3 **without forking**
+  when `[ext.judge] enabled` is not `true` or the vault lacks `judge = true`, so
+  a disabled judge costs a hook nothing. Callers treat anything but 0/1/2 as
+  "no opinion" and print what they print today. The undocumented `_judge`
+  dispatch word exists only so bats can reach the helper.
+- **`vaultmem judge config` is a frozen contract, answered by core**, never
+  forwarded. One line each, values unquoted, defaults filled in, in this order:
+  `ext.judge.enabled`, `.model`, `.base_url`, `.zdr`, `.timeout_ms`,
+  `.key_file` (`~` expanded), `.log`, `.rerank`, `.hook_judges`, then any other
+  `[ext.judge]` key in file order, then `vault.<id>.judge=true|false` for every
+  registry vault with a path. It must work with no config file and no vault
+  (`judge` is in the pre-dispatch allowlist). The extension's tests stub
+  `VAULTMEM_BIN` with a script printing this format, so changing it breaks the
+  extension silently. A bats test pins it byte for byte.
+- Core lints `[ext.<name>]` for subset shape only; key names belong to the
+  extension (`vaultmem judge doctor`). `[vault.<id>] judge` must be a bare
+  boolean.
+
+Design and rationale: [docs/design/judge-extension.md](docs/design/judge-extension.md).
 
 ## Skills → Claude Code plugin
 
@@ -167,5 +211,7 @@ version-locked to the CLI: [docs/plugin.md](docs/plugin.md).
 | SessionStart hook wiring (Claude Code + Codex), directive customization | [docs/hooks.md](docs/hooks.md) |
 | Claude Code plugin packaging, skill discovery, version sync | [docs/plugin.md](docs/plugin.md) |
 | Install paths, quickstart, full command reference, design rationale | [README.md](README.md) |
+| Judge extension: setup, egress rules, judge files, exit codes | [docs/judge.md](docs/judge.md) |
+| Judge extension design, gateway findings, build order | [docs/design/judge-extension.md](docs/design/judge-extension.md) |
 | Skill content itself (workflows, conventions each skill teaches) | `skills/<name>/SKILL.md` |
 | bash 3.2 floor, banned constructs, portable substitutes, test conventions | [docs/development.md](docs/development.md) |

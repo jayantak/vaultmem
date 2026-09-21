@@ -27,8 +27,9 @@ quietly parses wrong is the failure mode to design against.
 
 **Accepted:**
 
-- **Headers** — `[defaults]` and `[vault.<id>]` only, where `<id>` is the short
-  name you refer to the vault by (`vaultmem -v <id> …`, `vaultmem path <id>`).
+- **Headers** — `[defaults]`, `[vault.<id>]`, and `[ext.<name>]` only, where
+  `<id>` is the short name you refer to the vault by (`vaultmem -v <id> …`,
+  `vaultmem path <id>`) and `<name>` is an extension (see `[ext.<name>]` below).
 - **Values** — one of:
   - a **quoted string**: `key = "value"` (always quote strings);
   - a bare **boolean**: `key = true` / `key = false`;
@@ -42,10 +43,12 @@ quietly parses wrong is the failure mode to design against.
 - arrays — `key = ["a", "b"]`
 - inline tables — `key = { a = 1 }`
 - array-of-tables headers — `[[vault]]`
-- nested tables — `[vault.foo.bar]`
+- nested tables — `[vault.foo.bar]`, `[ext.judge.sub]`; a bare `[ext]` too
 - multiline strings — `"""…"""`
-- unknown keys in a known section
+- unknown keys in `[defaults]` or `[vault.<id>]`
 - unquoted string values
+- a `[vault.<id>]` `judge` that is not a bare `true` / `false` (`judge = "true"`
+  and `judge = 1` both error: egress consent is never inferred from a fuzzy value)
 
 Keep it to `[section]` headers, `key = "string" | true | 123`, comma lists, and
 `#` comments. Nothing else.
@@ -84,10 +87,38 @@ One block per vault. Only `path` is required.
 | `mocs`         | no       | `MOCs`       | Maps-of-Content folder, relative to `path`. |
 | `match_owners` | no       | *(none)*     | Comma list of git-remote **owner** globs that route a repo to this vault. |
 | `match_paths`  | no       | *(none)*     | Comma list of **directory** globs that route a path to this vault. |
+| `judge`        | no       | `false`      | Bare boolean. Egress consent for the optional `judge` extension: only a vault with `judge = true` may have its content sent to the remote model. See [judge.md](judge.md). |
 
 `path`, `directive_file`, and `match_paths` all undergo `~`/`$VAR` expansion, so
 `path = "~/Obsidian/Personal"` and `match_paths = "~/src/github.com/myorg/**"`
 resolve against the running user's home.
+
+## `[ext.<name>]`
+
+One block per extension. Core ships none; the optional `judge` extension reads
+`[ext.judge]`. An extension owns its key names, so core's lint checks these
+blocks for **shape only**: every value must still be a quoted string, a bare
+boolean, or a bare integer, and arrays, inline tables, and unquoted strings
+hard-error as they do anywhere else. An unknown key inside `[ext.judge]` is not
+a core error; `vaultmem judge doctor` validates the names.
+
+An `[ext.<name>]` block never registers a vault and never affects routing.
+
+```toml
+[ext.judge]
+enabled = true            # default false; the master switch
+
+[vault.personal]
+path = "~/Obsidian/Personal"
+judge = true              # default false; egress consent, per vault
+```
+
+`vaultmem judge config` prints what core parsed, with defaults filled in, as
+`ext.judge.<key>=<value>` lines followed by one `vault.<id>.judge=true|false`
+line per vault. Core answers it with or without the extension installed, and
+with or without a config file, so it is also the quickest way to check what the
+extension will see. The `[ext.judge]` keys and their defaults are documented in
+[judge.md](judge.md).
 
 ## `which` routing
 

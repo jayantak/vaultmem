@@ -2847,3 +2847,383 @@ seed_git_state_session() { # $1=vault root $2=thread $3=git-state-block $4=statu
   [ "$status" -ne 0 ]
   [[ "$output" == *"--format wants cli|json"* ]]
 }
+
+# --- judge extension shim (core side) -------------------------------------------
+# Core never runs the real extension here: every test points the resolver at a
+# stub under $BATS_TEST_TMPDIR. `judge_isolate` also copies the script out of the
+# repo, so the third resolution step (<script dir>/ext/) cannot find a real
+# ext/judge/ in the tree.
+judge_isolate() {
+  export XDG_DATA_HOME="$BATS_TEST_TMPDIR/data"
+  unset VAULTMEM_EXT_DIR
+  mkdir -p "$BATS_TEST_TMPDIR/real"
+  cp "$OM" "$BATS_TEST_TMPDIR/real/vaultmem"
+  JOM="$BATS_TEST_TMPDIR/real/vaultmem"
+}
+
+# Stub extension at <dir>/judge/vaultmem-judge. It records that it ran, its
+# args, its stdin (with STUB_STDIN=1), and the env core handed it, then exits with $3 (default 0).
+judge_stub() { # $1 = ext dir, $2 = tag, $3 = exit code
+  mkdir -p "$1/judge"
+  cat >"$1/judge/vaultmem-judge" <<EOF
+#!/usr/bin/env bash
+{
+  printf 'tag=%s\n' "$2"
+  printf 'args=%s\n' "\$*"
+  printf 'bin=%s\n' "\$VAULTMEM_BIN"
+  printf 'config=%s\n' "\$VAULTMEM_CONFIG"
+  # Read stdin only when a test pipes state in: an inherited, never-closed
+  # stdin would otherwise hang the stub.
+  if [ -n "\${STUB_STDIN:-}" ]; then printf 'stdin=%s\n' "\$(cat)"; fi
+} >"$BATS_TEST_TMPDIR/stub.ran"
+exit ${3:-0}
+EOF
+  chmod +x "$1/judge/vaultmem-judge"
+}
+
+judge_config_on() { # $1 = enabled value, $2 = jay's judge value
+  cat >"$VAULTMEM_CONFIG" <<EOF
+[ext.judge]
+enabled = $1
+
+[vault.flo]
+path = "$OBS_FLO"
+
+[vault.jay]
+path = "$OBS_JAY"
+judge = $2
+EOF
+}
+
+@test "judge config prints the frozen format with defaults filled in" {
+  judge_isolate
+  export HOME="$BATS_TEST_TMPDIR/home"
+  run "$JOM" judge config
+  [ "$status" -eq 0 ]
+  expected="ext.judge.enabled=false
+ext.judge.model=typesafe-ai/jev
+ext.judge.base_url=https://ai-gateway.vercel.sh
+ext.judge.zdr=true
+ext.judge.timeout_ms=1500
+ext.judge.key_file=$BATS_TEST_TMPDIR/home/.config/vaultmem/ai-gateway.key
+ext.judge.log=true
+ext.judge.rerank=false
+ext.judge.hook_judges=
+vault.flo.judge=false
+vault.jay.judge=false"
+  [ "$output" = "$expected" ]
+}
+
+@test "judge config reflects [ext.judge] keys and per-vault judge flags" {
+  judge_isolate
+  export HOME="$BATS_TEST_TMPDIR/home"
+  cat >"$VAULTMEM_CONFIG" <<EOF
+[ext.judge]
+enabled = true
+zdr = false                 # owner's plan refuses ZDR
+timeout_ms = 900
+key_file = "~/keys/gw.key"
+hook_judges = "nudge,groom"
+future_key = "kept"
+
+[vault.flo]
+path = "$OBS_FLO"
+judge = false
+
+[vault.jay]
+path = "$OBS_JAY"
+judge = true
+EOF
+  run "$JOM" judge config
+  [ "$status" -eq 0 ]
+  expected="ext.judge.enabled=true
+ext.judge.model=typesafe-ai/jev
+ext.judge.base_url=https://ai-gateway.vercel.sh
+ext.judge.zdr=false
+ext.judge.timeout_ms=900
+ext.judge.key_file=$BATS_TEST_TMPDIR/home/keys/gw.key
+ext.judge.log=true
+ext.judge.rerank=false
+ext.judge.hook_judges=nudge,groom
+ext.judge.future_key=kept
+vault.flo.judge=false
+vault.jay.judge=true"
+  [ "$output" = "$expected" ]
+  # The extended config is inside the accepted subset.
+  run "$JOM" doctor
+  [[ "$output" != *"Config errors"* ]]
+}
+
+@test "judge config is answered by core: no config file, no vault, no extension" {
+  judge_isolate
+  export VAULTMEM_CONFIG="$BATS_TEST_TMPDIR/absent.toml"
+  export XDG_CONFIG_HOME="$BATS_TEST_TMPDIR/xdg"
+  unset OBS_FLO OBS_JAY VAULTMEM_VAULT
+  run "$JOM" judge config
+  [ "$status" -eq 0 ]
+  [ "${lines[0]}" = "ext.judge.enabled=false" ]
+  [ "${lines[8]}" = "ext.judge.hook_judges=" ]
+  [ "${#lines[@]}" -eq 9 ]
+  [[ "$output" != *"vault."* ]]
+}
+
+@test "judge config is never forwarded to an installed extension" {
+  judge_isolate
+  export VAULTMEM_EXT_DIR="$BATS_TEST_TMPDIR/extdir"
+  judge_stub "$VAULTMEM_EXT_DIR" envdir
+  run "$JOM" judge config
+  [ "$status" -eq 0 ]
+  [ "${lines[0]}" = "ext.judge.enabled=false" ]
+  [ ! -e "$BATS_TEST_TMPDIR/stub.ran" ]
+}
+
+@test "doctor hard-errors on a non-boolean vault judge value" {
+  cat >"$VAULTMEM_CONFIG" <<EOF
+[vault.jay]
+path = "$OBS_JAY"
+judge = "true"
+EOF
+  run "$OM" doctor
+  [ "$status" -ne 0 ]
+  [[ "$output" == *'"judge" in [vault.jay] must be true or false'* ]]
+  cat >"$VAULTMEM_CONFIG" <<EOF
+[vault.jay]
+path = "$OBS_JAY"
+judge = 1
+EOF
+  run "$OM" doctor
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"must be true or false"* ]]
+}
+
+@test "doctor hard-errors on a nested ext section" {
+  cat >"$VAULTMEM_CONFIG" <<EOF
+[vault.jay]
+path = "$OBS_JAY"
+
+[ext.judge.sub]
+enabled = true
+EOF
+  run "$OM" doctor
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"nested section [ext.judge.sub]"* ]]
+}
+
+@test "doctor hard-errors on a bare [ext] section" {
+  cat >"$VAULTMEM_CONFIG" <<EOF
+[vault.jay]
+path = "$OBS_JAY"
+
+[ext]
+enabled = true
+EOF
+  run "$OM" doctor
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"unknown or nested section [ext]"* ]]
+}
+
+@test "doctor hard-errors on malformed values in an ext section" {
+  cat >"$VAULTMEM_CONFIG" <<EOF
+[vault.jay]
+path = "$OBS_JAY"
+
+[ext.judge]
+model = typesafe-ai/jev
+hook_judges = ["nudge"]
+EOF
+  run "$OM" doctor
+  [ "$status" -ne 0 ]
+  [[ "$output" == *'unquoted string value for "model"'* ]]
+  [[ "$output" == *'arrays/inline-tables not supported ("hook_judges")'* ]]
+}
+
+@test "doctor does not validate key names inside an ext section" {
+  cat >"$VAULTMEM_CONFIG" <<EOF
+[vault.jay]
+path = "$OBS_JAY"
+
+[ext.judge]
+not_a_real_key = "fine"
+
+[ext.other-ext]
+whatever = 3
+EOF
+  run "$OM" doctor
+  [[ "$output" != *"Config errors"* ]]
+  [[ "$output" != *"unknown key"* ]]
+}
+
+@test "an [ext.*] section registers no vault" {
+  judge_config_on true true
+  run "$OM" vaults
+  [ "$status" -eq 0 ]
+  [ "${#lines[@]}" -eq 2 ]
+  [[ "$output" != *"ext"* ]]
+}
+
+@test "judge: not installed prints one stderr line and exits 3" {
+  judge_isolate
+  run "$JOM" judge list
+  [ "$status" -eq 3 ]
+  [ "${#lines[@]}" -eq 1 ]
+  [[ "$output" == *'extension "judge" is not installed'* ]]
+  # The line is on stderr; stdout stays empty.
+  run bash -c '"$0" judge list 2>/dev/null' "$JOM"
+  [ "$status" -eq 3 ]
+  [ -z "$output" ]
+}
+
+@test "judge: never resolves the extension from PATH" {
+  judge_isolate
+  mkdir -p "$BATS_TEST_TMPDIR/pathbin"
+  printf '#!/usr/bin/env bash\ntouch "%s/path.ran"\n' "$BATS_TEST_TMPDIR" >"$BATS_TEST_TMPDIR/pathbin/vaultmem-judge"
+  chmod +x "$BATS_TEST_TMPDIR/pathbin/vaultmem-judge"
+  PATH="$BATS_TEST_TMPDIR/pathbin:$PATH" run "$JOM" judge list
+  [ "$status" -eq 3 ]
+  [ ! -e "$BATS_TEST_TMPDIR/path.ran" ]
+}
+
+@test "judge: resolution order is VAULTMEM_EXT_DIR, then XDG data dir, then the script dir" {
+  judge_isolate
+  judge_stub "$BATS_TEST_TMPDIR/real/ext" scriptdir
+  run "$JOM" judge list
+  [ "$status" -eq 0 ]
+  grep -qx 'tag=scriptdir' "$BATS_TEST_TMPDIR/stub.ran"
+
+  judge_stub "$XDG_DATA_HOME/vaultmem/ext" xdg
+  run "$JOM" judge list
+  grep -qx 'tag=xdg' "$BATS_TEST_TMPDIR/stub.ran"
+
+  export VAULTMEM_EXT_DIR="$BATS_TEST_TMPDIR/extdir"
+  judge_stub "$VAULTMEM_EXT_DIR" envdir
+  run "$JOM" judge list
+  grep -qx 'tag=envdir' "$BATS_TEST_TMPDIR/stub.ran"
+
+  # A VAULTMEM_EXT_DIR without the extension falls through to the next step.
+  export VAULTMEM_EXT_DIR="$BATS_TEST_TMPDIR/empty"
+  run "$JOM" judge list
+  grep -qx 'tag=xdg' "$BATS_TEST_TMPDIR/stub.ran"
+}
+
+@test "judge: the script-dir step resolves symlinks, and VAULTMEM_BIN is the real absolute path" {
+  judge_isolate
+  judge_stub "$BATS_TEST_TMPDIR/real/ext" scriptdir
+  mkdir -p "$BATS_TEST_TMPDIR/bin"
+  ln -s ../real/vaultmem "$BATS_TEST_TMPDIR/bin/vaultmem"
+  run "$BATS_TEST_TMPDIR/bin/vaultmem" judge list
+  [ "$status" -eq 0 ]
+  grep -qx 'tag=scriptdir' "$BATS_TEST_TMPDIR/stub.ran"
+  real="$(cd -P "$BATS_TEST_TMPDIR/real" && pwd)/vaultmem"
+  grep -qx "bin=$real" "$BATS_TEST_TMPDIR/stub.ran"
+  grep -qx "config=$VAULTMEM_CONFIG" "$BATS_TEST_TMPDIR/stub.ran"
+}
+
+@test "judge: args after the subcommand reach the extension verbatim, with stdin and its exit code" {
+  judge_isolate
+  export VAULTMEM_EXT_DIR="$BATS_TEST_TMPDIR/extdir"
+  judge_stub "$VAULTMEM_EXT_DIR" envdir 2
+  # --vault / --format / -n / -h are core flags everywhere else; after `judge`
+  # they belong to the extension.
+  STUB_STDIN=1 run bash -c 'printf "the state" | "$0" judge groom-triage --vault jay --format json -n 5 -h' "$JOM"
+  [ "$status" -eq 2 ]
+  grep -qx 'args=groom-triage --vault jay --format json -n 5 -h' "$BATS_TEST_TMPDIR/stub.ran"
+  grep -qx 'stdin=the state' "$BATS_TEST_TMPDIR/stub.ran"
+}
+
+@test "judge: runs the extension with no vault configured (the extension decides)" {
+  judge_isolate
+  export VAULTMEM_EXT_DIR="$BATS_TEST_TMPDIR/extdir"
+  judge_stub "$VAULTMEM_EXT_DIR" envdir 3
+  export VAULTMEM_CONFIG="$BATS_TEST_TMPDIR/absent.toml"
+  export XDG_CONFIG_HOME="$BATS_TEST_TMPDIR/xdg"
+  unset OBS_FLO OBS_JAY VAULTMEM_VAULT
+  run "$JOM" judge doctor
+  [ "$status" -eq 3 ]
+  [[ "$output" != *"no vault configured"* ]]
+  [ -e "$BATS_TEST_TMPDIR/stub.ran" ]
+}
+
+@test "_judge returns 3 without running the extension when [ext.judge] is disabled" {
+  judge_isolate
+  export VAULTMEM_EXT_DIR="$BATS_TEST_TMPDIR/extdir"
+  judge_stub "$VAULTMEM_EXT_DIR" envdir
+  judge_config_on false true
+  run bash -c 'printf state | "$0" _judge nudge jay' "$JOM"
+  [ "$status" -eq 3 ]
+  [ -z "$output" ]
+  [ ! -e "$BATS_TEST_TMPDIR/stub.ran" ]
+  # Absent [ext.judge] is the same as disabled.
+  printf '[vault.jay]\npath = "%s"\njudge = true\n' "$OBS_JAY" >"$VAULTMEM_CONFIG"
+  run bash -c 'printf state | "$0" _judge nudge jay' "$JOM"
+  [ "$status" -eq 3 ]
+  [ ! -e "$BATS_TEST_TMPDIR/stub.ran" ]
+}
+
+@test "_judge returns 3 without running the extension for a vault without judge = true" {
+  judge_isolate
+  export VAULTMEM_EXT_DIR="$BATS_TEST_TMPDIR/extdir"
+  judge_stub "$VAULTMEM_EXT_DIR" envdir
+  judge_config_on true true
+  for v in flo nosuch ""; do
+    run bash -c 'printf state | "$0" _judge nudge "$1"' "$JOM" "$v"
+    [ "$status" -eq 3 ]
+    [ ! -e "$BATS_TEST_TMPDIR/stub.ran" ]
+  done
+}
+
+@test "_judge runs the extension with --vault <id> and state on stdin when enabled" {
+  judge_isolate
+  export VAULTMEM_EXT_DIR="$BATS_TEST_TMPDIR/extdir"
+  judge_stub "$VAULTMEM_EXT_DIR" envdir 1
+  judge_config_on true true
+  STUB_STDIN=1 run bash -c 'printf "session text" | "$0" _judge nudge jay --gate work_happened' "$JOM"
+  [ "$status" -eq 1 ]
+  grep -qx 'args=nudge --vault jay --gate work_happened' "$BATS_TEST_TMPDIR/stub.ran"
+  grep -qx 'stdin=session text' "$BATS_TEST_TMPDIR/stub.ran"
+}
+
+@test "_judge returns 3 when enabled but the extension is not installed" {
+  judge_isolate
+  judge_config_on true true
+  run bash -c 'printf state | "$0" _judge nudge jay 2>/dev/null' "$JOM"
+  [ "$status" -eq 3 ]
+  [ -z "$output" ]
+}
+
+@test "usage documents the judge subcommand" {
+  run "$OM" -h
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"vaultmem judge config"* ]]
+  [[ "$output" == *"vaultmem judge calibration"* ]]
+  [[ "$output" == *"planned → active → done"* ]]
+}
+
+@test "install.sh --ext skips cleanly when the extension is not in the tree" {
+  mkdir -p "$BATS_TEST_TMPDIR/rel"
+  cp "$ROOT/install.sh" "$ROOT/vaultmem" "$BATS_TEST_TMPDIR/rel/"
+  XDG_DATA_HOME="$BATS_TEST_TMPDIR/data" run "$BATS_TEST_TMPDIR/rel/install.sh" --prefix "$BATS_TEST_TMPDIR/prefix" --ext judge
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"no ext/judge directory"* ]]
+  [ ! -e "$BATS_TEST_TMPDIR/data/vaultmem/ext/judge" ]
+}
+
+@test "install.sh --ext links the extension where vaultmem resolves it" {
+  mkdir -p "$BATS_TEST_TMPDIR/rel"
+  cp "$ROOT/install.sh" "$ROOT/vaultmem" "$BATS_TEST_TMPDIR/rel/"
+  judge_stub "$BATS_TEST_TMPDIR/rel/ext" shipped
+  export XDG_DATA_HOME="$BATS_TEST_TMPDIR/data"
+  run "$BATS_TEST_TMPDIR/rel/install.sh" --prefix "$BATS_TEST_TMPDIR/prefix" --ext judge
+  [ "$status" -eq 0 ]
+  [ -L "$XDG_DATA_HOME/vaultmem/ext/judge" ]
+  # The installed copy has no ext/ beside it, so this resolves through XDG.
+  run "$BATS_TEST_TMPDIR/prefix/bin/vaultmem" judge list
+  [ "$status" -eq 0 ]
+  grep -qx 'tag=shipped' "$BATS_TEST_TMPDIR/stub.ran"
+}
+
+@test "install.sh --ext rejects a path-like extension name" {
+  mkdir -p "$BATS_TEST_TMPDIR/rel"
+  cp "$ROOT/install.sh" "$ROOT/vaultmem" "$BATS_TEST_TMPDIR/rel/"
+  XDG_DATA_HOME="$BATS_TEST_TMPDIR/data" run "$BATS_TEST_TMPDIR/rel/install.sh" --prefix "$BATS_TEST_TMPDIR/prefix" --ext ../judge
+  [ "$status" -eq 2 ]
+}
