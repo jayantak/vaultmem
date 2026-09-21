@@ -43,7 +43,8 @@ Naming: this repo already uses "plugin" for the Claude Code plugin
 6. **Deterministic logic stays in bash.** The model is weak at dates, counting,
    and arithmetic. Age thresholds, line counts, and link counts are computed by
    core and are never delegated.
-7. No state beyond an append-only decision log (section 9). No cache, no index.
+7. No state beyond an append-only decision log, kept to one rotated generation
+   (section 9). No cache, no index.
 
 ## 4. Gateway API (from Vercel docs, then verified live 2026-09-21)
 
@@ -152,7 +153,8 @@ both return 200. The extension detects this case by
 "permission_denied"`), reports unavailable, and **never retries without the
 flag.** With `zdr = true` as the default, the extension is unavailable on a
 Hobby plan until the owner upgrades or sets `zdr = false` (section 14,
-question 4). The model entry in `/v1/models` has `"zdr":"all"` and
+question 4, since answered: the owner sets `zdr = false`). The model entry in
+`/v1/models` has `"zdr":"all"` and
 `"no_training":"all"`: every provider supports ZDR; the plan is the gate.
 
 **Model pinning: none.**
@@ -328,6 +330,12 @@ judge = true                        # default false. Egress consent, per vault.
 judge = false
 ```
 
+- `zdr` is global, not per vault. The shipped default is `true` and the
+  extension never downgrades it. An owner on a plan without ZDR (verified:
+  Hobby gets 403) sets `zdr = false` in their own `[ext.judge]`, knowingly; the
+  owner of this repo has decided to do so for the personal vault (section 14,
+  question 4). Because the key is global, per-vault protection comes from
+  `judge`: a work vault stays `judge = false`.
 - Core lint validates `[ext.<name>]` values for **shape only** (the restricted
   TOML subset). Key names inside `[ext.judge]` are validated by
   `vaultmem judge doctor`, which `vaultmem doctor` runs when the extension is
@@ -351,13 +359,19 @@ Vault content, session notes, and transcripts leave the machine. Rules:
    left out of the request and keep their ripgrep order below the reranked set.
 4. `zdr = true` by default. A gateway refusal of the flag is "unavailable".
    Verified: Hobby plans are refused with 403 `permission_denied` before any
-   provider is contacted.
+   provider is contacted. The only way to send without ZDR is an explicit
+   `zdr = false` in the user's `[ext.judge]`; the extension never sets it,
+   suggests it at runtime, or retries without the flag. `zdr` is global, so
+   with `zdr = false` every consenting vault sends without ZDR. Consent stays
+   per vault through `judge`.
 5. The decision log stores a SHA-256 of the state, never the state.
 6. Judged text is untrusted input. Notes and transcripts can contain text aimed
    at the model ("answer yes"). This is one reason for constraint 3.5: no
    judgment ever triggers a write or a move.
 
-A work vault stays `judge = false` until its owner approves the vendor.
+A work vault stays `judge = false` until its owner approves the vendor. That
+holds regardless of `zdr`: the owner's `zdr = false` decision covers the
+personal vault only, and `judge = false` is what keeps work content local.
 
 ## 8. Integration points
 
@@ -471,7 +485,15 @@ own entry in `hook_judges` and the consenting-vault rule (vault = `which $PWD`).
  "latency_ms":212,"http":200,"feedback":null}
 ```
 
-`feedback right|wrong` appends a feedback row keyed by id (the log stays
+Rotation: before each append, if `judge.jsonl` is 5 MiB or larger, move it to
+`judge.jsonl.1`, replacing any older `.1`, then append to a fresh live file. One
+generation, so the log is bounded at about 10 MiB. The limit is a constant in
+the extension, not a config key; `VAULTMEM_JUDGE_LOG_MAX_BYTES` overrides it
+for tests only. `log`, `feedback`, and `calibration` read `.1` first, then the
+live file, so ids and feedback rows that straddle a rotation still resolve.
+A row that has rotated out of `.1` is gone, along with any feedback on it.
+
+`feedback right|wrong` appends a feedback row keyed by id (each file stays
 append-only). `calibration` buckets judged probabilities against feedback. This
 is the only evidence that vendor calibration holds for this data, so wire
 `groom --judge` to print each row's id.
@@ -505,6 +527,9 @@ not by feel. `vaultmem judge bench` makes that real:
   - threshold mapping to exit 0 / 1 / 2.
   - request bodies match golden files per judge.
   - the key never appears in argv, stdout, stderr, or the log.
+  - log rotation, with `VAULTMEM_JUDGE_LOG_MAX_BYTES` set small: the live file
+    moves to `.1`, an older `.1` is replaced, and `log` / `feedback` /
+    `calibration` still see rows on both sides.
   - `BASH=/bin/bash bats …` passes; `bash32-lint.sh` covers `ext/`.
 - A live smoke test (`judge doctor --live`) runs only when a key is present and
   never in CI.
@@ -538,12 +563,14 @@ One PR per phase. Phase 1 must not change any existing command's output.
 1. `[vault.<id>] description` as a new registry key for routing criteria: accept?
 2. Should `hook_judges` default to empty (nothing runs in hooks until named)?
    This design assumes yes.
-3. Decision-log retention: unbounded append, or rotate at a size?
-4. **Now a real decision.** Verified: ZDR needs Pro or Enterprise; the owner's
-   team is Hobby and gets 403. Either upgrade the team, or accept `zdr = false`
-   for the personal vault. Until one happens the extension is unavailable with
-   the default config. The model lists `"no_training":"all"`, which covers
-   training but not retention.
+3. Answered 2026-09-21: the decision log rotates. One generation at 5 MiB, a
+   constant and not a config key (section 9).
+4. Answered 2026-09-21: the owner accepts `zdr = false` for the personal vault
+   and stays on Hobby (verified: ZDR needs Pro or Enterprise; Hobby gets 403).
+   The shipped default stays `zdr = true` and is never auto-downgraded; the
+   owner sets `zdr = false` in their own `[ext.judge]`. `zdr` is global, not
+   per vault, and a work vault stays `judge = false` (sections 6 and 7). The
+   model lists `"no_training":"all"`, which covers training but not retention.
 5. Answered: the gateway needs a card on file even for free credits (403
    `customer_verification_required`). The owner added one on 2026-09-21.
 
