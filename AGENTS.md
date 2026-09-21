@@ -35,7 +35,7 @@ No build step (bash script, nothing to compile). Before committing:
 
 ```bash
 bats tests/vaultmem.bats            # unit tests over the CLI (registry, search, graph, lifecycle)
-BASH=/bin/bash bats tests/vaultmem.bats   # …again under macOS system bash 3.2 (see below)
+d=$(mktemp -d) && ln -s /bin/bash "$d/bash" && PATH="$d:$PATH" bats tests/vaultmem.bats   # …again under macOS system bash 3.2 (see below)
 ./tests/subcommand-lint.sh          # every `vaultmem <cmd>` referenced in skills/**/*.md must exist in the dispatch table
 ./tests/bash32-lint.sh              # no bash-4-only constructs (shellcheck cannot see these)
 shellcheck vaultmem install.sh tests/subcommand-lint.sh tests/bash32-lint.sh
@@ -177,8 +177,10 @@ version-locked to the CLI: [docs/plugin.md](docs/plugin.md).
   errors per note and still exited 0. `mapfile` inside a process substitution
   doesn't trip `set -e`, which left `subcommand-lint.sh` passing on an empty
   list. Neither is visible on Homebrew bash 5, and neither is detectable by
-  `shellcheck`. Run `BASH=/bin/bash bats tests/vaultmem.bats` +
-  `./tests/bash32-lint.sh`; see [docs/development.md](docs/development.md).
+  `shellcheck`. Run the suite with a `bash` → `/bin/bash` symlink first on
+  `PATH` (the command above) + `./tests/bash32-lint.sh`. `BASH=/bin/bash bats …`
+  does nothing: bash resets `$BASH` at startup, so the suite still runs on
+  bash 5. See [docs/development.md](docs/development.md).
 - **`shellcheck` disables at the top of `vaultmem` are load-bearing, not
   boilerplate** — SC2016 (backticks in the usage/help text are literal, not
   command substitution) and SC2012 (the MOC listing intentionally uses `ls`
