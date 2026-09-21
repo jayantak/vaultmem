@@ -45,7 +45,7 @@ Naming: this repo already uses "plugin" for the Claude Code plugin
    core and are never delegated.
 7. No state beyond an append-only decision log (section 9). No cache, no index.
 
-## 4. Gateway API (verified from Vercel docs, 2026-09-21)
+## 4. Gateway API (from Vercel docs, then verified live 2026-09-21)
 
 Use the provider-neutral endpoint, not the TypeSafe-compatible one. It accepts
 `providerOptions` (needed for zero data retention) and keeps the door open to
@@ -95,7 +95,7 @@ Errors (verified live, see below): an HTTP status plus
 
 The envelope is OpenAI-style, nested under `error`, and the discriminator is
 `type`. Vercel's docs show a flat `{ "message", "error_type" }` object; the live
-gateway does not return that. `param` is absent on the billing error.
+gateway does not return that.
 
 Naming differs from TypeSafe's native API: there the yes/no type is `noul` and
 its answer field is also `noul`; here they are `boolean` and `probability`, and
@@ -106,58 +106,98 @@ longest question, text only, up to 255 choice options, 2 to 10 score levels,
 1,200 requests/min. Input $0.042/M tokens, output free. Typical latency ~100ms
 (vendor claim).
 
-### Verified 2026-09-21 (partial: the account has no card on file)
+### Verified 2026-09-21
 
 Throwaway `curl` calls against `https://ai-gateway.vercel.sh` with synthetic
-state only. The key authenticates, but the gateway refuses every evaluation
-until the Vercel team has a credit card on file, so no evaluation has succeeded
-yet. What follows is split into facts and what is still open.
+state only ("The build failed with exit code 1."), on a **Hobby** plan team with
+a card on file and $5 of gateway credit.
 
-Facts:
+**Success shape (200).** Matches the example above, with these differences:
 
-- **Error envelope.** `{"error":{"message","param","type"}}`, corrected above.
-- **Check order on `POST /v1/evaluate`:** request schema (400), then
-  authentication (401), then billing (403). A malformed question returns 400
-  even with an invalid key, so a 400 says nothing about the key.
-- **Invalid or missing key:** `401`,
-  `{"error":{"message":"Authentication failed","param":null,"type":"authentication_error"}}`.
-- **Malformed question** (`"type":"bogus"`): `400`,
-  `{"error":{"message":"questions.q.type: Invalid discriminator value. Expected 'boolean' | 'choice' | 'score'","param":null,"type":"invalid_request_error"}}`.
-  This confirms the three gateway type names.
-- **Body is not JSON:** `400`,
-  `{"error":{"message":"Invalid JSON in request body","param":null,"type":"invalid_request_error"}}`.
-- **Valid key, no card on file:** `403`,
-  `{"error":{"message":"AI Gateway requires a valid credit card on file to service requests. ...","type":"customer_verification_required"}}`
-  (no `param` key). Returned for a well-formed request with or without
-  `providerOptions.gateway.zeroDataRetention`, and also for an unknown model
-  slug, so the billing check runs before model resolution and before any ZDR
-  plan check.
-- **No version-pinned slug is listed.** `GET /typesafe/v1/models` (200) returns
-  exactly one model: `{"name":"jev","release_date":"2026-09-15"}` plus a
-  description. `GET /v1/models` (200, needs no auth) lists exactly one
-  `typesafe-ai/*` id: `typesafe-ai/jev`. Its entry carries `"type":"evaluation"`,
-  `"context_window":32000`, `"max_tokens":0`, `"zdr":"all"`,
-  `"no_training":"all"`, `"released":1789430400`, and pricing
-  `"input":"0.000000042"`, `"output":"0"` per token, which matches $0.042/M
-  input and free output. `release_date` / `released` is the only version signal
-  the gateway exposes; `judge doctor --live` and the bench should record it.
-- `"zdr":"all"` says every provider of this model supports zero data retention.
-  It does not say whether this account's plan may request it.
+- `choice` and `score` answers carry an extra `confidence` number. `boolean`
+  answers do not. Live answers from one request:
+  `{"type":"choice","choice":"failed","probabilities":{"passed":0,"failed":1,"skipped":0},"confidence":1}`
+  and
+  `{"type":"score","score":1.99,"probabilities":{"0":0,"1":0.01,"2":0.99},"confidence":0.99}`.
+- `score` `probabilities` keys are the **zero-based index of the criteria
+  array, as strings** (`"0"`, `"1"`, `"2"`), not the criteria text. `score` is
+  the probability-weighted index. `choice` `probabilities` keys are the criteria
+  keys; their order is not the request order, so never index by position.
+- `boolean`: `{"type":"boolean","probability":0.99}`, as documented.
+- `providerMetadata` also has `typesafe.confidence` (a map of question name to
+  confidence; empty for boolean-only requests), and `gateway` carries `routing`
+  (attempts, provider, per-attempt `startTime`/`endTime`), `cost`, `marketCost`,
+  `surchargeCost`, `gatewayCost`, `generationId`. On these calls `cost` was
+  `"0"` and `marketCost` was `"0.000012768"` for 304 input tokens, and
+  `GET /v1/credits` still read `{"balance":"5","total_used":"0"}` after ~15
+  calls. Log `marketCost` as well as `cost`.
+- A one-line state plus one boolean question is 304 input tokens and 20 output
+  tokens; adding a choice and a score question made it 392 / 53. The per-request
+  overhead is about 300 tokens.
 
-Still unverified, all blocked on the card:
+**Zero data retention: refused on Hobby.** `zeroDataRetention: true` returns
+`403`:
 
-- The success response shape. The response example above is still from
-  Vercel's docs.
-- Whether `zeroDataRetention: true` is accepted on this plan. The rule
-  stands: if the gateway rejects the flag, the extension reports unavailable.
-  **Never retry without the flag.**
-- Whether the evaluate response ever reports a versioned
-  model id, and whether an unlisted slug such as `typesafe-ai/jev-1.13.0`
-  resolves. If no pin exists, the bench (section 10) is the drift detector.
-- The `choice` and `score` answer shapes and the `score`
-  `probabilities` key format.
-- Latency. All latency and calibration numbers remain vendor or blog
-  claims.
+```json
+{"error":{"message":"Zero Data Retention (ZDR) is only available for Pro and Enterprise plans. Current plan: hobby. ...",
+  "type":"permission_denied",
+  "param":{"name":"ZdrUnauthorizedError","statusCode":403,"type":"permission_denied","error":"...","message":"..."}},
+ "providerMetadata":{"gateway":{"routing":{...,"totalProviderAttemptCount":0},"generationId":"gen_..."}}}
+```
+
+No provider was attempted (`totalProviderAttemptCount: 0`), so nothing left the
+gateway. `zeroDataRetention: false` and `only: ["typesafe-ai"]` without the flag
+both return 200. The extension detects this case by
+`.error.param.name == "ZdrUnauthorizedError"` (or `.error.type ==
+"permission_denied"`), reports unavailable, and **never retries without the
+flag.** With `zdr = true` as the default, the extension is unavailable on a
+Hobby plan until the owner upgrades or sets `zdr = false` (section 14,
+question 4). The model entry in `/v1/models` has `"zdr":"all"` and
+`"no_training":"all"`: every provider supports ZDR; the plan is the gate.
+
+**Model pinning: none.**
+
+- `GET /typesafe/v1/models` (200) returns one model:
+  `{"name":"jev","release_date":"2026-09-15"}` plus a description.
+- `GET /v1/models` (200, needs no auth) lists one `typesafe-ai/*` id,
+  `typesafe-ai/jev`, with `"type":"evaluation"`, `"context_window":32000`,
+  `"max_tokens":0`, `"released":1789430400`, and pricing
+  `"input":"0.000000042"`, `"output":"0"` per token ($0.042/M input).
+- `typesafe-ai/jev-1.13.0` and `typesafe-ai/jev-1` return `404`
+  `{"error":{"message":"Model '...' not found","type":"model_not_found","param":{"modelId":"..."}}}`.
+- The evaluate response reports `"model":"typesafe-ai/jev"` and
+  `routing.canonicalSlug: "typesafe-ai/jev"`. No versioned id appears anywhere
+  in the response.
+- So model drift is invisible per call. `release_date` from the models listing
+  is the only version signal: `judge doctor --live` and `bench` record it, and
+  the bench (section 10) is the drift detector.
+
+**Errors.** Envelope as corrected above. `param` is `null`, an object, or
+absent depending on the error, so never assume its type.
+
+| Case | Status | `.error.type` | `.error.message` |
+|---|---|---|---|
+| Invalid or missing key | 401 | `authentication_error` | `Authentication failed` |
+| Unknown question `type` | 400 | `invalid_request_error` | `questions.q.type: Invalid discriminator value. Expected 'boolean' \| 'choice' \| 'score'` |
+| Body is not JSON | 400 | `invalid_request_error` | `Invalid JSON in request body` |
+| Unknown model slug | 404 | `model_not_found` | `Model '<slug>' not found` |
+| ZDR on Hobby plan | 403 | `permission_denied` | `Zero Data Retention (ZDR) is only available for Pro and Enterprise plans. ...` |
+| No card on file | 403 | `customer_verification_required` | `AI Gateway requires a valid credit card on file to service requests. ...` |
+
+The request schema is checked before authentication: a malformed question
+returns 400 even with an invalid key, so a 400 says nothing about the key. The
+card check applies even to the free credits, and while it fails it masks the
+404 and the ZDR 403.
+
+**Timing.** Ten sequential one-question calls, a fresh TLS connection each, from
+a US residential link: median 394 ms, max 488 ms, min 346 ms total. The
+gateway's own provider leg (`routing...endTime - startTime`) was 130 to 147 ms,
+so the vendor's ~100 ms is the model alone and the rest is gateway plus
+network. `timeout_ms = 1500` leaves about 3x headroom over the observed max.
+Informational; no large-state call was timed.
+
+Not checked: calibration, rate limits, and latency with state near
+`max_state_bytes`.
 
 ## 5. Architecture
 
@@ -229,16 +269,22 @@ Exit codes (the contract core and hooks rely on):
 | 0 | ok; with `--gate`, the answer is yes (probability ≥ `yes` threshold) |
 | 1 | `--gate` only: the answer is no (probability ≤ `no` threshold) |
 | 2 | abstain: between thresholds, or top choice probability below `min_confidence` |
-| 3 | unavailable: disabled, not installed, no key, egress denied, timeout, HTTP error (verified: 400, 401, 403), bad response |
+| 3 | unavailable: disabled, not installed, no key, egress denied, timeout, HTTP error (verified: 400, 401, 403, 404), bad response |
 | 64 | usage error |
 
 Without `--gate`, stdout is the normalized answers JSON and the code is 0 or 3.
 
 Every non-2xx maps to 3. The extension reads `.error.type` and `.error.message`
 (section 4) for the log and for `judge doctor --live`, which must print them:
-`authentication_error` (401) and `customer_verification_required` (403, no card
-on file) are setup faults the owner has to fix, and a silent exit 3 hides them.
-A 400 `invalid_request_error` means a bad judge file, not a bad key.
+`authentication_error` (401), `customer_verification_required` (403, no card on
+file), `permission_denied` (403, ZDR on a Hobby plan), and `model_not_found`
+(404) are setup faults the owner has to fix, and a silent exit 3 hides them. A
+400 `invalid_request_error` means a bad judge file, not a bad key.
+
+Normalized answers keep the gateway fields, including `confidence` on `choice`
+and `score`. `min_confidence` compares against the top choice's probability, as
+the table says, not against `confidence`; the two were equal in the verified
+call but nothing documents that they always are.
 
 ### 5.3 Judge files
 
@@ -268,7 +314,7 @@ atomic question each, positive phrasing, no double negatives, explicit
 enabled = true                      # default false. Master switch.
 model = "typesafe-ai/jev"
 base_url = "https://ai-gateway.vercel.sh"
-zdr = true                          # default true. Sends zeroDataRetention. Never auto-downgraded.
+zdr = true                          # default true. Sends zeroDataRetention. Never auto-downgraded. Hobby plan: 403.
 timeout_ms = 1500                   # curl --max-time, whole request
 key_file = "~/.config/vaultmem/ai-gateway.key"   # used when AI_GATEWAY_API_KEY is unset
 log = true
@@ -304,6 +350,8 @@ Vault content, session notes, and transcripts leave the machine. Rules:
    on **every** contributing vault; candidates from non-consenting vaults are
    left out of the request and keep their ripgrep order below the reranked set.
 4. `zdr = true` by default. A gateway refusal of the flag is "unavailable".
+   Verified: Hobby plans are refused with 403 `permission_denied` before any
+   provider is contacted.
 5. The decision log stores a SHA-256 of the state, never the state.
 6. Judged text is untrusted input. Notes and transcripts can contain text aimed
    at the model ("answer yes"). This is one reason for constraint 3.5: no
@@ -451,7 +499,7 @@ not by feel. `vaultmem judge bench` makes that real:
   - `judge = false` vault: exit 3 and the curl shim was **not** invoked.
   - mixed-consent search: non-consenting vault's content absent from the
     recorded request body.
-  - timeout, HTTP 4xx/5xx (canned bodies from section 4: 400, 401, 403),
+  - timeout, HTTP 4xx/5xx (canned bodies from section 4: 400, 401, 403, 404),
     malformed JSON, ZDR refusal: exit 3, caller output unchanged, nothing on
     stdout from hooks.
   - threshold mapping to exit 0 / 1 / 2.
@@ -476,7 +524,7 @@ not by feel. `vaultmem judge bench` makes that real:
 
 | Phase | Scope | Done when |
 |---|---|---|
-| 0 | Resolve section 4 unknowns with a throwaway curl. Record findings here. **Partial 2026-09-21:** errors and model listing verified; success shape, ZDR, and timing wait on a card on file. | ZDR behavior and model pinning are known facts |
+| 0 | Resolve section 4 unknowns with a throwaway curl. Record findings here. **Done 2026-09-21.** | ZDR behavior and model pinning are known facts |
 | 1 | Core shim, config keys + lint, `_ext_exec`, `_judge`, extension skeleton, egress gate, exit codes, log, `doctor`, tests with curl shim, `install.sh --ext` | `vaultmem judge <name>` works end to end against the shim; all CI jobs green |
 | 2 | `groom --judge` + `groom-triage` judge, `feedback`, `calibration` | owner runs it on a consenting vault for two weeks and reviews calibration |
 | 3 | `nudge --judge`, `judge route`, `judge dupes` | hook stays silent and under `timeout_ms` in every failure mode |
@@ -491,12 +539,13 @@ One PR per phase. Phase 1 must not change any existing command's output.
 2. Should `hook_judges` default to empty (nothing runs in hooks until named)?
    This design assumes yes.
 3. Decision-log retention: unbounded append, or rotate at a size?
-4. Is a paid Vercel plan acceptable if ZDR requires one? If not, is `zdr = false`
-   acceptable for the personal vault? Still open: Phase 0 could not reach the
-   ZDR check.
-5. The gateway returns 403 `customer_verification_required` until the Vercel
-   team has a credit card on file, even for the free credits. Add a card so
-   Phase 0 can finish?
+4. **Now a real decision.** Verified: ZDR needs Pro or Enterprise; the owner's
+   team is Hobby and gets 403. Either upgrade the team, or accept `zdr = false`
+   for the personal vault. Until one happens the extension is unavailable with
+   the default config. The model lists `"no_training":"all"`, which covers
+   training but not retention.
+5. Answered: the gateway needs a card on file even for free credits (403
+   `customer_verification_required`). The owner added one on 2026-09-21.
 
 ## Sources
 
