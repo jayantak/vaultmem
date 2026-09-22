@@ -215,6 +215,7 @@ vaultmem groom --judge [--format json]
                             (advisory; needs the judge extension and per-vault consent)
 vaultmem doctor             lint the config + flag drifted index rows + vault schema lints
 vaultmem doctor --deep      + vault-wide orphan/unindexed scan (slower; not run by base doctor/groom)
+vaultmem doctor --judge     + judged DRIFT rows (index row no longer describes its note); never changes the exit code
 vaultmem init [--vault <id>]  scaffold a compliant vault skeleton
 vaultmem init --config      write a starter config.toml
 ```

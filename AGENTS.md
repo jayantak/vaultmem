@@ -77,7 +77,9 @@ is advisory only: judging runs after the scan, so it never reaches a move.
 `nudge --judge` adds a second Stop-hook line when `capture-worthy` finds a
 durable decision/root cause in the transcript tail. `search --rerank` reorders
 content hits (never curated rows) by the extension's `rerank` score; any
-failure prints plain ripgrep order.
+failure prints plain ripgrep order. `doctor --judge` adds a `DRIFT` section
+from the `index-drift` judge (Agent-Index rows that no longer describe their
+note).
 
 **Adding usage lines? Bump the `sed` range.** The usage block is printed by a
 hardcoded `sed -n '4,Np' "$0"` in *two* places (the `-h` branch and the no-args
@@ -189,6 +191,9 @@ version-locked to the CLI: [docs/plugin.md](docs/plugin.md).
   `PATH` (the command above) + `./tests/bash32-lint.sh`. `BASH=/bin/bash bats …`
   does nothing: bash resets `$BASH` at startup, so the suite still runs on
   bash 5. See [docs/development.md](docs/development.md).
+- **`doctor --judge` is informational and must never affect the exit code.**
+  `DRIFT` rows print under their own heading; `doctor --judge` exits exactly
+  what `doctor` exits, so a probabilistic lint never breaks CI or a hook.
 - **`shellcheck` disables at the top of `vaultmem` are load-bearing, not
   boilerplate** — SC2016 (backticks in the usage/help text are literal, not
   command substitution) and SC2012 (the MOC listing intentionally uses `ls`
