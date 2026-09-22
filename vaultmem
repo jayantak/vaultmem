@@ -54,6 +54,13 @@
 #                               (non-archived) session still points at it)
 #   vaultmem groom --dry-run    preview groom: print the would-move list + would-flip
 #                               project-index lines; no mv, no writes
+#   vaultmem groom --judge [--format json]
+#                               annotate each cold-parked/stale-active row with a
+#                               `groom-triage` judgment: `→ <choice> <p> · <flags> [<log id>]`,
+#                               or `→ ?` below the confidence floor. Advisory only: nothing
+#                               moves on a judgment. Needs the judge extension enabled and
+#                               `judge = true` on the vault; otherwise rows print as usual.
+#                               Feed the log id back with `vaultmem judge feedback <id>`.
 #   vaultmem status             one-line summary + groom-nudge count (used by the SessionStart hook)
 #   vaultmem nudge              fail-quiet Stop-hook check: vault touched but session note not updated
 #   vaultmem init [--vault <id>]  scaffold a compliant vault skeleton (see SCHEMA.md)
@@ -1298,17 +1305,292 @@ _flip_project_status() { # $1 = Project .md path, $2 = thread
 # `parked` sessions untouched > COLD_DAYS as resume-or-retire triage candidates
 # (never auto-retired — that judgment lives in the session skill).
 #
-# --dry-run ($1): preview only — print the exact would-move list (source →
+# --- groom --judge: state assembly and annotation ------------------------------
+# All of this is advisory scaffolding for `groom --judge` (judge design 8.1).
+# Deterministic facts (age, line counts) are computed here and passed to the
+# model as plain text: it is weak at dates and counting, so it never derives one.
+
+# Line count of $1, whitespace stripped (`wc -l` pads on BSD), 0 when unreadable.
+_note_lines() {
+	local n
+	n=$(wc -l <"$1" 2>/dev/null) || n=0
+	n="${n// /}"
+	printf '%s' "${n:-0}"
+}
+
+# Print the `## Heading` section $2 of file $1, heading line included, stopping
+# at the next heading of the same or higher level. Prints nothing when absent.
+# Same slicing rule as `cat --section`, without its line numbering and errors.
+_note_section() {
+	[ -f "$1" ] || return 0
+	awk -v want="$2" '
+    function level(h,  n){ n=0; while(substr(h,n+1,1)=="#")n++; return n }
+    function norm(s){ sub(/^[[:space:]]+/,"",s); sub(/[[:space:]]+$/,"",s); return s }
+    BEGIN{ w=norm(want); wl=level(w); found=0 }
+    /^#+[[:space:]]/ {
+      if(found && level($0)<=wl){ exit }
+      if(!found && norm($0)==w){ found=1; print; next }
+    }
+    found{ print }
+  ' "$1"
+}
+
+# Print the frontmatter block of $1 (the leading --- ... --- fence, exclusive).
+_note_frontmatter() {
+	[ -f "$1" ] || return 0
+	awk 'NR==1 && $0!="---"{exit} NR==1{next} $0=="---"{exit} {print}' "$1"
+}
+
+# Assemble the state sent to `groom-triage` for one session (design 8.1):
+# frontmatter, ## Bookmark, ## Pinned, ## Git state, the tail of the work log,
+# and the parent Project's ## Decisions. Deterministic facts come in as text.
+# $1 = _index.md path, $2 = vault root, $3 = status label, $4 = age days, $5 = lines
+_groom_judge_state() {
+	local f="$1" root="$2" status="$3" age="$4" lines="$5" sec proj ppath
+	printf 'Session: %s\n' "$(basename "$(dirname "$f")")"
+	printf 'Flagged as: %s\n' "$status"
+	printf 'Days since last update: %s\n' "$age"
+	printf 'Note length in lines: %s\n' "$lines"
+	printf '\n## Frontmatter\n%s\n' "$(_note_frontmatter "$f")"
+	for sec in '## Bookmark' '## Pinned' '## Git state'; do
+		local body
+		body=$(_note_section "$f" "$sec")
+		[ -n "$body" ] && printf '\n%s\n' "$body"
+	done
+	# Work log tail: the last 40 lines of the note, which is where an append-only
+	# session log keeps its most recent entries.
+	printf '\n## Recent log (last 40 lines of the note)\n%s\n' "$(tail -n 40 "$f" 2>/dev/null)"
+	proj=$(_fm_field "$f" project)
+	if [ -n "$proj" ]; then
+		ppath="$root/Projects/$proj.md"
+		[ -f "$ppath" ] || ppath=$(_first_glob "$root/Projects/"*" $proj.md")
+		if [ -n "$ppath" ] && [ -f "$ppath" ]; then
+			local dec
+			dec=$(_note_section "$ppath" '## Decisions')
+			[ -n "$dec" ] && printf '\nProject %s\n%s\n' "$proj" "$dec"
+		fi
+	fi
+}
+
+# Read one scalar out of the extension's answers JSON on stdin. Core has no jq
+# dependency, so this is a narrow scanner, not a JSON parser: it finds the
+# "<key>" token at any depth and prints the following scalar. $1 = dotted path
+# under `answers`, e.g. `work_complete.probability` or `recommendation.choice`.
+_judge_answer() { # $1 = dotted key path; JSON on stdin
+	awk -v path="$1" '
+    BEGIN{ n=split(path, want, ".") }
+    { s = s $0 }
+    END{
+      # Walk to the "answers" object, then down each key in turn, tracking the
+      # brace depth at which each key was found so a same-named key nested
+      # deeper (e.g. probabilities.archive) cannot be mistaken for it.
+      pos = index(s, "\"answers\"")
+      if(pos==0) exit 1
+      s = substr(s, pos)
+      for(i=1;i<=n;i++){
+        k = "\"" want[i] "\""
+        p = index(s, k)
+        if(p==0) exit 1
+        s = substr(s, p + length(k))
+        sub(/^[[:space:]]*:[[:space:]]*/, "", s)
+      }
+      # s now starts at the value. Strings are quoted, numbers are bare.
+      if(substr(s,1,1)=="\""){
+        s = substr(s,2); q = index(s, "\""); if(q==0) exit 1
+        print substr(s,1,q-1)
+      } else {
+        v=""
+        for(i=1;i<=length(s);i++){ c=substr(s,i,1)
+          if(c ~ /[-0-9.eE+]/) v = v c; else break }
+        if(v=="") exit 1
+        print v
+      }
+    }'
+}
+
+# Is probability $1 at or above threshold $2? Decimal compare without bc, in awk.
+_judge_ge() { awk -v a="$1" -v b="$2" 'BEGIN{ exit !(a+0 >= b+0) }'; }
+
+# Render the annotation column for one judged session from the extension's JSON
+# on stdin: `→ <choice> <p> · <flags>`, or `→ ?` below min_confidence. Flags are
+# the boolean question names whose probability is >= 0.85. Prints nothing when
+# the JSON carries no usable recommendation (the caller then prints today's row).
+_groom_judge_column() { # JSON on stdin
+	local json choice p flags b bp
+	json=$(cat)
+	choice=$(printf '%s' "$json" | _judge_answer recommendation.choice) || return 1
+	[ -n "$choice" ] || return 1
+	p=$(printf '%s' "$json" | _judge_answer "recommendation.probabilities.$choice") || p=""
+	if [ -z "$p" ] || ! _judge_ge "$p" "$GROOM_JUDGE_MIN_CONFIDENCE"; then
+		printf '→ ?'
+		return 0
+	fi
+	flags=""
+	for b in work_complete has_next_step blocked_external undistilled; do
+		bp=$(printf '%s' "$json" | _judge_answer "$b.probability") || continue
+		[ -n "$bp" ] || continue
+		if _judge_ge "$bp" "$GROOM_JUDGE_FLAG_AT"; then
+			flags="${flags}${flags:+, }${b}"
+		fi
+	done
+	printf '→ %s %s' "$choice" "$p"
+	[ -n "$flags" ] && printf ' · %s' "$flags"
+	return 0
+}
+
+# Judge every flagged session in the TAB rows $1 and record the result. Fills
+# two parallel newline-lists, _GROOM_JUDGE_ANNOT (`<name>\t<column>`) for the
+# report and _GROOM_JUDGE_JSON for --format json. A vault that has not consented
+# is skipped whole, before any state is assembled: `_judge` would refuse it
+# anyway, but assembling state for a note that can never be sent is wasted work
+# and one code path away from a leak.
+_groom_judge_run() { # $1 = TAB rows
+	_GROOM_JUDGE_ANNOT=""
+	_GROOM_JUDGE_JSON=""
+	[ -n "$1" ] || return 0
+	local consent="" vid status name age lines f root state out rc col id jid vj
+	# One read of the consent map per run, from the same frozen contract the
+	# extension reads.
+	while IFS= read -r jid; do
+		case "$jid" in
+		vault.*.judge=true) vj="${jid#vault.}" && consent="${consent}${vj%%.judge=true} " ;;
+		esac
+	done <<<"$(cmd_judge_config 2>/dev/null)"
+	while IFS=$'\t' read -r vid status name age lines f root; do
+		[ -n "$name" ] || continue
+		case " $consent " in *" $vid "*) ;; *)
+			_groom_judge_json_add "$vid" "$name" "$status" "$age" "$lines" "" ""
+			continue
+			;;
+		esac
+		state=$(_groom_judge_state "$f" "$root" "$status" "$age" "$lines")
+		out=$(printf '%s\n' "$state" | _judge groom-triage "$vid" --subject "Sessions/$name/_index.md" 2>/dev/null)
+		rc=$?
+		if [ "$rc" -ne 0 ] || [ -z "$out" ]; then
+			# Any exit but 0 is "no opinion": the row prints exactly as today.
+			_groom_judge_json_add "$vid" "$name" "$status" "$age" "$lines" "" ""
+			continue
+		fi
+		col=$(printf '%s' "$out" | _groom_judge_column) || col=""
+		id=$(printf '%s' "$out" | _judge_log_id) || id=""
+		if [ -n "$col" ]; then
+			[ -n "$id" ] && col="$col [$id]"
+			_GROOM_JUDGE_ANNOT="${_GROOM_JUDGE_ANNOT}${name}"$'\t'"${col}"$'\n'
+		fi
+		_groom_judge_json_add "$vid" "$name" "$status" "$age" "$lines" "$id" "$out"
+	done <<<"$1"
+	[ "$FORMAT" = json ] && printf '[%s\n]\n' "$_GROOM_JUDGE_JSON"
+	return 0
+}
+
+# Append one --format json element. $6 = log id, $7 = raw extension JSON; both
+# empty means "no opinion", which emits `"judge": null`.
+_groom_judge_json_add() { # vid name status age lines id json
+	local ans=""
+	[ -n "$_GROOM_JUDGE_JSON" ] && _GROOM_JUDGE_JSON="${_GROOM_JUDGE_JSON},"
+	if [ -n "$7" ]; then
+		ans=$(printf '%s' "$7" | _judge_answers_object)
+	fi
+	if [ -n "$ans" ]; then
+		_GROOM_JUDGE_JSON="${_GROOM_JUDGE_JSON}
+  {\"vault\":\"$(_json_esc "$1")\",\"session\":\"$(_json_esc "$2")\",\"status\":\"$(_json_esc "$3")\",\"age_days\":$4,\"lines\":$5,\"judge\":{\"id\":\"$(_json_esc "$6")\",\"answers\":$ans}}"
+	else
+		_GROOM_JUDGE_JSON="${_GROOM_JUDGE_JSON}
+  {\"vault\":\"$(_json_esc "$1")\",\"session\":\"$(_json_esc "$2")\",\"status\":\"$(_json_esc "$3")\",\"age_days\":$4,\"lines\":$5,\"judge\":null}"
+	fi
+}
+
+# The decision-log id from the extension's JSON on stdin (top-level "id").
+_judge_log_id() {
+	awk '{ s = s $0 } END{
+    p = index(s, "\"id\"")
+    if(p==0) exit 1
+    s = substr(s, p + 4); sub(/^[[:space:]]*:[[:space:]]*/, "", s)
+    if(substr(s,1,1)!="\"") exit 1
+    s = substr(s,2); q = index(s, "\""); if(q==0) exit 1
+    print substr(s,1,q-1)
+  }'
+}
+
+# The `answers` object from the extension's JSON on stdin, verbatim, so
+# --format json carries exactly what the gateway returned. Brace-matched, and
+# string-aware so a brace inside a string value cannot end it early.
+_judge_answers_object() {
+	awk '{ s = s $0 } END{
+    p = index(s, "\"answers\"")
+    if(p==0) exit 1
+    s = substr(s, p + 9); sub(/^[[:space:]]*:[[:space:]]*/, "", s)
+    if(substr(s,1,1)!="{") exit 1
+    d=0; instr=0; esc=0
+    for(i=1;i<=length(s);i++){
+      c = substr(s,i,1)
+      if(esc){ esc=0; continue }
+      if(instr){ if(c=="\\") esc=1; else if(c=="\"") instr=0; continue }
+      if(c=="\""){ instr=1; continue }
+      if(c=="{") d++
+      else if(c=="}"){ d--; if(d==0){ print substr(s,1,i); exit 0 } }
+    }
+    exit 1
+  }'
+}
+
+# Append the judged column to each report line whose session name matches. The
+# report lines are `  <label>: <name> (<age>d, <project>)`, so the name is the
+# token between ": " and " (".
+_groom_judge_decorate() { # $1 = accumulated report lines
+	[ -n "$1" ] || return 0
+	[ -n "$_GROOM_JUDGE_ANNOT" ] || {
+		printf '%s' "$1"
+		return 0
+	}
+	# The annotation map arrives on stdin ahead of the report, separated by a
+	# lone NUL-ish sentinel line: awk -v cannot carry the embedded newlines.
+	printf '%s\n%s\n%s' "$_GROOM_JUDGE_ANNOT" '---vaultmem-annot-end---' "$1" | awk '
+    BEGIN{ phase=1 }
+    phase==1 && $0=="---vaultmem-annot-end---"{ phase=2; next }
+    phase==1 {
+      if($0=="") next
+      t = index($0, "\t")
+      if(t==0) next
+      col[substr($0,1,t-1)] = substr($0,t+1)
+      next
+    }
+    {
+      line = $0
+      p = index(line, ": ")
+      q = index(line, " (")
+      if(p>0 && q>p){
+        name = substr(line, p+2, q-p-2)
+        if(name in col){ print line "  " col[name]; next }
+      }
+      print line
+    }'
+}
+
+# --dry-run: preview only — print the exact would-move list (source →
 # destination) and the project-index lines that would flip, and perform NO mv
 # and NO file writes. Real (no-flag) behavior is unchanged; the flag only
 # swaps the two mutating calls (mv, _flip_project_status) for print statements.
+#
+# --judge: annotate each cold-parked/stale-active row with a `groom-triage`
+# judgment (section 8.1 of the judge design). Advisory only: nothing moves on a
+# judgment, and without the flag every byte of output is what it is today.
 cmd_groom() {
-	local dry=0
-	[ "${1:-}" = "--dry-run" ] && dry=1
+	local dry=0 judge=0 a
+	for a in "$@"; do
+		case "$a" in
+		--dry-run) dry=1 ;;
+		--judge) judge=1 ;;
+		esac
+	done
 	local now did=0 cold_lines="" stale_lines="" bloat_lines="" taskstale_lines=""
 	now=$(date +%s)
-	_groom_vault() { # $1 = vault root, $2 = label
-		local root="$1/Sessions" label="$2" arc f name st proj upd ts age lines
+	# --judge only: TAB rows <vault-id>\t<status>\t<name>\t<age>\t<lines>\t<path>\t<vault-root>
+	# for every flagged session, judged after the scan so the report keeps its
+	# current shape and a judgment never influences a move.
+	local judge_rows=""
+	_groom_vault() { # $1 = vault root, $2 = label, $3 = vault id
+		local root="$1/Sessions" label="$2" vid="${3:-}" arc f name st proj upd ts age lines
 		[ -d "$root" ] || return 0
 		arc="$root/_archive"
 		while IFS= read -r f; do
@@ -1376,6 +1658,7 @@ cmd_groom() {
 					proj=$(_fm_field "$f" project)
 					cold_lines="${cold_lines}  ${label}: ${name} (${age}d, ${proj:-no project})
 "
+					[ "$judge" -eq 1 ] && judge_rows="${judge_rows}${vid}"$'\t'"cold-parked"$'\t'"${name}"$'\t'"${age}"$'\t'"$(_note_lines "$f")"$'\t'"${f}"$'\t'"$1"$'\n'
 				fi
 				;;
 			active)
@@ -1389,6 +1672,7 @@ cmd_groom() {
 					proj=$(_fm_field "$f" project)
 					stale_lines="${stale_lines}  ${label}: ${name} (${age}d, ${proj:-no project})
 "
+					[ "$judge" -eq 1 ] && judge_rows="${judge_rows}${vid}"$'\t'"stale-active"$'\t'"${name}"$'\t'"${age}"$'\t'"$(_note_lines "$f")"$'\t'"${f}"$'\t'"$1"$'\n'
 				fi
 				;;
 			esac
@@ -1484,10 +1768,21 @@ cmd_groom() {
 	while IFS=$'\t' read -r _vid _vpath _vlabel _ _ _ _ _; do
 		[ -n "$_vid" ] || continue
 		case "$SEL" in both) ;; "$_vid") ;; *) continue ;; esac
-		_groom_vault "$_vpath" "$_vlabel"
+		_groom_vault "$_vpath" "$_vlabel" "$_vid"
 		_groom_projects "$_vpath" "$_vlabel"
 		_groom_tasks "$_vpath" "$_vlabel"
 	done <<<"$_REG"
+	# --judge: ask groom-triage about each flagged session, then decorate the
+	# rows. This runs after the scan and before any printing, so a judgment can
+	# only add a column: it never reaches the archive/flip logic above.
+	if [ "$judge" -eq 1 ]; then
+		_groom_judge_run "$judge_rows"
+		[ "$FORMAT" = json ] && return 0
+		# Command substitution eats the trailing newline every report line ends
+		# with; put it back so the decorated block prints exactly as before.
+		[ -n "$cold_lines" ] && cold_lines="$(_groom_judge_decorate "$cold_lines")"$'\n'
+		[ -n "$stale_lines" ] && stale_lines="$(_groom_judge_decorate "$stale_lines")"$'\n'
+	fi
 	if [ "$did" -eq 0 ]; then
 		printf 'Nothing to archive.\n'
 	elif [ "$dry" -eq 1 ]; then
@@ -2031,6 +2326,15 @@ STALE_ACTIVE_DAYS="${VAULTMEM_STALE_ACTIVE_DAYS:-7}"
 # lines is due for a checkpoint/distill per the session skill). Env override
 # wins over the config default, same pattern as COLD_DAYS.
 BLOAT_LINES="${VAULTMEM_BLOAT_LINES:-${DEF_BLOAT_LINES:-150}}"
+
+# `groom --judge` rendering thresholds. These mirror the groom-triage judge file
+# (design 8.1) so the printed column agrees with the judge's own gating; the
+# judge file stays authoritative for the extension's exit code.
+GROOM_JUDGE_MIN_CONFIDENCE=0.6
+GROOM_JUDGE_FLAG_AT=0.85
+# Filled by _groom_judge_run: `<name>\t<column>` rows and the --format json body.
+_GROOM_JUDGE_ANNOT=""
+_GROOM_JUDGE_JSON=""
 
 # --- subcommand: projects (list Project notes + session counts) ----------------
 cmd_projects() {
@@ -3362,7 +3666,7 @@ while [ $# -gt 0 ]; do
 		shift 2
 		;;
 	-h | --help)
-		sed -n '4,154p' "$0"
+		sed -n '4,161p' "$0"
 		exit 0
 		;;
 	*)
@@ -3398,7 +3702,7 @@ status | sessions | verify | nudge | which | init | doctor | judge | _judge | ""
 esac
 
 case "${ARGS[0]:-}" in
-"") sed -n '4,154p' "$0" ;; # no args → print usage
+"") sed -n '4,161p' "$0" ;; # no args → print usage
 status) cmd_status ;;
 nudge) cmd_nudge ;;
 index) cmd_index "${ARGS[1]:-}" ;;
@@ -3412,7 +3716,7 @@ projects) cmd_projects ;;
 project) cmd_project "${ARGS[*]:1}" ;;
 next) cmd_next ;;
 task) cmd_task "${ARGS[@]:1}" ;;
-groom) cmd_groom "${ARGS[1]:-}" ;;
+groom) cmd_groom "${ARGS[@]:1}" ;;
 init) cmd_init "${ARGS[1]:-}" "${ARGS[2]:-}" ;;
 resolve) cmd_resolve "${ARGS[*]:1}" ;;
 links) cmd_links "${ARGS[*]:1}" ;;

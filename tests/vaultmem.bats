@@ -3227,3 +3227,268 @@ EOF
   XDG_DATA_HOME="$BATS_TEST_TMPDIR/data" run "$BATS_TEST_TMPDIR/rel/install.sh" --prefix "$BATS_TEST_TMPDIR/prefix" --ext ../judge
   [ "$status" -eq 2 ]
 }
+
+# --- groom --judge (core side) ---------------------------------------------------
+# Every test here runs against a stub extension under $BATS_TEST_TMPDIR printing
+# canned groom-triage JSON. The real extension is never invoked and nothing calls
+# curl: `judge_isolate` also moves the script out of the repo so the script-dir
+# resolution step cannot reach a real ext/judge/.
+
+# A stub that answers with the caller-supplied JSON ($2) and records that it ran,
+# with its args and the state it was handed.
+groom_judge_stub() { # $1 = ext dir, $2 = response JSON, $3 = exit code
+  mkdir -p "$1/judge"
+  cat >"$1/judge/vaultmem-judge" <<EOF
+#!/usr/bin/env bash
+{
+  printf 'args=%s\n' "\$*"
+  printf 'state<<\n%s\n>>state\n' "\$(cat)"
+} >>"$BATS_TEST_TMPDIR/stub.ran"
+printf '%s\n' '$2'
+exit ${3:-0}
+EOF
+  chmod +x "$1/judge/vaultmem-judge"
+}
+
+# One cold-parked session with the sections groom --judge sends, plus its Project.
+groom_judge_fixture() {
+  mkdir -p "$OBS_JAY/Sessions/cold-one" "$OBS_JAY/Projects"
+  printf -- '---\nstatus: parked\nproject: p\nupdated: %s\n---\n# cold-one\n\n## Bookmark\nnext: land the parser\n\n## Pinned\n- a pin\n\n## Git state\n| repo | branch | pr | state |\n| r | b | 1 | open |\n' \
+    "$(days_ago 40)" >"$OBS_JAY/Sessions/cold-one/_index.md"
+  printf -- '---\ntype: project\nstatus: active\n---\n# p\n\n## Decisions\n- chose the awk scanner\n' >"$OBS_JAY/Projects/p.md"
+}
+
+# Registry with the judge enabled and jay's consent set by the caller.
+groom_judge_config() { # $1 = jay's judge value
+  cat >"$VAULTMEM_CONFIG" <<EOF
+[ext.judge]
+enabled = true
+
+[vault.jay]
+label = "Personal"
+path = "$OBS_JAY"
+judge = $1
+EOF
+}
+
+GROOM_JUDGE_OK='{"id":"20260922T101500Z-4f2a","judge":"groom-triage","answers":{"work_complete":{"probability":0.93},"has_next_step":{"probability":0.05},"blocked_external":{"probability":0.02},"undistilled":{"probability":0.91},"recommendation":{"choice":"archive","probabilities":{"archive":0.88,"park":0.07,"keep-active":0.03,"needs-human":0.02}}}}'
+
+@test "groom --judge annotates a flagged row with the choice, probability, flags and log id" {
+  judge_isolate
+  groom_judge_fixture
+  groom_judge_config true
+  export VAULTMEM_EXT_DIR="$BATS_TEST_TMPDIR/extdir"
+  groom_judge_stub "$VAULTMEM_EXT_DIR" "$GROOM_JUDGE_OK"
+  run "$JOM" -v jay groom --judge
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"cold-one (40d, p)  → archive 0.88 · work_complete, undistilled [20260922T101500Z-4f2a]"* ]]
+  # Only the two booleans at or above 0.85 are flagged.
+  [[ "$output" != *"has_next_step"* ]]
+  [[ "$output" != *"blocked_external"* ]]
+}
+
+@test "groom --judge prints → ? when the top choice is below the confidence floor" {
+  judge_isolate
+  groom_judge_fixture
+  groom_judge_config true
+  export VAULTMEM_EXT_DIR="$BATS_TEST_TMPDIR/extdir"
+  groom_judge_stub "$VAULTMEM_EXT_DIR" \
+    '{"id":"low-1","answers":{"work_complete":{"probability":0.9},"recommendation":{"choice":"needs-human","probabilities":{"needs-human":0.42}}}}'
+  run "$JOM" -v jay groom --judge
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"cold-one (40d, p)  → ? [low-1]"* ]]
+  # Below the floor the choice itself is withheld, flags and all.
+  [[ "$output" != *"needs-human 0.42"* ]]
+}
+
+@test "groom --judge leaves the row exactly as today when the judge has no opinion" {
+  judge_isolate
+  groom_judge_fixture
+  groom_judge_config true
+  export VAULTMEM_EXT_DIR="$BATS_TEST_TMPDIR/extdir"
+  groom_judge_stub "$VAULTMEM_EXT_DIR" '' 3
+  run "$JOM" -v jay groom --judge
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"  Personal: cold-one (40d, p)"* ]]
+  [[ "$output" != *"→"* ]]
+}
+
+@test "groom --judge sends the design 8.1 state and the --subject the extension expects" {
+  judge_isolate
+  groom_judge_fixture
+  groom_judge_config true
+  export VAULTMEM_EXT_DIR="$BATS_TEST_TMPDIR/extdir"
+  groom_judge_stub "$VAULTMEM_EXT_DIR" "$GROOM_JUDGE_OK"
+  run "$JOM" -v jay groom --judge
+  [ "$status" -eq 0 ]
+  local ran="$BATS_TEST_TMPDIR/stub.ran"
+  grep -q -- '--vault jay' "$ran"
+  grep -q -- "--subject Sessions/cold-one/_index.md" "$ran"
+  grep -q 'groom-triage' "$ran"
+  # Deterministic facts are computed in bash and handed over as text.
+  grep -qx 'Days since last update: 40' "$ran"
+  grep -qx 'Flagged as: cold-parked' "$ran"
+  grep -q '^Note length in lines: [0-9]' "$ran"
+  # The sections design 8.1 lists.
+  grep -qx '## Bookmark' "$ran"
+  grep -qx '## Pinned' "$ran"
+  grep -qx '## Git state' "$ran"
+  grep -q 'next: land the parser' "$ran"
+  grep -q 'chose the awk scanner' "$ran"
+}
+
+@test "groom --judge --dry-run prints the same judged report and moves nothing" {
+  judge_isolate
+  groom_judge_fixture
+  groom_judge_config true
+  mkdir -p "$OBS_JAY/Sessions/done-one"
+  printf -- '---\nstatus: done\n---\n# done-one\n' >"$OBS_JAY/Sessions/done-one/_index.md"
+  export VAULTMEM_EXT_DIR="$BATS_TEST_TMPDIR/extdir"
+  groom_judge_stub "$VAULTMEM_EXT_DIR" "$GROOM_JUDGE_OK"
+  run "$JOM" -v jay groom --judge --dry-run
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"→ archive 0.88 · work_complete, undistilled"* ]]
+  [[ "$output" == *"(dry run"* ]]
+  # The done session is still in place: the judged path never writes.
+  [ -f "$OBS_JAY/Sessions/done-one/_index.md" ]
+  [ ! -d "$OBS_JAY/Sessions/_archive/done-one" ]
+}
+
+@test "groom --judge --format json carries the row facts and the answers verbatim" {
+  judge_isolate
+  groom_judge_fixture
+  groom_judge_config true
+  export VAULTMEM_EXT_DIR="$BATS_TEST_TMPDIR/extdir"
+  groom_judge_stub "$VAULTMEM_EXT_DIR" "$GROOM_JUDGE_OK"
+  run "$JOM" -v jay groom --judge --format json
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e '
+    length == 1
+    and .[0].vault == "jay"
+    and .[0].session == "cold-one"
+    and .[0].status == "cold-parked"
+    and .[0].age_days == 40
+    and (.[0].lines | type) == "number"
+    and .[0].judge.id == "20260922T101500Z-4f2a"
+    and .[0].judge.answers.recommendation.choice == "archive"
+    and .[0].judge.answers.recommendation.probabilities.archive == 0.88
+    and .[0].judge.answers.undistilled.probability == 0.91
+  '
+}
+
+@test "groom --judge --format json reports a stale-active session with judge null on no opinion" {
+  judge_isolate
+  mkdir -p "$OBS_JAY/Sessions/stale-one"
+  printf -- '---\nstatus: active\nupdated: %s\n---\n# stale-one\n' "$(days_ago 10)" >"$OBS_JAY/Sessions/stale-one/_index.md"
+  groom_judge_config true
+  export VAULTMEM_EXT_DIR="$BATS_TEST_TMPDIR/extdir"
+  groom_judge_stub "$VAULTMEM_EXT_DIR" '' 3
+  run "$JOM" -v jay groom --judge --format json
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e '
+    length == 1
+    and .[0].session == "stale-one"
+    and .[0].status == "stale-active"
+    and .[0].age_days == 10
+    and .[0].judge == null
+  '
+}
+
+@test "groom --judge never assembles state for a vault that has not consented" {
+  judge_isolate
+  groom_judge_fixture
+  groom_judge_config false
+  export VAULTMEM_EXT_DIR="$BATS_TEST_TMPDIR/extdir"
+  groom_judge_stub "$VAULTMEM_EXT_DIR" "$GROOM_JUDGE_OK"
+  run "$JOM" -v jay groom --judge
+  [ "$status" -eq 0 ]
+  # The row prints as today and the extension was never executed.
+  [[ "$output" == *"  Personal: cold-one (40d, p)"* ]]
+  [[ "$output" != *"→"* ]]
+  [ ! -e "$BATS_TEST_TMPDIR/stub.ran" ]
+}
+
+@test "groom without --judge is byte-identical with and without the extension installed" {
+  judge_isolate
+  groom_judge_fixture
+  mkdir -p "$OBS_JAY/Sessions/stale-one"
+  printf -- '---\nstatus: active\nupdated: %s\n---\n# stale-one\n' "$(days_ago 10)" >"$OBS_JAY/Sessions/stale-one/_index.md"
+  groom_judge_config true
+  export VAULTMEM_EXT_DIR="$BATS_TEST_TMPDIR/extdir"
+  groom_judge_stub "$VAULTMEM_EXT_DIR" "$GROOM_JUDGE_OK"
+  run "$JOM" -v jay groom
+  local with_status="$status" with_out="$output"
+  # Same run with nothing installed anywhere the resolver looks.
+  export VAULTMEM_EXT_DIR="$BATS_TEST_TMPDIR/empty"
+  run "$JOM" -v jay groom
+  [ "$status" -eq "$with_status" ]
+  [ "$output" = "$with_out" ]
+  # And the extension stayed untouched on the plain path.
+  [ ! -e "$BATS_TEST_TMPDIR/stub.ran" ]
+}
+
+@test "groom --judge is inert when [ext.judge] is disabled" {
+  judge_isolate
+  groom_judge_fixture
+  cat >"$VAULTMEM_CONFIG" <<EOF
+[ext.judge]
+enabled = false
+
+[vault.jay]
+label = "Personal"
+path = "$OBS_JAY"
+judge = true
+EOF
+  export VAULTMEM_EXT_DIR="$BATS_TEST_TMPDIR/extdir"
+  groom_judge_stub "$VAULTMEM_EXT_DIR" "$GROOM_JUDGE_OK"
+  run "$JOM" -v jay groom --judge
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"  Personal: cold-one (40d, p)"* ]]
+  [[ "$output" != *"→"* ]]
+  [ ! -e "$BATS_TEST_TMPDIR/stub.ran" ]
+}
+
+@test "groom --judge judges each flagged session once, across both report sections" {
+  judge_isolate
+  groom_judge_fixture
+  mkdir -p "$OBS_JAY/Sessions/stale-one"
+  printf -- '---\nstatus: active\nupdated: %s\n---\n# stale-one\n' "$(days_ago 10)" >"$OBS_JAY/Sessions/stale-one/_index.md"
+  groom_judge_config true
+  export VAULTMEM_EXT_DIR="$BATS_TEST_TMPDIR/extdir"
+  groom_judge_stub "$VAULTMEM_EXT_DIR" "$GROOM_JUDGE_OK"
+  run "$JOM" -v jay groom --judge
+  [ "$status" -eq 0 ]
+  # Both sections carry a column, and the stub ran exactly twice.
+  [[ "$output" == *"cold-one (40d, p)  → archive"* ]]
+  [[ "$output" == *"stale-one (10d, no project)  → archive"* ]]
+  [ "$(grep -c '^args=' "$BATS_TEST_TMPDIR/stub.ran")" -eq 2 ]
+}
+
+@test "groom --judge does not annotate checkpoint-due or stale-backlog rows" {
+  judge_isolate
+  mkdir -p "$OBS_JAY/Sessions/fat-one"
+  {
+    printf -- '---\nstatus: active\nupdated: %s\n---\n# fat-one\n' "$(days_ago 1)"
+    i=0
+    while [ "$i" -lt 200 ]; do
+      printf 'line %s\n' "$i"
+      i=$((i + 1))
+    done
+  } >"$OBS_JAY/Sessions/fat-one/_index.md"
+  groom_judge_config true
+  export VAULTMEM_EXT_DIR="$BATS_TEST_TMPDIR/extdir"
+  groom_judge_stub "$VAULTMEM_EXT_DIR" "$GROOM_JUDGE_OK"
+  run "$JOM" -v jay groom --judge
+  [ "$status" -eq 0 ]
+  # Fresh and only bloated: flagged for a checkpoint, never judged (8.1 covers
+  # cold-parked and stale-active only).
+  [[ "$output" == *"Checkpoint due"* ]]
+  [[ "$output" != *"→"* ]]
+  [ ! -e "$BATS_TEST_TMPDIR/stub.ran" ]
+}
+
+@test "usage documents groom --judge" {
+  run "$OM"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"vaultmem groom --judge"* ]]
+}
