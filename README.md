@@ -193,6 +193,7 @@ vaultmem project <name>     one project: repos, linear, MOC, sessions by status
 vaultmem status             one-line index summary + groom-nudge count (fail-quiet)
 vaultmem bookmark <thread>  print only ## Bookmark + ## Pinned from a session's _index.md
 vaultmem nudge              Stop-hook check: notes changed but the session's _index.md wasn't (fail-quiet)
+vaultmem nudge --judge      + ask the judge extension whether the transcript holds a durable decision (opt-in)
 ```
 
 **backlog**

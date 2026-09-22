@@ -212,8 +212,9 @@ Wire it on **Stop**, same guard pattern as SessionStart:
 }
 ```
 
-Codex (`~/.codex/hooks.json`) takes the same command under whichever lifecycle
-event fires at turn/session end in your version.
+Codex (`~/.codex/hooks.json`) has a `Stop` event too. Its docs say Stop
+"expects JSON on stdout when it exits 0", so check how your Codex version treats
+the plain-text nudge line before wiring it there.
 
 `nudge` shares the fail-quiet contract with `status`/`sessions`: a missing or
 unconfigured vault, an unwritable cache dir, or (the common case) a first-ever
@@ -224,6 +225,84 @@ want the stamp anchored at the true start of the session rather than the first
 Stop, add the same `vaultmem nudge` command to your SessionStart hooks too —
 planting the stamp there is harmless (it is a no-op once the stamp already
 exists later in the same run).
+
+### What the Stop hook receives on stdin
+
+Confirmed 2026-09-22 against each harness's hooks reference:
+
+- **Claude Code** ([code.claude.com/docs/en/hooks](https://code.claude.com/docs/en/hooks)):
+  a JSON object with `session_id`, `prompt_id`, `transcript_path`, `cwd`,
+  `scratchpad_dir`, `permission_mode`, `hook_event_name` (`"Stop"`),
+  `last_assistant_message`, and `stop_hook_active`. `transcript_path` is a JSONL
+  file that "is written asynchronously and may lag the in-memory conversation",
+  which is why the docs point Stop hooks at `last_assistant_message` for the
+  final reply.
+- **Codex** ([developers.openai.com/codex/hooks](https://developers.openai.com/codex/hooks),
+  which redirects to learn.chatgpt.com/docs/hooks): `session_id`,
+  `transcript_path` (`string | null`), `cwd`, `hook_event_name`, `model`,
+  `turn_id`, `permission_mode`, plus Stop's own `stop_hook_active` and
+  `last_assistant_message` (`string | null`).
+
+The transcript line shapes `nudge --judge` reads were checked against local
+transcripts from both harnesses, not against a published spec (neither
+documents it as a stable format):
+
+- Claude Code: `{"type":"user","message":{"role":"user","content":"…"}}`, or
+  `content` as an array of `{"type":"text","text":"…"}` blocks.
+- Codex: `{"type":"response_item","payload":{"type":"message","role":"user"|"assistant","content":[{"type":"input_text"|"output_text","text":"…"}]}}`.
+
+### `nudge --judge`: ask the judge before you stop
+
+With the optional [judge extension](judge.md), `vaultmem nudge --judge` also
+catches the case the heuristic cannot see: durable knowledge (a decision, root
+cause, incident, pattern, or milestone) surfaced in the conversation and no note
+was written at all. It reads the hook's stdin JSON, takes the newest
+user/assistant text turns from `transcript_path` (at most 24000 bytes; tool
+calls, tool results, thinking, and subagent turns are left out), appends
+`last_assistant_message` if the transcript lags it, and asks the
+`capture-worthy` judge. A confident yes prints a second line:
+
+```
+⚠ vaultmem: this session looks to hold a durable root-cause; capture it (vault-capture) before you stop.
+```
+
+```jsonc
+// ~/.claude/settings.json → "hooks"
+{
+  "hooks": {
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "command -v vaultmem >/dev/null && vaultmem nudge --judge"
+          }
+        ]
+      }
+    ]
+  }
+}
+```
+
+The judge runs only when **all three** consent preconditions hold, and a
+session `_index.md` was not updated since the stamp:
+
+1. The extension is installed and `[ext.judge] enabled = true`.
+2. `nudge` is named in `[ext.judge] hook_judges` (default empty: nothing runs
+   inside a hook until you name it).
+3. `vaultmem which` routes `$PWD` to a vault **confidently** (a `match_owners`
+   or `match_paths` rule, not the fallback), and that vault sets `judge = true`.
+
+**When all three hold, the transcript tail leaves the machine**: it is sent to
+the remote evaluation model through the extension. Leave `nudge` out of
+`hook_judges`, or keep `judge = false` on a vault, to keep it local.
+
+The heuristic line runs first and prints exactly as it does without `--judge`.
+Every judge failure (preconditions not met, stdin not JSON, no
+`transcript_path`, extension missing, timeout, a `no` or abstain answer) prints
+nothing extra and exits `0`. The extension enforces `timeout_ms`; core adds no
+timer of its own. `nudge` without `--judge` never reads stdin and never runs the
+extension.
 
 ## PostCompact: re-anchor after a context compaction
 
