@@ -62,7 +62,11 @@
 #                               `judge = true` on the vault; otherwise rows print as usual.
 #                               Feed the log id back with `vaultmem judge feedback <id>`.
 #   vaultmem status             one-line summary + groom-nudge count (used by the SessionStart hook)
-#   vaultmem nudge              fail-quiet Stop-hook check: vault touched but session note not updated
+#   vaultmem nudge [--judge]    fail-quiet Stop-hook check: vault touched but session note not updated.
+#                               --judge (hook stdin JSON; see docs/hooks.md) adds a second line when the
+#                               `capture-worthy` judge finds a durable decision/root cause/etc. in the
+#                               transcript tail. Needs the extension enabled, `nudge` in hook_judges, and
+#                               `judge = true` on the vault `which` confidently routes $PWD to.
 #   vaultmem init [--vault <id>]  scaffold a compliant vault skeleton (see SCHEMA.md)
 #
 # Backlog (Tasks/ — planned work that has not started; the tier BEFORE a session):
@@ -229,7 +233,7 @@ _parse_config() { # $1 = config path
 # for subset shape only. Values must be a quoted string, a bare bool/int, or a
 # bare comma-list token. Rejected: [[array tables]], deeper nesting ([a.b.c]),
 # arrays ([...] / {...} inline), unknown keys, unquoted string values, a
-# non-boolean [vault.<id>] judge.
+# non-boolean [vault.<id>] judge, a non-string [vault.<id>] description.
 _lint_config() { # $1 = config path
 	awk '
     function trim(s){ gsub(/^[[:space:]]+|[[:space:]]+$/, "", s); return s }
@@ -240,7 +244,7 @@ _lint_config() { # $1 = config path
       ok_vault["label"]=1; ok_vault["path"]=1; ok_vault["sessions"]=1
       ok_vault["home"]=1; ok_vault["mocs"]=1
       ok_vault["match_owners"]=1; ok_vault["match_paths"]=1
-      ok_vault["judge"]=1
+      ok_vault["judge"]=1; ok_vault["description"]=1
     }
     /^[[:space:]]*#/ { next }
     /^[[:space:]]*$/ { next }
@@ -268,6 +272,10 @@ _lint_config() { # $1 = config path
       if (kind == "vault" && key == "judge") {
         if (bare != "true" && bare != "false") { printf "%d: \"judge\" in [%s] must be true or false\n", NR, section; bad=1 }
         next
+      }
+      # description is prose routing criteria: a quoted string, never a bare token
+      if (kind == "vault" && key == "description" && substr(val,1,1) != "\"") {
+        printf "%d: \"description\" in [%s] must be a quoted string\n", NR, section; bad=1; next
       }
       if (substr(val,1,1) == "\"") {
         if (substr(val, length(val)) != "\"" && val !~ /".*"/) { printf "%d: unterminated string for \"%s\"\n", NR, key; bad=1 }
@@ -304,12 +312,15 @@ _vault_path() {
 }
 _vault_known() { [ -n "$1" ] && _vault_path "$1" >/dev/null; }
 
-# Two side tables sit beside $_REG rather than widening it (every reader splits
-# $_REG on its fixed 8 columns): $_REG_JUDGE is "id<TAB>true|false" per vault (the
-# per-vault egress consent), $_EXT_CFG the raw "ext.<name><TAB>key<TAB>value" rows.
+# Side tables sit beside $_REG rather than widening it (every reader splits $_REG
+# on its fixed 8 columns): $_REG_JUDGE is "id<TAB>true|false" per vault (the
+# per-vault egress consent), $_REG_DESC "id<TAB>description" per vault (routing
+# criteria for the judge extension), $_EXT_CFG the raw
+# "ext.<name><TAB>key<TAB>value" rows.
 _load_registry() {
 	_REG=""
 	_REG_JUDGE=""
+	_REG_DESC=""
 	_EXT_CFG=""
 	EXT_JUDGE_ENABLED=false
 	DEF_VAULT=""
@@ -340,6 +351,7 @@ _load_registry() {
 			vj=false
 			[ "$(_cfg "vault.$id" judge)" = true ] && vj=true
 			_REG_JUDGE="${_REG_JUDGE}${id}"$'\t'"${vj}"$'\n'
+			_REG_DESC="${_REG_DESC}${id}"$'\t'"$(_cfg "vault.$id" description)"$'\n'
 		done <<<"$ids"
 		case "$parsed" in *ext.*)
 			_EXT_CFG=$(printf '%s\n' "$parsed" | awk -F'\t' '$1 ~ /^ext\./')
@@ -424,6 +436,8 @@ cmd_status() {
 _nudge_stamp_dir() { printf '%s/vaultmem' "${XDG_CACHE_HOME:-$HOME/.cache}"; }
 _nudge_stamp_file() { printf '%s/nudge-stamp' "$(_nudge_stamp_dir)"; }
 cmd_nudge() {
+	local judge=0
+	[ "${1:-}" = --judge ] && judge=1
 	[ -f "$PRIMARY_HOME" ] || exit 0
 	local dir stamp
 	dir=$(_nudge_stamp_dir)
@@ -438,18 +452,158 @@ cmd_nudge() {
 	while IFS= read -r r; do roots+=("$r"); done < <(_link_roots)
 	[ "${#roots[@]}" -gt 0 ] || exit 0
 	# Any note touched since the stamp, anywhere in a registered vault.
-	local touched
+	local touched idx_touched=""
 	touched=$(find "${roots[@]}" -type f -name '*.md' -newer "$stamp" -not -path '*/Templates/*' 2>/dev/null | head -1)
 	if [ -n "$touched" ]; then
 		# Was a session's own _index.md among the touched notes?
-		local idx_touched
 		idx_touched=$(find "${roots[@]}" -type f -name '_index.md' -newer "$stamp" 2>/dev/null | head -1)
 		if [ -z "$idx_touched" ]; then
 			printf '⚠ vaultmem: notes changed this session but no Sessions/*/_index.md was updated — capture the work log / `updated:` before you stop.\n'
 		fi
 	fi
 	touch "$stamp" 2>/dev/null
+	if [ "$judge" = 1 ] && [ -z "$idx_touched" ]; then
+		_nudge_judge 2>/dev/null
+	fi
 	return 0
+}
+
+# --- nudge --judge: ask `capture-worthy` about the transcript tail -------------
+# Judge design 8.2. Every precondition is checked before the transcript is read,
+# and every failure prints nothing: the Stop hook's fail-quiet contract holds on
+# this path too. The extension enforces timeout_ms; core adds no timer.
+NUDGE_STATE_MAX=24000  # bytes of transcript tail sent; the judge's max_state_bytes
+NUDGE_READ_MAX=2097152 # bytes read from the end of the transcript file
+_nudge_judge() {
+	[ "$EXT_JUDGE_ENABLED" = true ] || return 0
+	_nudge_hook_allowed || return 0
+	local vid hook path last state out kind
+	vid=$(_which_confident "$PWD") || return 0
+	[ "$(_vault_judge "$vid")" = true ] || return 0
+	[ -t 0 ] && return 0
+	hook=$(cat)
+	path=$(printf '%s' "$hook" | _hook_json_str transcript_path) || return 0
+	[ -n "$path" ] && [ -f "$path" ] && [ -r "$path" ] || return 0
+	last=$(printf '%s' "$hook" | _hook_json_str last_assistant_message) || last=""
+	state=$(_transcript_tail "$path" "$NUDGE_STATE_MAX" "$last")
+	[ -n "$state" ] || return 0
+	out=$(printf '%s\n' "$state" | _judge capture-worthy "$vid" --subject nudge --gate durable) || return 0
+	kind=$(printf '%s' "$out" | _judge_answer kind.choice) || return 0
+	case "$kind" in
+	decision | root-cause | incident | pattern | milestone)
+		printf '⚠ vaultmem: this session looks to hold a durable %s; capture it (vault-capture) before you stop.\n' "$kind"
+		;;
+	esac
+	return 0
+}
+
+# Is `nudge` named in [ext.judge] hook_judges (a comma list, default empty)?
+_nudge_hook_allowed() {
+	local s key val j oldIFS="$IFS" rc=1
+	while IFS=$'\t' read -r s key val; do
+		[ "$s" = ext.judge ] && [ "$key" = hook_judges ] && break
+		val=""
+	done <<<"$_EXT_CFG"
+	IFS=','
+	for j in $val; do
+		j="${j#"${j%%[![:space:]]*}"}"
+		j="${j%"${j##*[![:space:]]}"}"
+		[ "$j" = nudge ] && rc=0
+	done
+	IFS="$oldIFS"
+	return "$rc"
+}
+
+# Decode the JSON string that starts at s[i], just past its opening quote; sets
+# JEND to the index of the closing quote. Shared by the two awk scanners below.
+_AWK_JSTR='
+    function jstr(s, i,   v, c, n){
+      v = ""; n = length(s)
+      for(; i<=n; i++){ c = substr(s,i,1)
+        if(c == "\""){ JEND = i; return v }
+        if(c == "\\"){ i++; c = substr(s,i,1)
+          if(c == "n") v = v "\n"; else if(c == "t") v = v "\t"
+          else if(c == "r") continue
+          else if(c == "u"){ v = v "\\u"; continue }
+          else v = v c
+          continue }
+        v = v c }
+      JEND = n; return v
+    }'
+
+# The string value of top-level-ish key $1 in the hook's JSON on stdin. Not a
+# JSON parser (core has no jq): it takes the first "<key>" whose value is a
+# string. Returns 1 when stdin is not a JSON object, or the key is absent, null,
+# or not a string.
+_hook_json_str() { # $1 = key; JSON on stdin
+	LC_ALL=C awk -v key="$1" "$_AWK_JSTR"'
+    { s = s $0 "\n" }
+    END{
+      t = s; sub(/^[[:space:]]+/, "", t)
+      if(substr(t,1,1) != "{") exit 1
+      if(!match(s, "\"" key "\"[[:space:]]*:[[:space:]]*\"")) exit 1
+      print jstr(s, RSTART + RLENGTH)
+    }'
+}
+
+# The last user/assistant text turns of a harness transcript (JSONL), as
+# "<role>: <text>" blocks, newest last, whole turns only while the total stays
+# under $2 bytes (the newest turn alone is cut to its tail if it exceeds it).
+# $3, the hook payload's last_assistant_message, is appended as the newest turn
+# unless the transcript already ends with it. Understands both transcript shapes
+# (see docs/hooks.md):
+#   Claude Code  {"type":"user","message":{"role":"user","content":"…"}} and
+#                content arrays of {"type":"text","text":"…"}
+#   Codex        {"type":"response_item","payload":{"type":"message","role":…,
+#                "content":[{"type":"input_text"|"output_text","text":"…"}]}}
+# Tool calls, tool results, thinking, subagent (sidechain) and meta lines, and
+# Codex developer messages carry no conversational text and are skipped.
+_transcript_tail() { # $1 = transcript path, $2 = byte budget, $3 = last assistant message
+	local size skip=0
+	size=$(wc -c <"$1" 2>/dev/null | tr -d ' ')
+	[ "${size:-0}" -gt "$NUDGE_READ_MAX" ] && skip=1
+	tail -c "$NUDGE_READ_MAX" "$1" 2>/dev/null |
+		_NUDGE_LAST="${3:-}" LC_ALL=C awk -v skip="$skip" -v max="$2" "$_AWK_JSTR"'
+    NR == 1 && skip { next }
+    /"isSidechain":true/ || /"isMeta":true/ || /"type":"tool_result"/ { next }
+    {
+      if($0 ~ /"role":"assistant"/) role = "assistant"
+      else if($0 ~ /"role":"user"/) role = "user"
+      else next
+      text = ""; s = $0
+      if(match(s, /"role":"user","content":"/)){
+        text = jstr(s, RSTART + RLENGTH)
+      } else {
+        while(match(s, /"type":"(text|input_text|output_text)","text":"/)){
+          t = jstr(s, RSTART + RLENGTH)
+          if(t != "") text = text (text == "" ? "" : "\n") t
+          s = substr(s, JEND + 1)
+        }
+      }
+      if(text ~ /^[[:space:]]*$/) next
+      turn[++n] = role ": " text
+    }
+    END{
+      # The harness writes the transcript asynchronously, so it can lag the
+      # final reply; the hook payload carries that reply separately.
+      last = ENVIRON["_NUDGE_LAST"]
+      if(last !~ /^[[:space:]]*$/ && turn[n] != "assistant: " last) turn[++n] = "assistant: " last
+      if(n == 0) exit 0
+      used = 0; first = n + 1
+      for(i=n; i>=1; i--){
+        l = length(turn[i]) + 2
+        if(used + l > max) break
+        used += l; first = i
+      }
+      if(first > n){
+        # The newest turn alone is over budget: keep its tail, starting on a
+        # character boundary (skip UTF-8 continuation bytes).
+        t = substr(turn[n], length(turn[n]) - max + 2)
+        while(length(t) && substr(t,1,1) ~ /[\200-\277]/) t = substr(t,2)
+        print t; exit 0
+      }
+      for(i=first; i<=n; i++){ print turn[i]; if(i < n) print "" }
+    }'
 }
 
 # --- subcommand: index (browse the Agent Index) --------------------------------
@@ -1107,14 +1261,19 @@ _glob_match() {
 	return "$rc"
 }
 
-cmd_which() {
-	local dir="${1:-$PWD}" owner="" url="" id path label sess home mocs mo mp signal=""
+# The vault whose match_owners/match_paths claim dir $1, on stdout. Returns 1
+# with nothing printed when no rule matches (the caller decides on a fallback);
+# _WHICH_SIGNAL is left holding the ids that have any routing rule.
+_which_confident() {
+	local dir="$1" owner="" url="" id mo mp
+	_WHICH_SIGNAL=""
 	if url=$(git -C "$dir" remote get-url origin 2>/dev/null); then
 		owner=$(printf '%s' "$url" | sed -E 's#.*github\.com[:/]##; s#/.*##')
 	fi
-	while IFS=$'\t' read -r id path label sess home mocs mo mp; do
-		[ -n "$id" ] || continue
-		[ -n "$mo$mp" ] && signal="${signal:+$signal,}$id"
+	# Unit-separator IFS, not TAB: TAB is IFS whitespace, so `read` would collapse
+	# an empty match_owners column and shift match_paths into it.
+	while IFS=$'\037' read -r id mo mp; do
+		[ -n "$mo$mp" ] && _WHICH_SIGNAL="${_WHICH_SIGNAL:+$_WHICH_SIGNAL,}$id"
 		if [ -n "$owner" ] && _glob_match "$owner" "$mo"; then
 			printf '%s\n' "$id"
 			return 0
@@ -1123,9 +1282,15 @@ cmd_which() {
 			printf '%s\n' "$id"
 			return 0
 		fi
-	done <<<"$_REG"
+	done < <(printf '%s' "$_REG" | awk -F'\t' '$1 != "" { print $1 "\037" $7 "\037" $8 }')
+	return 1
+}
+
+cmd_which() {
+	local dir="${1:-$PWD}"
+	_which_confident "$dir" && return 0
 	printf '%s\n' "$DEF_VAULT"
-	printf 'vaultmem: low-confidence guess (no %s signal) → %s\n' "${signal:-match}" "$DEF_VAULT" >&2
+	printf 'vaultmem: low-confidence guess (no %s signal) → %s\n' "${_WHICH_SIGNAL:-match}" "$DEF_VAULT" >&2
 }
 
 # --- subcommand: sessions (grouped picker for the SessionStart hook) -----------
@@ -3595,6 +3760,8 @@ _ext_exec() {
 #                               other [ext.judge] key in file order (the extension's
 #                               own doctor rejects unknown names; core does not)
 #   vault.<id>.judge=true|false every registry vault that has a path
+#   vault.<id>.label=<label>    then, per vault with a path in registry order, its
+#   vault.<id>.description=<s>  label (default: the id) and description (default: empty)
 _JUDGE_KEYS="enabled model base_url zdr timeout_ms key_file log rerank hook_judges"
 _judge_default() {
 	case "$1" in
@@ -3631,6 +3798,23 @@ cmd_judge_config() {
 		[ -n "$id" ] || continue
 		printf 'vault.%s.judge=%s\n' "$id" "$(_vault_judge "$id")"
 	done < <(printf '%s' "$_REG" | awk -F'\t' '$1 != "" && $2 != "" { print $1 }')
+	local label
+	while IFS=$'\t' read -r id label; do
+		[ -n "$id" ] || continue
+		printf 'vault.%s.label=%s\n' "$id" "$label"
+		printf 'vault.%s.description=%s\n' "$id" "$(_vault_desc "$id")"
+	done < <(printf '%s' "$_REG" | awk -F'\t' '$1 != "" && $2 != "" { print $1 "\t" $3 }')
+}
+
+# Vault $1's [vault.<id>] description, or nothing.
+_vault_desc() {
+	local did dv
+	while IFS=$'\t' read -r did dv; do
+		if [ "$did" = "$1" ]; then
+			printf '%s' "$dv"
+			return 0
+		fi
+	done <<<"$_REG_DESC"
 }
 
 # true|false: has vault $1 consented to egress ([vault.<id>] judge = true)?
@@ -3685,7 +3869,7 @@ while [ $# -gt 0 ]; do
 		shift 2
 		;;
 	-h | --help)
-		sed -n '4,161p' "$0"
+		sed -n '4,165p' "$0"
 		exit 0
 		;;
 	*)
@@ -3721,9 +3905,9 @@ status | sessions | verify | nudge | which | init | doctor | judge | _judge | ""
 esac
 
 case "${ARGS[0]:-}" in
-"") sed -n '4,161p' "$0" ;; # no args → print usage
+"") sed -n '4,165p' "$0" ;; # no args → print usage
 status) cmd_status ;;
-nudge) cmd_nudge ;;
+nudge) cmd_nudge "${ARGS[@]:1}" ;;
 index) cmd_index "${ARGS[1]:-}" ;;
 doctor) cmd_doctor "${ARGS[1]:-}" ;;
 mocs) cmd_mocs ;;

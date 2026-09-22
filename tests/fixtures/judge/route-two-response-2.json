@@ -1,0 +1,1 @@
+{"model":"typesafe-ai/jev","answers":{"moc":{"type":"choice","choice":"MOC - Agent Memory","probabilities":{"MOC - Agent Memory":0.79,"MOC - Home Lab":0.21},"confidence":0.79}},"usage":{"inputTokens":300,"outputTokens":20},"providerMetadata":{"gateway":{"cost":"0","marketCost":"0.000012"}}}

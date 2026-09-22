@@ -2910,7 +2910,11 @@ ext.judge.log=true
 ext.judge.rerank=false
 ext.judge.hook_judges=
 vault.flo.judge=false
-vault.jay.judge=false"
+vault.jay.judge=false
+vault.flo.label=Flo
+vault.flo.description=
+vault.jay.label=Personal
+vault.jay.description="
   [ "$output" = "$expected" ]
 }
 
@@ -2931,6 +2935,8 @@ path = "$OBS_FLO"
 judge = false
 
 [vault.jay]
+label = "Personal"
+description = "Home lab, dotfiles, side projects; never FloSports work"
 path = "$OBS_JAY"
 judge = true
 EOF
@@ -2947,7 +2953,11 @@ ext.judge.rerank=false
 ext.judge.hook_judges=nudge,groom
 ext.judge.future_key=kept
 vault.flo.judge=false
-vault.jay.judge=true"
+vault.jay.judge=true
+vault.flo.label=flo
+vault.flo.description=
+vault.jay.label=Personal
+vault.jay.description=Home lab, dotfiles, side projects; never FloSports work"
   [ "$output" = "$expected" ]
   # The extended config is inside the accepted subset.
   run "$JOM" doctor
@@ -3519,4 +3529,329 @@ EOF
   run "$OM"
   [ "$status" -eq 0 ]
   [[ "$output" == *"vaultmem groom --judge"* ]]
+}
+
+@test "judge config skips label and description lines for a pathless vault" {
+  judge_isolate
+  cat >"$VAULTMEM_CONFIG" <<EOF
+[vault.ghost]
+label = "Ghost"
+description = "no path yet"
+
+[vault.jay]
+path = "$OBS_JAY"
+description = "Personal notes"
+EOF
+  run "$JOM" judge config
+  [ "$status" -eq 0 ]
+  [[ "$output" != *"vault.ghost."* ]]
+  [ "${lines[$((${#lines[@]} - 2))]}" = "vault.jay.label=jay" ]
+  [ "${lines[$((${#lines[@]} - 1))]}" = "vault.jay.description=Personal notes" ]
+}
+
+@test "doctor accepts a quoted vault description" {
+  cat >"$VAULTMEM_CONFIG" <<EOF
+[vault.jay]
+path = "$OBS_JAY"
+description = "Personal: dotfiles, homelab, side projects"
+EOF
+  run "$OM" doctor
+  [[ "$output" != *"Config errors"* ]]
+  [[ "$output" != *"description"* ]]
+}
+
+@test "doctor hard-errors on a vault description that is not a quoted string" {
+  for bad in 'true' '42' 'personal-notes' '["a", "b"]'; do
+    cat >"$VAULTMEM_CONFIG" <<EOF
+[vault.jay]
+path = "$OBS_JAY"
+description = $bad
+EOF
+    run "$OM" doctor
+    [ "$status" -ne 0 ]
+    [[ "$output" == *'"description" in [vault.jay] must be a quoted string'* ]]
+  done
+}
+
+# --- nudge --judge (judge design 8.2) -------------------------------------------
+# A consenting, confidently-routed vault: flo claims $DEV_DIR/github.com/flocasts/**
+# and has judge = true; nudge is named in hook_judges. Each test runs from a repo
+# dir inside that glob. The stub extension records its args and stdin and prints
+# $BATS_TEST_TMPDIR/stub.out, exiting with $STUB_RC (default 0).
+nudge_judge_setup() { # $1 = hook_judges value, $2 = flo's judge value
+  judge_isolate
+  export VAULTMEM_EXT_DIR="$BATS_TEST_TMPDIR/extdir"
+  mkdir -p "$VAULTMEM_EXT_DIR/judge"
+  cat >"$VAULTMEM_EXT_DIR/judge/vaultmem-judge" <<EOF
+#!/usr/bin/env bash
+printf 'args=%s\n' "\$*" >"$BATS_TEST_TMPDIR/stub.ran"
+cat >"$BATS_TEST_TMPDIR/stub.stdin"
+cat "$BATS_TEST_TMPDIR/stub.out" 2>/dev/null
+exit \${STUB_RC:-0}
+EOF
+  chmod +x "$VAULTMEM_EXT_DIR/judge/vaultmem-judge"
+  cat >"$VAULTMEM_CONFIG" <<EOF
+[ext.judge]
+enabled = true
+hook_judges = "${1-groom, nudge}"
+
+[vault.flo]
+label = "Flo"
+path = "$OBS_FLO"
+match_paths = "$DEV_DIR/github.com/flocasts/**"
+judge = ${2:-true}
+
+[vault.jay]
+path = "$OBS_JAY"
+judge = true
+EOF
+  printf -- '---\nschema: 1\n---\n# Home\n<!-- AGENT-INDEX:START -->\n<!-- AGENT-INDEX:END -->\n' >"$OBS_FLO/Home.md"
+  mkdir -p "$OBS_FLO/Sessions/live" "$OBS_FLO/Projects"
+  printf -- '---\nstatus: active\n---\n# live\n' >"$OBS_FLO/Sessions/live/_index.md"
+  printf -- '---\ntype: project\nstatus: active\n---\n# Notes\n' >"$OBS_FLO/Projects/Notes.md"
+  find "$OBS_FLO" "$OBS_JAY" -type f -exec touch -t 202001010000 {} +
+  mkdir -p "$XDG_CACHE_HOME/vaultmem" "$DEV_DIR/github.com/flocasts/app"
+  touch "$XDG_CACHE_HOME/vaultmem/nudge-stamp"
+  # A Claude Code transcript: plain-string and array user turns, an assistant
+  # text turn, and lines that must never reach the judge (a tool result, a
+  # subagent sidechain turn, a meta line, thinking, a tool_use).
+  TRANSCRIPT="$BATS_TEST_TMPDIR/transcript.jsonl"
+  cat >"$TRANSCRIPT" <<'EOF'
+{"type":"summary","summary":"old"}
+{"parentUuid":null,"isSidechain":false,"type":"user","message":{"role":"user","content":"why does the cache thrash?"},"uuid":"u1"}
+{"parentUuid":"u1","isSidechain":false,"type":"assistant","message":{"role":"assistant","content":[{"type":"thinking","thinking":"SECRET-THOUGHT"},{"type":"tool_use","id":"t1","name":"Bash","input":{"command":"ls"}}]},"uuid":"a1"}
+{"parentUuid":"a1","isSidechain":false,"type":"user","message":{"role":"user","content":[{"tool_use_id":"t1","type":"tool_result","content":"TOOL-OUTPUT"}]},"uuid":"u2"}
+{"parentUuid":"u2","isSidechain":true,"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"SUBAGENT-TEXT"}]},"uuid":"s1"}
+{"parentUuid":"u2","isSidechain":false,"isMeta":true,"type":"user","message":{"role":"user","content":"META-CAVEAT"},"uuid":"m1"}
+{"parentUuid":"u2","isSidechain":false,"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"Root cause: the \"eviction\" TTL was 0.\nFixed it."}]},"uuid":"a2"}
+{"parentUuid":"a2","isSidechain":false,"type":"user","message":{"role":"user","content":[{"type":"text","text":"great, thanks"}]},"uuid":"u3"}
+EOF
+  HOOK_JSON="{\"session_id\":\"s\",\"transcript_path\":\"$TRANSCRIPT\",\"cwd\":\"$DEV_DIR/github.com/flocasts/app\",\"hook_event_name\":\"Stop\",\"stop_hook_active\":false}"
+  cat >"$BATS_TEST_TMPDIR/stub.out" <<'EOF'
+{"id":"j-7","judge":"capture-worthy","answers":{"durable":{"type":"boolean","probability":0.93},"kind":{"type":"choice","choice":"root-cause","confidence":0.8,"probabilities":{"root-cause":0.8,"decision":0.1}}},"gate":{"question":"durable","verdict":"yes"}}
+EOF
+}
+
+# Run nudge from the routed repo dir with $1 on stdin; extra args pass through.
+nudge_run() { # $1 = stdin text, rest = nudge args
+  local in="$1"
+  shift
+  cd "$DEV_DIR/github.com/flocasts/app"
+  run "$JOM" nudge "$@" <<<"$in"
+}
+
+NUDGE_HEURISTIC_LINE='⚠ vaultmem: notes changed this session but no Sessions/*/_index.md was updated — capture the work log / `updated:` before you stop.'
+NUDGE_JUDGE_LINE='⚠ vaultmem: this session looks to hold a durable root-cause; capture it (vault-capture) before you stop.'
+
+@test "nudge --judge prints the durable line on a confident yes, with the design 8.2 call" {
+  nudge_judge_setup
+  nudge_run "$HOOK_JSON" --judge
+  [ "$status" -eq 0 ]
+  [ "$output" = "$NUDGE_JUDGE_LINE" ]
+  grep -qx 'args=capture-worthy --vault flo --subject nudge --gate durable' "$BATS_TEST_TMPDIR/stub.ran"
+  state=$(cat "$BATS_TEST_TMPDIR/stub.stdin")
+  [[ "$state" == *"user: why does the cache thrash?"* ]]
+  [[ "$state" == *'assistant: Root cause: the "eviction" TTL was 0.'* ]]
+  [[ "$state" == *"user: great, thanks"* ]]
+  for leak in TOOL-OUTPUT SUBAGENT-TEXT META-CAVEAT SECRET-THOUGHT '"command"' summary; do
+    [[ "$state" != *"$leak"* ]]
+  done
+}
+
+@test "nudge --judge reads the Codex transcript shape and skips developer messages" {
+  nudge_judge_setup
+  cat >"$TRANSCRIPT" <<'EOF'
+{"timestamp":"t","type":"session_meta","payload":{"id":"x"}}
+{"timestamp":"t","type":"response_item","payload":{"type":"message","role":"developer","content":[{"type":"input_text","text":"DEV-INSTRUCTIONS"}]}}
+{"timestamp":"t","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"pick the queue"}]}}
+{"timestamp":"t","type":"event_msg","payload":{"type":"agent_message","message":"DUPLICATE-EVENT"}}
+{"timestamp":"t","type":"response_item","payload":{"type":"function_call_output","call_id":"c","output":"TOOL-OUTPUT"}}
+{"timestamp":"t","type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"Decision: SQS over Kafka."}]}}
+EOF
+  nudge_run "$HOOK_JSON" --judge
+  [ "$status" -eq 0 ]
+  [ "$output" = "$NUDGE_JUDGE_LINE" ]
+  state=$(cat "$BATS_TEST_TMPDIR/stub.stdin")
+  [ "$state" = "user: pick the queue
+
+assistant: Decision: SQS over Kafka." ]
+}
+
+@test "nudge --judge appends last_assistant_message when the transcript lags it" {
+  nudge_judge_setup
+  json="{\"transcript_path\":\"$TRANSCRIPT\",\"last_assistant_message\":\"Pattern: retry with jitter.\\nDone.\"}"
+  nudge_run "$json" --judge
+  [ "$status" -eq 0 ]
+  state=$(cat "$BATS_TEST_TMPDIR/stub.stdin")
+  [[ "$state" == *"user: great, thanks
+
+assistant: Pattern: retry with jitter.
+Done." ]]
+  # Already the newest turn in the transcript: not repeated.
+  printf '%s\n' '{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"same"}]}}' >>"$TRANSCRIPT"
+  json="{\"transcript_path\":\"$TRANSCRIPT\",\"last_assistant_message\":\"same\"}"
+  nudge_run "$json" --judge
+  [ "$(grep -c '^assistant: same$' "$BATS_TEST_TMPDIR/stub.stdin")" -eq 1 ]
+}
+
+@test "nudge --judge keeps the state under 24000 bytes, newest turns whole" {
+  nudge_judge_setup
+  big=$(head -c 5000 /dev/zero | tr '\0' 'x')
+  : >"$TRANSCRIPT"
+  for i in 1 2 3 4 5 6 7 8 9 10; do
+    printf '{"type":"user","message":{"role":"user","content":"turn-%s %s"}}\n' "$i" "$big" >>"$TRANSCRIPT"
+  done
+  nudge_run "$HOOK_JSON" --judge
+  [ "$status" -eq 0 ]
+  [ "$(wc -c <"$BATS_TEST_TMPDIR/stub.stdin")" -le 24000 ]
+  grep -q '^user: turn-10 ' "$BATS_TEST_TMPDIR/stub.stdin"
+  grep -q '^user: turn-7 ' "$BATS_TEST_TMPDIR/stub.stdin"
+  run grep -c 'turn-6 ' "$BATS_TEST_TMPDIR/stub.stdin"
+  [ "$output" = 0 ]
+  # One turn over budget on its own: its tail is sent, still under budget.
+  printf '{"type":"user","message":{"role":"user","content":"%s END"}}\n' "$(head -c 30000 /dev/zero | tr '\0' 'y')" >"$TRANSCRIPT"
+  nudge_run "$HOOK_JSON" --judge
+  [ "$(wc -c <"$BATS_TEST_TMPDIR/stub.stdin")" -le 24001 ]
+  grep -q 'y END$' "$BATS_TEST_TMPDIR/stub.stdin"
+}
+
+@test "nudge --judge prints the heuristic line first, unchanged, then the judge line" {
+  nudge_judge_setup
+  touch -t 202001010000 "$XDG_CACHE_HOME/vaultmem/nudge-stamp"
+  touch "$OBS_FLO/Projects/Notes.md"
+  nudge_run "$HOOK_JSON" --judge
+  [ "$status" -eq 0 ]
+  [ "${#lines[@]}" -eq 2 ]
+  [ "${lines[0]}" = "$NUDGE_HEURISTIC_LINE" ]
+  [ "${lines[1]}" = "$NUDGE_JUDGE_LINE" ]
+}
+
+@test "nudge without --judge is byte-identical with the extension installed and enabled" {
+  nudge_judge_setup
+  touch -t 202001010000 "$XDG_CACHE_HOME/vaultmem/nudge-stamp"
+  touch "$OBS_FLO/Projects/Notes.md"
+  nudge_run "$HOOK_JSON"
+  [ "$status" -eq 0 ]
+  with_ext="$output"
+  [ ! -e "$BATS_TEST_TMPDIR/stub.ran" ]
+  [ ! -e "$BATS_TEST_TMPDIR/stub.stdin" ]
+  # Same vault state with no extension anywhere and no [ext.judge] block.
+  mv "$VAULTMEM_EXT_DIR" "$BATS_TEST_TMPDIR/ext-gone"
+  sed -i.bak '/^\[ext.judge\]/,/^$/d' "$VAULTMEM_CONFIG"
+  touch -t 202001010000 "$XDG_CACHE_HOME/vaultmem/nudge-stamp"
+  nudge_run "$HOOK_JSON"
+  [ "$status" -eq 0 ]
+  [ "$output" = "$with_ext" ]
+  [ "$output" = "$NUDGE_HEURISTIC_LINE" ]
+}
+
+@test "nudge --judge never runs the judge when nudge is not in hook_judges" {
+  for hj in "" "groom" "nudger, groom"; do
+    nudge_judge_setup "$hj"
+    nudge_run "$HOOK_JSON" --judge
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]
+    [ ! -e "$BATS_TEST_TMPDIR/stub.ran" ]
+  done
+}
+
+@test "nudge --judge never runs the judge for a vault that has not consented" {
+  nudge_judge_setup "nudge" false
+  nudge_run "$HOOK_JSON" --judge
+  [ "$status" -eq 0 ]
+  [ -z "$output" ]
+  [ ! -e "$BATS_TEST_TMPDIR/stub.ran" ]
+}
+
+@test "nudge --judge never runs the judge on a low-confidence vault guess" {
+  nudge_judge_setup
+  # jay consents, but it is only the fallback for this dir, not a routing match.
+  mkdir -p "$BATS_TEST_TMPDIR/elsewhere"
+  cd "$BATS_TEST_TMPDIR/elsewhere"
+  run "$JOM" nudge --judge <<<"$HOOK_JSON"
+  [ "$status" -eq 0 ]
+  [ -z "$output" ]
+  [ ! -e "$BATS_TEST_TMPDIR/stub.ran" ]
+}
+
+@test "nudge --judge is inert when [ext.judge] is disabled" {
+  nudge_judge_setup
+  sed -i.bak 's/^enabled = true/enabled = false/' "$VAULTMEM_CONFIG"
+  nudge_run "$HOOK_JSON" --judge
+  [ "$status" -eq 0 ]
+  [ -z "$output" ]
+  [ ! -e "$BATS_TEST_TMPDIR/stub.ran" ]
+}
+
+@test "nudge --judge does not judge when a session _index.md was updated" {
+  nudge_judge_setup
+  touch "$OBS_FLO/Sessions/live/_index.md"
+  nudge_run "$HOOK_JSON" --judge
+  [ "$status" -eq 0 ]
+  [ -z "$output" ]
+  [ ! -e "$BATS_TEST_TMPDIR/stub.ran" ]
+}
+
+@test "nudge --judge prints nothing extra on non-JSON stdin or a missing transcript_path" {
+  nudge_judge_setup
+  for in in "not json at all" "" '{"session_id":"s","stop_hook_active":false}' \
+    '{"transcript_path":null}' "{\"transcript_path\":\"$BATS_TEST_TMPDIR/missing.jsonl\"}"; do
+    nudge_run "$in" --judge
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]
+    [ ! -e "$BATS_TEST_TMPDIR/stub.ran" ]
+  done
+}
+
+@test "nudge --judge prints nothing extra when the judge exits 1, 2, or 3" {
+  nudge_judge_setup
+  for rc in 1 2 3; do
+    : >"$BATS_TEST_TMPDIR/stub.ran"
+    STUB_RC=$rc nudge_run "$HOOK_JSON" --judge
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]
+    grep -q '^args=capture-worthy' "$BATS_TEST_TMPDIR/stub.ran"
+  done
+}
+
+@test "nudge --judge prints nothing extra for kind none, a missing kind, or junk output" {
+  nudge_judge_setup
+  for out in \
+    '{"id":"j","answers":{"durable":{"probability":0.9},"kind":{"type":"choice","choice":"none"}}}' \
+    '{"id":"j","answers":{"durable":{"probability":0.9}}}' \
+    'not json' ''; do
+    printf '%s\n' "$out" >"$BATS_TEST_TMPDIR/stub.out"
+    nudge_run "$HOOK_JSON" --judge
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]
+  done
+}
+
+@test "nudge --judge with the extension not installed prints nothing extra" {
+  nudge_judge_setup
+  mv "$VAULTMEM_EXT_DIR" "$BATS_TEST_TMPDIR/ext-gone"
+  nudge_run "$HOOK_JSON" --judge
+  [ "$status" -eq 0 ]
+  [ -z "$output" ]
+}
+
+@test "usage documents nudge --judge" {
+  run "$OM"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"vaultmem nudge [--judge]"* ]]
+}
+
+@test "which routes by match_paths on a vault with no match_owners" {
+  cat >"$VAULTMEM_CONFIG" <<EOF
+[vault.flo]
+path = "$OBS_FLO"
+match_paths = "$DEV_DIR/work/**"
+
+[vault.jay]
+path = "$OBS_JAY"
+EOF
+  mkdir -p "$DEV_DIR/work/app"
+  run "$OM" which "$DEV_DIR/work/app"
+  [ "$status" -eq 0 ]
+  [ "$output" = flo ]
 }

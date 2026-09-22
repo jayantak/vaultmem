@@ -1,0 +1,1 @@
+{"model":"typesafe-ai/jev","answers":{"durable":{"type":"boolean","probability":0.93},"kind":{"type":"choice","choice":"root-cause","probabilities":{"decision":0.12,"root-cause":0.81,"incident":0.03,"pattern":0.02,"milestone":0.01,"none":0.01},"confidence":0.81}},"usage":{"inputTokens":612,"outputTokens":40},"providerMetadata":{"gateway":{"cost":"0","marketCost":"0.00002448"}}}

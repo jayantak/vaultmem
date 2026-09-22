@@ -1,0 +1,5 @@
+Nightly athlete rebuild OOM: stream per team, not one array.
+
+Root cause: the fan-out held every team profile in memory before writing.
+Decision: keep streaming per team; do not raise the 3 GiB limit, which only
+moves the ceiling.

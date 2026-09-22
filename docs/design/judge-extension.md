@@ -1,6 +1,6 @@
 # Design: the `judge` extension (typed decisions via Vercel AI Gateway)
 
-Status: **proposed, approved in principle by the owner 2026-09-21. Not built.**
+Status: **building. Phases 0 to 2 shipped; see section 13.**
 Audience: an agent picking this up cold in this repo. Read `AGENTS.md` first.
 
 ## 1. Summary
@@ -552,7 +552,7 @@ not by feel. `vaultmem judge bench` makes that real:
 |---|---|---|
 | 0 | Resolve section 4 unknowns with a throwaway curl. Record findings here. **Done 2026-09-21.** | ZDR behavior and model pinning are known facts |
 | 1 | Core shim, config keys + lint, `_ext_exec`, `_judge`, extension skeleton, egress gate, exit codes, log, `doctor`, tests with curl shim, `install.sh --ext`. **Done 2026-09-22.** | `vaultmem judge <name>` works end to end against the shim; all CI jobs green |
-| 2 | `groom --judge` + `groom-triage` judge, `feedback`, `calibration` | owner runs it on a consenting vault for two weeks and reviews calibration |
+| 2 | `groom --judge` + `groom-triage` judge, `feedback`, `calibration`. **Done 2026-09-22.** | owner runs it on a consenting vault for two weeks and reviews calibration |
 | 3 | `nudge --judge`, `judge route`, `judge dupes` | hook stays silent and under `timeout_ms` in every failure mode |
 | 4 | `bench`, then search `--rerank` | bench numbers exist; default stays off unless they justify it |
 | 5 | `doctor --judge`, `judge prompt` | same fail-open tests as above |

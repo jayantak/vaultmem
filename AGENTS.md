@@ -74,6 +74,8 @@ router (`vaults`/`path`/`which`), the lifecycle tier
 (`doctor`), setup (`init`), and the extension shim (`judge`). `groom --judge`
 annotates its cold-parked/stale-active rows with a `groom-triage` judgment and
 is advisory only: judging runs after the scan, so it never reaches a move.
+`nudge --judge` adds a second Stop-hook line when `capture-worthy` finds a
+durable decision/root cause in the transcript tail.
 
 **Adding usage lines? Bump the `sed` range.** The usage block is printed by a
 hardcoded `sed -n '4,Np' "$0"` in *two* places (the `-h` branch and the no-args
@@ -119,7 +121,9 @@ vault makes them exit `0` printing nothing, so a hook wired with a
 Full wiring examples for both harnesses, and how to customize the printed
 `directive_file` line: [docs/hooks.md](docs/hooks.md). Never change
 `cmd_status`/`cmd_sessions` to error on a missing vault — that contract is
-load-bearing for every downstream hook config.
+load-bearing for every downstream hook config. `nudge` (Stop hook) holds the
+same contract, and `nudge --judge` keeps it on every judge failure path: it
+prints nothing extra and exits `0`.
 
 ## The extension model
 
