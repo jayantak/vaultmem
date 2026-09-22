@@ -71,7 +71,9 @@ subcommand. Broad shape: search/index (`<query>`, `index`, `mocs`), the
 wikilink graph (`resolve`/`links`/`backlinks`/`neighbors`/`dangling`), the
 router (`vaults`/`path`/`which`), the lifecycle tier
 (`sessions`/`projects`/`project`/`next`/`task`/`groom`/`status`), hygiene
-(`doctor`), setup (`init`), and the extension shim (`judge`).
+(`doctor`), setup (`init`), and the extension shim (`judge`). `groom --judge`
+annotates its cold-parked/stale-active rows with a `groom-triage` judgment and
+is advisory only: judging runs after the scan, so it never reaches a move.
 
 **Adding usage lines? Bump the `sed` range.** The usage block is printed by a
 hardcoded `sed -n '4,Np' "$0"` in *two* places (the `-h` branch and the no-args
