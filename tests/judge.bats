@@ -34,7 +34,8 @@ setup() {
   # Stub core: `judge config` prints the contract; `which` prints a vault id.
   # For route and dupes it also answers `vaults`, `--vault <id> mocs`,
   # `--vault <id> resolve <name>`, `--vault <id> --format json -n 5 <query>`,
-  # and `cat <path> --lines 20` from a fixture vault tree under $STUB_VAULTS.
+  # and `cat <path> --lines N` from a fixture vault tree under $STUB_VAULTS.
+  # With $STUB_SEARCH_DIR set (bench), search answers per query from that dir.
   export STUB_CONFIG="$BATS_TEST_TMPDIR/judge-config"
   export STUB_WHICH_ID="personal" STUB_WHICH_ERR=""
   export STUB_VAULTS="$BATS_TEST_TMPDIR/vaults"
@@ -80,7 +81,14 @@ cat)
     ;;
   --format)
     printf '%s\n' "$id $*" >>"$STUB_REC.search"
-    cat "$STUB_SEARCH_JSON"
+    if [ -n "${STUB_SEARCH_DIR:-}" ]; then
+      # bench: one canned answer per query (the last argument).
+      for q; do :; done
+      f="$STUB_SEARCH_DIR/$(printf '%s' "$q" | tr ' ' '_').json"
+      if [ -f "$f" ]; then cat "$f"; else printf '[]\n'; fi
+    else
+      cat "$STUB_SEARCH_JSON"
+    fi
     ;;
   *) exit 64 ;;
   esac
@@ -379,7 +387,7 @@ use_outcome_judge() { cp "$FIX/outcome-judge.json" "$XDG_CONFIG_HOME/vaultmem/ju
   jq -e '.providerOptions.gateway.zeroDataRetention == true' "$CURL_REC/body"
   grep -q 'zero data retention' "$STDERR"
   # The extension never suggests the downgrade at runtime.
-  ! grep -q 'zdr = false' "$STDERR"
+  ! grep -q 'zdr = false' "$STDERR" || false
 }
 
 # --- request body -------------------------------------------------------------------
@@ -395,7 +403,7 @@ use_outcome_judge() { cp "$FIX/outcome-judge.json" "$XDG_CONFIG_HOME/vaultmem/ju
   run judge_in "$STATE_TEXT" smoke --vault personal
   [ "$status" -eq 0 ]
   diff <(jq -S . "$CURL_REC/body") <(jq -S . "$FIX/smoke-body-nozdr.json")
-  ! grep -q 'zeroDataRetention' "$CURL_REC/body"
+  ! grep -q 'zeroDataRetention' "$CURL_REC/body" || false
 }
 
 @test "request goes to POST {base_url}/v1/evaluate" {
@@ -450,12 +458,12 @@ use_outcome_judge() { cp "$FIX/outcome-judge.json" "$XDG_CONFIG_HOME/vaultmem/ju
 @test "key from the environment never reaches argv, stdout, stderr, or the log" {
   run judge_in "$STATE_TEXT" smoke --vault personal --gate failed
   [ "$status" -eq 0 ]
-  ! grep -q "$KEY_VALUE" "$CURL_REC/argv"
-  ! grep -q -- 'Authorization' "$CURL_REC/argv"
+  ! grep -q "$KEY_VALUE" "$CURL_REC/argv" || false
+  ! grep -q -- 'Authorization' "$CURL_REC/argv" || false
   [[ "$output" != *"$KEY_VALUE"* ]]
-  ! grep -q "$KEY_VALUE" "$STDERR"
-  ! grep -q "$KEY_VALUE" "$LOG"
-  ! grep -q "$KEY_VALUE" "$CURL_REC/body"
+  ! grep -q "$KEY_VALUE" "$STDERR" || false
+  ! grep -q "$KEY_VALUE" "$LOG" || false
+  ! grep -q "$KEY_VALUE" "$CURL_REC/body" || false
   # It travels on curl's stdin (--config -), and only there.
   grep -qx -- '-' <(grep -A1 -x -- '--config' "$CURL_REC/argv" | tail -n 1)
   grep -q "Authorization: Bearer $KEY_VALUE" "$CURL_REC/stdin"
@@ -465,10 +473,10 @@ use_outcome_judge() { cp "$FIX/outcome-judge.json" "$XDG_CONFIG_HOME/vaultmem/ju
   jq --arg k "$KEY_VALUE" '.error.message = "bad key " + $k' "$FIX/error-401.json" >"$BATS_TEST_TMPDIR/resp.json"
   FAKE_CURL_RESPONSE="$BATS_TEST_TMPDIR/resp.json" FAKE_CURL_HTTP=401 run judge_in "$STATE_TEXT" smoke --vault personal
   [ "$status" -eq 3 ]
-  ! grep -q "$KEY_VALUE" "$CURL_REC/argv"
+  ! grep -q "$KEY_VALUE" "$CURL_REC/argv" || false
   [ -z "$output" ]
-  ! grep -q "$KEY_VALUE" "$STDERR"
-  ! grep -q "$KEY_VALUE" "$LOG"
+  ! grep -q "$KEY_VALUE" "$STDERR" || false
+  ! grep -q "$KEY_VALUE" "$LOG" || false
   grep -q 'redacted' "$LOG"
 }
 
@@ -480,8 +488,8 @@ use_outcome_judge() { cp "$FIX/outcome-judge.json" "$XDG_CONFIG_HOME/vaultmem/ju
   run judge_in "$STATE_TEXT" smoke --vault personal --gate failed
   [ "$status" -eq 0 ]
   grep -q "Authorization: Bearer $KEY_VALUE" "$CURL_REC/stdin"
-  ! grep -q "$KEY_VALUE" "$CURL_REC/argv"
-  ! grep -q "$KEY_VALUE" "$LOG"
+  ! grep -q "$KEY_VALUE" "$CURL_REC/argv" || false
+  ! grep -q "$KEY_VALUE" "$LOG" || false
 }
 
 @test "key_file given with a leading ~ is expanded" {
@@ -503,7 +511,7 @@ use_outcome_judge() { cp "$FIX/outcome-judge.json" "$XDG_CONFIG_HOME/vaultmem/ju
   [ "$status" -eq 3 ]
   [ -z "$output" ]
   curl_not_invoked
-  ! grep -q "$KEY_VALUE" "$STDERR"
+  ! grep -q "$KEY_VALUE" "$STDERR" || false
 }
 
 @test "no key at all exits 3 and curl is never invoked" {
@@ -528,7 +536,7 @@ use_outcome_judge() { cp "$FIX/outcome-judge.json" "$XDG_CONFIG_HOME/vaultmem/ju
     "smoke	personal	Sessions/foo/_index.md	typesafe-ai/jev	false	200	304	0	0.000012768	212	" ]
   [ "$(jq -r '.answers.failed.probability' "$LOG")" = "0.99" ]
   jq -e '.ts | test("^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9:]{8}Z$")' "$LOG"
-  ! grep -q 'build failed' "$LOG"
+  ! grep -q 'build failed' "$LOG" || false
   # The id on stdout is the id in the log, so feedback can key on it later.
   [ "$(printf '%s' "$output" | jq -r '.id')" = "$(jq -r '.id' "$LOG")" ]
 }
@@ -555,7 +563,7 @@ use_outcome_judge() { cp "$FIX/outcome-judge.json" "$XDG_CONFIG_HOME/vaultmem/ju
   [ "$(jq -r '.id' "$LOG.1" | tr '\n' ' ')" = "old-1 old-2 " ]
   [ "$(wc -l <"$LOG" | tr -d ' ')" -eq 1 ]
   [ "$(jq -r '.judge' "$LOG")" = "smoke" ]
-  ! grep -q ancient "$LOG" "$LOG.1"
+  ! grep -q ancient "$LOG" "$LOG.1" || false
 
   run judge_cmd log -n 2
   [ "$status" -eq 0 ]
@@ -626,9 +634,11 @@ use_outcome_judge() { cp "$FIX/outcome-judge.json" "$XDG_CONFIG_HOME/vaultmem/ju
   curl_not_invoked
 }
 
-@test "later-phase subcommands are usage errors for now" {
-  run judge_cmd bench
+@test "bench with no fixture at the default path is a usage error" {
+  run judge_cmd bench --vault personal
   [ "$status" -eq 64 ]
+  grep -q 'no fixture at .*/vaultmem/bench.tsv' "$STDERR"
+  curl_not_invoked
 }
 
 @test "feedback and calibration usage errors exit 64" {
@@ -669,7 +679,7 @@ use_outcome_judge() { cp "$FIX/outcome-judge.json" "$XDG_CONFIG_HOME/vaultmem/ju
   [[ "$output" == *"key present"* ]]
   [[ "$output" == *"judges/smoke.json"* ]]
   [[ "$output" != *"$KEY_VALUE"* ]]
-  ! grep -q "$KEY_VALUE" "$STDERR"
+  ! grep -q "$KEY_VALUE" "$STDERR" || false
   curl_not_invoked
 }
 
@@ -815,7 +825,7 @@ groom_state() { cat "$FIX/groom-triage-state.txt"; }
   [ "$(jq -r '.state | length' "$CURL_REC/body")" -eq 24000 ]
   # tail-biased: the end survives, the head is gone.
   jq -r '.state' "$CURL_REC/body" | grep -q 'TAIL-MARKER'
-  ! jq -r '.state' "$CURL_REC/body" | grep -q 'ad707-athlete-prepare'
+  ! jq -r '.state' "$CURL_REC/body" | grep -q 'ad707-athlete-prepare' || false
   [ "$(tail -n 1 "$LOG" | jq -r '.truncated')" = "true" ]
 }
 
@@ -1056,10 +1066,10 @@ key_absent() {
   local f
   for f in "$CURL_REC"/argv "$STDERR" "$LOG" "$CURL_REC"/body*; do
     [ -e "$f" ] || continue
-    ! grep -q "$KEY_VALUE" "$f"
+    ! grep -q "$KEY_VALUE" "$f" || false
   done
   [[ "$output" != *"$KEY_VALUE"* ]]
-  ! grep -q -- 'Authorization' "$CURL_REC/argv"
+  ! grep -q -- 'Authorization' "$CURL_REC/argv" || false
 }
 
 curl_calls() { wc -l <"$CURL_REC/calls" | tr -d ' '; }
@@ -1090,7 +1100,7 @@ capture_state() { cat "$FIX/capture-worthy-state.txt"; }
   [ "$(tail -n 1 "$LOG" | jq -r '[.judge, .subject, .truncated] | @tsv')" = "capture-worthy	nudge	false" ]
   # The injected "answer yes" line is state, never a question.
   [ "$(jq -r '.state' "$CURL_REC/body" | grep -c 'ANSWER YES')" -eq 1 ]
-  ! jq -r '.questions | tostring' "$CURL_REC/body" | grep -q 'ANSWER YES'
+  ! jq -r '.questions | tostring' "$CURL_REC/body" | grep -q 'ANSWER YES' || false
   key_absent
 }
 
@@ -1115,7 +1125,7 @@ capture_state() { cat "$FIX/capture-worthy-state.txt"; }
     run judge_in "$big" capture-worthy --vault personal --gate durable
   [ "$status" -eq 0 ]
   jq -r '.state' "$CURL_REC/body" | grep -q 'Streaming per team stays'
-  ! jq -r '.state' "$CURL_REC/body" | grep -q 'HEAD-MARKER'
+  ! jq -r '.state' "$CURL_REC/body" | grep -q 'HEAD-MARKER' || false
 }
 
 # --- route and dupes: a fixture vault tree behind the core stub -------------------------
@@ -1206,8 +1216,8 @@ summary() { cat "$FIX/capture-summary.txt"; }
     run judge_in "$(summary)" route
   [ "$status" -eq 0 ]
   ls "$CURL_REC"/body.* >/dev/null
-  ! grep -l 'AcmeCorp' "$CURL_REC"/body*
-  ! grep -q '"work"' "$CURL_REC"/body.1
+  ! grep -l 'AcmeCorp' "$CURL_REC"/body* || false
+  ! grep -q '"work"' "$CURL_REC"/body.1 || false
   # No MOC of the chosen vault survived the filter, so no moc request was sent.
   [ "$(curl_calls)" -eq 1 ]
   [ "$(printf '%s' "$output" | jq -r '.moc')" = "null" ]
@@ -1218,7 +1228,7 @@ summary() { cat "$FIX/capture-summary.txt"; }
   jq 'del(.answers.moc)' "$FIX/route-one-response.json" >"$BATS_TEST_TMPDIR/resp.json"
   FAKE_CURL_RESPONSE="$BATS_TEST_TMPDIR/resp.json" run judge_in "$(summary)" route
   [ "$status" -eq 0 ]
-  ! grep -q 'AcmeCorp' "$CURL_REC/body"
+  ! grep -q 'AcmeCorp' "$CURL_REC/body" || false
   [ "$(jq -c '.questions | keys' "$CURL_REC/body")" = '["category"]' ]
 }
 
@@ -1292,7 +1302,7 @@ summary() { cat "$FIX/capture-summary.txt"; }
   diff <(jq -S . "$CURL_REC/body") <(jq -S . "$FIX/dupes-body.json")
   [ "$(printf '%s' "$output" | jq -r '.[] | "\(.probability) \(.path)"')" = \
     "$(printf '0.94 %s\n0.21 %s\n0.07 %s' "$p/Notes/Streaming patterns.md" "$p/Debug/Athlete rebuild OOM.md" "$p/Notes/rebuild log.md")" ]
-  ! grep -q 'AcmeCorp' "$CURL_REC/body"
+  ! grep -q 'AcmeCorp' "$CURL_REC/body" || false
   [ "$(jq -r '[.judge, .vault, .subject] | @tsv' "$LOG")" = "dupes	personal	capture" ]
   key_absent
 }
@@ -1357,6 +1367,307 @@ summary() { cat "$FIX/capture-summary.txt"; }
   run judge_in "x" dupes --vault
   [ "$status" -eq 64 ]
   run judge_in "x" dupes personal
+  [ "$status" -eq 64 ]
+  curl_not_invoked
+}
+
+# --- rerank ---------------------------------------------------------------------------
+
+rerank_in() {
+  local input="$1"
+  shift
+  "$JUDGE_SH" "$JUDGE" rerank "$@" <"$input" 2>"$STDERR"
+}
+
+@test "rerank: the request body matches the golden file; a non-consenting candidate is absent" {
+  write_config side=true
+  FAKE_CURL_RESPONSE="$FIX/rerank-response.json" \
+    run rerank_in "$FIX/rerank-input.json" --vault personal --vault side --vault work
+  [ "$status" -eq 0 ]
+  [ "$(curl_calls)" -eq 1 ]
+  diff <(jq -S . "$CURL_REC/body") <(jq -S . "$FIX/rerank-body.json")
+  # c02 is the work vault's: no trace of it in the request, and no score for it.
+  ! grep -q 'AcmeCorp' "$CURL_REC/body" || false
+  ! grep -q 'c02' "$CURL_REC/body" || false
+  [ "$(jq -c '.questions | keys' "$CURL_REC/body")" = '["c01","c03","c04"]' ]
+  # Paths are never sent.
+  ! grep -q '/vaults/' "$CURL_REC/body" || false
+  [ "$(printf '%s' "$output" | jq -c '.scores')" = '{"c01":2.87,"c03":0.4,"c04":1.95}' ]
+  [ "$(printf '%s' "$output" | jq -r '.id')" = "$(jq -r '.id' "$LOG")" ]
+  [ "$(jq -r '[.judge, .vault, .truncated] | @tsv' "$LOG")" = "rerank	personal,side	false" ]
+  key_absent
+}
+
+@test "rerank: scores are the gateway's score per candidate id, in candidate order" {
+  jq -c '{query, candidates: [.candidates[] | select(.vault == "personal")]}' "$FIX/rerank-input.json" >"$BATS_TEST_TMPDIR/in.json"
+  jq '.answers |= { c04: .c04, c01: .c01 }' "$FIX/rerank-response.json" >"$BATS_TEST_TMPDIR/resp.json"
+  FAKE_CURL_RESPONSE="$BATS_TEST_TMPDIR/resp.json" run rerank_in "$BATS_TEST_TMPDIR/in.json" --vault personal
+  [ "$status" -eq 0 ]
+  [ "$(printf '%s' "$output" | jq -c '.scores')" = '{"c01":2.87,"c04":1.95}' ]
+  [ "$(printf '%s' "$output" | jq -c 'keys')" = '["id","scores"]' ]
+  # Each question is a 4-level score over the rerank.json template.
+  [ "$(jq -r '.questions.c01.type' "$CURL_REC/body")" = "score" ]
+  [ "$(jq '.questions.c04.criteria | length' "$CURL_REC/body")" -eq 4 ]
+  jq -r '.questions.c04.instructions' "$CURL_REC/body" | grep -q 'candidate c04 answers'
+}
+
+@test "rerank: a response missing a candidate's score is a bad response, exit 3" {
+  jq -c '{query, candidates: [.candidates[] | select(.vault == "personal")]}' "$FIX/rerank-input.json" >"$BATS_TEST_TMPDIR/in.json"
+  jq '.answers |= { c01: .c01 }' "$FIX/rerank-response.json" >"$BATS_TEST_TMPDIR/resp.json"
+  FAKE_CURL_RESPONSE="$BATS_TEST_TMPDIR/resp.json" run rerank_in "$BATS_TEST_TMPDIR/in.json" --vault personal
+  [ "$status" -eq 3 ]
+  [ -z "$output" ]
+}
+
+@test "rerank: zero candidates, or none from a consenting vault, exits 3 and never invokes curl" {
+  printf '{"query":"x","candidates":[]}' >"$BATS_TEST_TMPDIR/empty.json"
+  run rerank_in "$BATS_TEST_TMPDIR/empty.json" --vault personal
+  [ "$status" -eq 3 ]
+  [ -z "$output" ]
+  curl_not_invoked
+  jq -c '{query, candidates: [.candidates[] | select(.vault == "work")]}' "$FIX/rerank-input.json" >"$BATS_TEST_TMPDIR/work.json"
+  run rerank_in "$BATS_TEST_TMPDIR/work.json" --vault personal --vault work
+  [ "$status" -eq 3 ]
+  [ -z "$output" ]
+  curl_not_invoked
+  [ ! -e "$LOG" ]
+}
+
+@test "rerank: no consenting --vault, or enabled=false, exits 3 and never invokes curl" {
+  run rerank_in "$FIX/rerank-input.json" --vault work
+  [ "$status" -eq 3 ]
+  grep -q 'no --vault has consented' "$STDERR"
+  write_config enabled=false
+  run rerank_in "$FIX/rerank-input.json" --vault personal
+  [ "$status" -eq 3 ]
+  [ -z "$output" ]
+  curl_not_invoked
+}
+
+@test "rerank: malformed stdin or missing --vault exits 64 and never invokes curl" {
+  printf 'not json' >"$BATS_TEST_TMPDIR/bad.json"
+  run rerank_in "$BATS_TEST_TMPDIR/bad.json" --vault personal
+  [ "$status" -eq 64 ]
+  jq '.candidates[1].id = "c01"' "$FIX/rerank-input.json" >"$BATS_TEST_TMPDIR/dup.json"
+  run rerank_in "$BATS_TEST_TMPDIR/dup.json" --vault personal
+  [ "$status" -eq 64 ]
+  jq 'del(.candidates[0].vault)' "$FIX/rerank-input.json" >"$BATS_TEST_TMPDIR/novault.json"
+  run rerank_in "$BATS_TEST_TMPDIR/novault.json" --vault personal
+  [ "$status" -eq 64 ]
+  jq '.candidates = [range(21) | {id: "c\(.)", vault: "personal", title: "t"}]' "$FIX/rerank-input.json" >"$BATS_TEST_TMPDIR/many.json"
+  run rerank_in "$BATS_TEST_TMPDIR/many.json" --vault personal
+  [ "$status" -eq 64 ]
+  jq 'del(.query)' "$FIX/rerank-input.json" >"$BATS_TEST_TMPDIR/noquery.json"
+  run rerank_in "$BATS_TEST_TMPDIR/noquery.json" --vault personal
+  [ "$status" -eq 64 ]
+  run rerank_in "$FIX/rerank-input.json"
+  [ "$status" -eq 64 ]
+  run rerank_in "$FIX/rerank-input.json" --vault
+  [ "$status" -eq 64 ]
+  curl_not_invoked
+}
+
+# big_candidates <n>: n personal candidates, each with a long head and long
+# matched lines, and a HEADEND marker at the end of every head.
+big_candidates() {
+  jq -n --argjson n "$1" '{ query: "athlete rebuild OOM", candidates: [range(1; $n + 1) as $i
+    | { id: "c\(if $i < 10 then "0" else "" end)\($i)", vault: "personal", path: "/p/\($i).md",
+        title: "Note \($i)", description: "Description \($i)",
+        head: ("h" * 200 + " HEADEND\($i)"),
+        matches: ["MATCH\($i) " + ("m" * 300), "MATCH\($i)b"] }] }'
+}
+
+@test "rerank: over max_state_bytes, matched lines go first, then heads are cut to a share" {
+  big_candidates 3 >"$BATS_TEST_TMPDIR/in.json"
+  local resp="$BATS_TEST_TMPDIR/resp.json"
+  jq -n '{model: "typesafe-ai/jev", answers: {c01: {type: "score", score: 1}, c02: {type: "score", score: 2},
+    c03: {type: "score", score: 3}}}' >"$resp"
+
+  # Room for everything but the matched lines: they are dropped, heads survive.
+  jq '.max_state_bytes = 1000' "$ROOT/ext/judge/judges/rerank.json" >"$XDG_CONFIG_HOME/vaultmem/judges/rerank.json"
+  FAKE_CURL_RESPONSE="$resp" run rerank_in "$BATS_TEST_TMPDIR/in.json" --vault personal
+  [ "$status" -eq 0 ]
+  ! jq -r '.state' "$CURL_REC/body" | grep -q 'MATCH' || false
+  [ "$(jq -r '.state' "$CURL_REC/body" | grep -c 'HEADEND')" -eq 3 ]
+  [ "$(tail -n 1 "$LOG" | jq -r '.truncated')" = "true" ]
+
+  # Tighter: heads are cut too, but every candidate keeps its block.
+  jq '.max_state_bytes = 400' "$ROOT/ext/judge/judges/rerank.json" >"$XDG_CONFIG_HOME/vaultmem/judges/rerank.json"
+  FAKE_CURL_RESPONSE="$resp" run rerank_in "$BATS_TEST_TMPDIR/in.json" --vault personal
+  [ "$status" -eq 0 ]
+  [ "$(jq -r '.state | utf8bytelength' "$CURL_REC/body")" -le 400 ]
+  ! jq -r '.state' "$CURL_REC/body" | grep -q 'HEADEND' || false
+  local c
+  for c in c01 c02 c03; do jq -r '.state' "$CURL_REC/body" | grep -q "Candidate $c"; done
+  jq -r '.state' "$CURL_REC/body" | grep -q 'Title: Note 3'
+  [ "$(tail -n 1 "$LOG" | jq -r '.truncated')" = "true" ]
+
+  # Under budget: nothing is cut and truncated stays false.
+  rm "$XDG_CONFIG_HOME/vaultmem/judges/rerank.json"
+  FAKE_CURL_RESPONSE="$resp" run rerank_in "$BATS_TEST_TMPDIR/in.json" --vault personal
+  [ "$status" -eq 0 ]
+  [ "$(jq -r '.state' "$CURL_REC/body" | grep -c 'MATCH')" -eq 6 ]
+  [ "$(tail -n 1 "$LOG" | jq -r '.truncated')" = "false" ]
+}
+
+@test "rerank: a failed request exits 3 with empty stdout, key unseen" {
+  jq --arg k "$KEY_VALUE" '.error.message = "bad key " + $k' "$FIX/error-401.json" >"$BATS_TEST_TMPDIR/err.json"
+  FAKE_CURL_RESPONSE="$BATS_TEST_TMPDIR/err.json" FAKE_CURL_HTTP=401 \
+    run rerank_in "$FIX/rerank-input.json" --vault personal
+  [ "$status" -eq 3 ]
+  [ -z "$output" ]
+  [ "$(jq -r '.error.type' "$LOG")" = "authentication_error" ]
+  key_absent
+}
+
+# --- bench ----------------------------------------------------------------------------
+
+# make_bench: the synthetic bench vault as the personal vault, and one canned
+# `--format json` answer per query from bench-search.tsv (two match lines per
+# file, so bench has to dedupe), plus one canned rerank response per query.
+make_bench() {
+  mkdir -p "$STUB_VAULTS" "$BATS_TEST_TMPDIR/search"
+  ln -s "$FIX/bench-vault" "$STUB_VAULTS/personal"
+  export STUB_SEARCH_DIR="$BATS_TEST_TMPDIR/search"
+  local q rels
+  while IFS=$'\t' read -r q rels; do
+    case "$q" in "" | \#*) continue ;; esac
+    jq -n --arg rels "$rels" --arg root "$STUB_VAULTS/personal" '
+      [$rels | split(",")[] | $root + "/" + . | {file: ., line: 1, text: "match one"}, {file: ., line: 3, text: "match two"}]' \
+      >"$STUB_SEARCH_DIR/$(printf '%s' "$q" | tr ' ' '_').json"
+  done <"$FIX/bench-search.tsv"
+  local i
+  for i in 1 2 3 4 5; do export "FAKE_CURL_RESPONSE_$i=$FIX/bench-response-$i.json"; done
+}
+
+# Expected numbers, by hand, from bench.tsv (relevant sets), bench-search.tsv
+# (baseline order), and bench-response-N.json (scores). P@5 divides by 5,
+# R@10 by the relevant count, MRR is 1/rank of the first relevant hit.
+#
+#   rebuild: baseline Rebuild log, nightly-rebuild, Grocery, Ripgrep, Hooks
+#     overview, Athlete OOM (relevant: Athlete OOM, Streaming; Streaming never
+#     retrieved). Baseline P@5 0/5 = 0, R@10 1/2 = 0.5, MRR 1/6 = 0.1667.
+#     Scores 1.2 1.0 0.1 0.3 0.2 2.9 put Athlete OOM first: P@5 1/5 = 0.2,
+#     R@10 0.5, MRR 1.
+#   search ranking: Ripgrep, Search ranking (relevant: Search ranking).
+#     Baseline 0.2, 1, 1/2 = 0.5. Scores 1.0 2.8: 0.2, 1, 1.
+#   hook timeout: Hooks overview, Hook timeout, Egress (both Hooks notes
+#     relevant). Baseline 2/5 = 0.4, 1, 1. Scores 2.0 2.9 0.2: 0.4, 1, 1.
+#   egress consent: Egress only (relevant: Egress, Hooks overview). Baseline
+#     0.2, 1/2 = 0.5, 1. Score 2.5: unchanged.
+#   nightly: nightly-rebuild, Rebuild log, Grocery (relevant: Rebuild log).
+#     Baseline 0.2, 1, 0.5. Scores 1.5 1.5 3.0: Grocery first, the tie keeps
+#     nightly-rebuild ahead of Rebuild log, so MRR 1/3 = 0.3333.
+#   overall (mean of five): baseline P@5 1.0/5 = 0.2, R@10 4/5 = 0.8,
+#     MRR (1/6 + 0.5 + 1 + 1 + 0.5)/5 = 0.6333; reranked P@5 1.2/5 = 0.24,
+#     R@10 0.8, MRR (1 + 1 + 1 + 1 + 1/3)/5 = 0.8667.
+#   tokens 1200 + 400 + 600 + 250 + 550 = 3000; market cost 0.000048 +
+#     0.000016 + 0.000024 + 0.00001 + 0.000022 = 0.00012; cost "0" each.
+@test "bench: precision@5, recall@10, MRR, tokens, cost, and model on the synthetic fixture" {
+  make_bench
+  run judge_cmd bench --fixture "$FIX/bench.tsv" --vault personal
+  [ "$status" -eq 0 ]
+  [ "$(curl_calls)" -eq 5 ]
+  diff <(printf '%s\n' "$output") - <<'TSV'
+# model: typesafe-ai/jev  vault: personal  n: 20
+query	candidates	relevant	base_p@5	base_r@10	base_mrr	rerank_p@5	rerank_r@10	rerank_mrr	input_tokens	cost	market_cost
+rebuild	6	2	0.0000	0.5000	0.1667	0.2000	0.5000	1.0000	1200	0.00000000	0.00004800
+search ranking	2	1	0.2000	1.0000	0.5000	0.2000	1.0000	1.0000	400	0.00000000	0.00001600
+hook timeout	3	2	0.4000	1.0000	1.0000	0.4000	1.0000	1.0000	600	0.00000000	0.00002400
+egress consent	1	2	0.2000	0.5000	1.0000	0.2000	0.5000	1.0000	250	0.00000000	0.00001000
+nightly	3	1	0.2000	1.0000	0.5000	0.2000	1.0000	0.3333	550	0.00000000	0.00002200
+(all)	15	8	0.2000	0.8000	0.6333	0.2400	0.8000	0.8667	3000	0.00000000	0.00012000
+TSV
+  # Baseline came from search with -n, deduped; one rerank row per query.
+  grep -q '^personal --format json -n 20 rebuild$' "$STUB_REC.search"
+  [ "$(jq -s 'map(select(.judge == "rerank")) | length' "$LOG")" -eq 5 ]
+  key_absent
+}
+
+@test "bench: --format json carries the same numbers" {
+  make_bench
+  run judge_cmd bench --fixture "$FIX/bench.tsv" --vault personal --format json
+  [ "$status" -eq 0 ]
+  [ "$(printf '%s' "$output" | jq -c '[.model, .vault, .n, .overall.queries, .overall.input_tokens, .overall.market_cost]')" = \
+    '["typesafe-ai/jev","personal",20,5,3000,0.00012]' ]
+  [ "$(printf '%s' "$output" | jq -c '.overall | [.baseline.p_at_5, .baseline.r_at_10, .baseline.mrr, .reranked.p_at_5, .reranked.r_at_10, .reranked.mrr]')" = \
+    '[0.2,0.8,0.6333,0.24,0.8,0.8667]' ]
+  [ "$(printf '%s' "$output" | jq -c '.queries[0] | [.query, .relevant, .baseline.mrr, .reranked.mrr]')" = \
+    '["rebuild",["Debug/Athlete rebuild OOM.md","Notes/Streaming patterns.md"],0.1667,1]' ]
+  [ "$(printf '%s' "$output" | jq -c '.queries[2].relevant')" = '["Debug/Hook timeout.md","Notes/Hooks overview.md"]' ]
+}
+
+@test "bench: candidates carry title, frontmatter description, and first lines; paths are not sent" {
+  make_bench
+  run judge_cmd bench --fixture "$FIX/bench.tsv" --vault personal
+  [ "$status" -eq 0 ]
+  local s
+  s=$(jq -r '.state' "$CURL_REC/body.1")
+  [[ "$s" == "Query: rebuild"* ]]
+  [[ "$s" == *$'Candidate c06\nTitle: Athlete rebuild OOM\nDescription: Root cause of the nightly athlete rebuild running out of memory.\nFirst lines:\nThe nightly rebuild held every team profile in memory at once.'* ]]
+  [[ "$s" == *$'Candidate c01\nTitle: Rebuild log\nFirst lines:\n2026-08-30'* ]]
+  [[ "$s" == *$'Matched lines:\n- match one\n- match two'* ]]
+  [[ "$s" != *"type: debug"* ]]
+  [[ "$s" != *"$STUB_VAULTS"* ]]
+  [ "$(jq -c '.questions | keys' "$CURL_REC/body.1")" = '["c01","c02","c03","c04","c05","c06"]' ]
+}
+
+@test "bench: the default fixture is XDG_CONFIG_HOME/vaultmem/bench.tsv; -n reaches search" {
+  make_bench
+  cp "$FIX/bench.tsv" "$XDG_CONFIG_HOME/vaultmem/bench.tsv"
+  run judge_cmd bench --vault personal -n 10
+  [ "$status" -eq 0 ]
+  grep -q '^personal --format json -n 10 nightly$' "$STUB_REC.search"
+  [ "$(printf '%s\n' "$output" | tail -n 1 | cut -f 1)" = "(all)" ]
+}
+
+@test "bench: a query with no hits scores zero and sends nothing for it" {
+  make_bench
+  printf 'no such thing\tNotes/Grocery list.md\nsearch ranking\tArchitecture/Search ranking.md\n' >"$BATS_TEST_TMPDIR/b.tsv"
+  FAKE_CURL_RESPONSE_1="$FIX/bench-response-2.json" run judge_cmd bench --fixture "$BATS_TEST_TMPDIR/b.tsv" --vault personal
+  [ "$status" -eq 0 ]
+  [ "$(curl_calls)" -eq 1 ]
+  [ "$(printf '%s\n' "$output" | sed -n 3p)" = "no such thing	0	1	0.0000	0.0000	0.0000	0.0000	0.0000	0.0000	0	0.00000000	0.00000000" ]
+}
+
+@test "bench: unavailable exits 3 with nothing on stdout" {
+  make_bench
+  write_config enabled=false
+  run judge_cmd bench --fixture "$FIX/bench.tsv" --vault personal
+  [ "$status" -eq 3 ]
+  [ -z "$output" ]
+  curl_not_invoked
+  write_config
+  run judge_cmd bench --fixture "$FIX/bench.tsv" --vault work
+  [ "$status" -eq 3 ]
+  [ -z "$output" ]
+  curl_not_invoked
+  [ ! -e "$STUB_REC.search" ]
+  # A gateway failure part-way through: rows already scored are not printed.
+  jq --arg k "$KEY_VALUE" '.error.message = "bad key " + $k' "$FIX/error-401.json" >"$BATS_TEST_TMPDIR/err.json"
+  FAKE_CURL_RESPONSE_2="$BATS_TEST_TMPDIR/err.json" FAKE_CURL_HTTP=401 \
+    run judge_cmd bench --fixture "$FIX/bench.tsv" --vault personal
+  [ "$status" -eq 3 ]
+  [ -z "$output" ]
+  key_absent
+}
+
+@test "bench usage errors exit 64 and never invoke curl" {
+  make_bench
+  run judge_cmd bench --fixture "$BATS_TEST_TMPDIR/missing.tsv" --vault personal
+  [ "$status" -eq 64 ]
+  run judge_cmd bench --fixture "$FIX/bench.tsv" --vault personal -n 21
+  [ "$status" -eq 64 ]
+  run judge_cmd bench --fixture "$FIX/bench.tsv" --vault personal -n 0
+  [ "$status" -eq 64 ]
+  run judge_cmd bench --fixture "$FIX/bench.tsv" --vault personal --format xml
+  [ "$status" -eq 64 ]
+  printf 'a query with no paths\n' >"$BATS_TEST_TMPDIR/bad.tsv"
+  run judge_cmd bench --fixture "$BATS_TEST_TMPDIR/bad.tsv" --vault personal
+  [ "$status" -eq 64 ]
+  [ -z "$output" ]
+  printf '# only a comment\n' >"$BATS_TEST_TMPDIR/empty.tsv"
+  run judge_cmd bench --fixture "$BATS_TEST_TMPDIR/empty.tsv" --vault personal
   [ "$status" -eq 64 ]
   curl_not_invoked
 }

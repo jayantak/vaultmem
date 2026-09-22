@@ -1,0 +1,7 @@
+# Canned baseline search order per bench query, relative to the vault root.
+# tests/judge.bats turns each line into the core stub's --format json answer.
+rebuild	Notes/Rebuild log.md,Sessions/nightly-rebuild/_index.md,Notes/Grocery list.md,Notes/Ripgrep tips.md,Notes/Hooks overview.md,Debug/Athlete rebuild OOM.md
+search ranking	Notes/Ripgrep tips.md,Architecture/Search ranking.md
+hook timeout	Notes/Hooks overview.md,Debug/Hook timeout.md,Architecture/Egress policy.md
+egress consent	Architecture/Egress policy.md
+nightly	Sessions/nightly-rebuild/_index.md,Notes/Rebuild log.md,Notes/Grocery list.md

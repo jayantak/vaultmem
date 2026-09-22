@@ -65,7 +65,7 @@ judge = false
 | `timeout_ms` | `1500` | Whole-request limit, passed to `curl --max-time`. |
 | `key_file` | `~/.config/vaultmem/ai-gateway.key` | Read when `AI_GATEWAY_API_KEY` is unset. Refused if its mode is wider than 600. |
 | `log` | `true` | Write the decision log. |
-| `rerank` | `false` | Reserved for search rerank (a later phase). |
+| `rerank` | `false` | Makes `vaultmem search --rerank` the default for the cli format. Leave it off until `bench` shows a gain on your own fixture. |
 | `hook_judges` | empty | Comma list of judges allowed to run inside hooks (a later phase). |
 | `[vault.<id>] judge` | `false` | Egress consent for that vault. |
 
@@ -99,7 +99,9 @@ at `judge = false` until its owner approves the vendor.
 
 `route` and `dupes` apply the same gate. `route` works across vaults, so it
 names only consenting vaults in its requests and exits 3 when none consent.
-`dupes` sends only notes found under the consenting vault's root.
+`dupes` sends only notes found under the consenting vault's root. `rerank`
+drops every candidate whose vault is not a consenting `--vault` before it
+builds the request, and exits 3 when no candidate is left.
 
 Judged text is untrusted input. A note can contain text aimed at the model
 ("answer yes"). That is one reason a judgment never triggers a write.
@@ -115,10 +117,15 @@ vaultmem judge feedback <id> right|wrong
 vaultmem judge calibration [--judge <name>] [--format tsv|json]
 vaultmem judge route [--subject <text>]
 vaultmem judge dupes [--vault <id>] [--subject <text>]
+vaultmem judge rerank --vault <id> [--vault <id>...]
+vaultmem judge bench [--fixture <tsv>] [--vault <id>] [-n N] [--format tsv|json]
 ```
 
 `<name>` reads the state to judge on stdin. `route` and `dupes` read a capture
 summary on stdin; see [Capture routing](#capture-routing-route-and-dupes).
+`rerank` reads search candidates as JSON on stdin; see
+[Search rerank](#search-rerank-rerank). `bench` reads a fixture file; see
+[Bench](#bench).
 
 - `--gate <question>` turns one question into an exit code (table below). It
   must be a `boolean` or `choice` question. Every question in the judge is
@@ -187,7 +194,6 @@ bucket	n	right	accuracy
 0.9-1.0	17	16	0.94
 ```
 
-`bench` arrives in a later phase. Until then it is a usage error.
 
 ### Capture routing: `route` and `dupes`
 
@@ -274,6 +280,136 @@ vault before creating a note, and extend the top candidate when its probability
 clears 0.85. Exit 3 or 2 means "no opinion": fall back to the skill's manual
 steps.
 
+### Search rerank: `rerank`
+
+`rerank` is the primitive under core's `vaultmem search --rerank`, and under
+`bench`. Core assembles the candidates and reorders its own output; the
+extension builds the one request and returns a score per candidate. Scripts
+can call it too.
+
+Stdin is one JSON object:
+
+```json
+{"query": "athlete rebuild OOM",
+ "candidates": [
+   {"id": "c01", "vault": "personal", "path": "/vaults/personal/Debug/Athlete rebuild OOM.md",
+    "title": "Athlete rebuild OOM", "description": "Root cause of the nightly rebuild OOM.",
+    "head": "first 5 body lines, newline-joined", "matches": ["matched line", "..."]}]}
+```
+
+- `query` is a non-empty string. `candidates` holds at most 20 objects.
+- Each candidate needs `id` (letters, digits, `_`, `-`; unique) and `vault` (a
+  registry id). `path`, `title`, `description`, and `head` are strings or
+  `null`; `matches` is an array of strings or `null`. Other fields are
+  ignored.
+- Anything else exits 64 with one line on stderr, before any config or
+  network code.
+
+On exit 0 stdout is one line:
+
+```json
+{"id": "20260922T101500Z-4f2a", "scores": {"c01": 2.87, "c04": 1.95}}
+```
+
+`id` is the decision log row. Each score is the gateway's `score` for that
+candidate: the probability-weighted level, from 0 to 3. The four levels, in
+order, are `unrelated`, `mentions`, `relevant`, and `answers` (the candidate
+answers the query). Keys follow the input order. A candidate the extension
+dropped is absent from `scores`; the caller keeps it in its original order
+below the scored ones.
+
+- **Consent.** Every `--vault` must be a consenting vault (`judge = true`) to
+  count; a non-consenting `--vault` is ignored, not an error. A candidate is
+  kept only when its `vault` is one of the consenting `--vault` ids. Dropped
+  candidates are removed before the state is built, so none of their text is
+  in the request. No consenting `--vault`, or no candidate left: exit 3, no
+  `curl`.
+- **State.** The query, then per candidate its `id`, title, description,
+  `head` (as "First lines"), and matched lines. `path` is never sent. One
+  `score` question per candidate id, from the `relevance` template in
+  `rerank.json` with `{candidate}` replaced by the id. Questions share the
+  state.
+- **Budget.** `rerank.json` sets `max_state_bytes` to 32000 (about 400 tokens
+  per candidate at 20 candidates). The query is capped at a quarter of it.
+  Over budget, every candidate's matched lines are dropped first; if that is
+  still too long, each candidate is cut to an equal share of the budget,
+  shortening its `head` first, so no candidate is crowded out. Either step
+  logs `truncated: true`.
+- The log row's `vault` is the comma-joined list of vaults whose candidates
+  were sent, and `subject` is `null`.
+- A response that lacks a score for any sent candidate is a bad response
+  (exit 3).
+
+### Bench
+
+`bench` decides whether rerank earns its keep on your own notes. It compares
+plain search order with reranked order on a fixture of queries whose relevant
+notes you know. It is also the model-drift detector: the gateway offers no
+versioned model id, so rerun `bench` after a model change and compare.
+
+```
+vaultmem judge bench [--fixture <tsv>] [--vault <id>] [-n N] [--format tsv|json]
+```
+
+The fixture is TSV, one query per line:
+
+```
+athlete rebuild OOM	Debug/Athlete rebuild OOM.md,Notes/Streaming patterns.md
+hook timeout	Debug/Hook timeout.md
+```
+
+- Column 1 is the query as you would type it to `vaultmem search`. Column 2 is
+  a comma-separated list of the relevant notes, as paths relative to the vault
+  root. Blank lines and lines starting with `#` are skipped.
+- The default path is `${XDG_CONFIG_HOME:-~/.config}/vaultmem/bench.tsv`;
+  `--fixture` overrides it. **Keep your real fixture outside the repo**: it
+  names private notes. The repo ships only a synthetic one,
+  `tests/fixtures/judge/bench.tsv`, over the notes in
+  `tests/fixtures/judge/bench-vault/`.
+- `--vault` names the vault (else `vaultmem which`, with the usual rule that a
+  guess is not consent). `-n` is the candidate cap, 1 to 20, default 20.
+
+For each query `bench`:
+
+1. Runs `vaultmem --vault <id> --format json -n N <query>` and keeps the
+   unique files, in order, under the vault's root. That is the baseline.
+2. Builds one `rerank` candidate per file: `title` from the first `# `
+   heading (else the file name), `description` from frontmatter, `head` from
+   the first 5 non-blank body lines after the frontmatter and title (read with
+   `vaultmem cat <note> --lines 40`), and up to 2 matched lines from the search
+   output.
+3. Calls `rerank` and sorts by score, highest first; ties keep baseline order.
+   A query with no hits sends nothing and scores 0.
+
+It reports, per query and as the mean over queries: precision@5 (relevant
+notes in the top 5, divided by 5), recall@10 (relevant notes in the top 10,
+divided by the number of relevant notes), and MRR (1 over the rank of the
+first relevant note, 0 when none is found), for baseline and reranked order.
+It also sums the input tokens, `cost`, and `market_cost` from the gateway
+responses. TSV output starts with one `# model:` line naming the model the
+gateway reported, then a header and a row per query, then an `(all)` row:
+
+```
+$ vaultmem judge bench --vault personal
+# model: typesafe-ai/jev  vault: personal  n: 20
+query	candidates	relevant	base_p@5	base_r@10	base_mrr	rerank_p@5	rerank_r@10	rerank_mrr	input_tokens	cost	market_cost
+rebuild	6	2	0.0000	0.5000	0.1667	0.2000	0.5000	1.0000	1200	0.00000000	0.00004800
+...
+(all)	15	8	0.2000	0.8000	0.6333	0.2400	0.8000	0.8667	3000	0.00000000	0.00012000
+```
+
+`--format json` prints one object: `model`, `vault`, `n`, `queries` (each with
+`query`, `relevant`, `candidates`, `baseline` and `reranked` as
+`{p_at_5, r_at_10, mrr}`, `input_tokens`, `cost`, `market_cost`), and
+`overall` with the same fields plus `queries`. Metrics are rounded to 4
+places.
+
+Exit 0 when it ran. Exit 3 when the extension is unavailable, including a
+gateway failure on any query: output is buffered, so stdout stays empty. A
+missing fixture, a line with no relevant paths, or a fixture with no queries
+exits 64. Every query sends that vault's candidates to the gateway, so `bench`
+needs the same consent as `rerank`, and costs one request per query with hits.
+
 ### The owner review loop
 
 Calibration is the only evidence that the vendor's stated probabilities hold on
@@ -302,7 +438,7 @@ moves notes on `status:` alone.
 | 1 | `--gate` only: no. The probability is at or below the `no` threshold. |
 | 2 | `--gate` only: abstain. Between thresholds, or the top choice is below `min_confidence`. `route`: the top vault is below `min_confidence`. |
 | 3 | Unavailable: disabled, no consent, no key, timeout, any non-2xx status, or a response body that does not parse as an evaluate response. |
-| 64 | Usage error: bad flag, unknown judge, unknown or ungateable `--gate` question. |
+| 64 | Usage error: bad flag, unknown judge, unknown or ungateable `--gate` question, malformed `rerank` stdin, a missing or empty `bench` fixture. |
 
 Without `--gate` the code is 0 or 3. On exit 3 stdout is empty and one line on
 stderr names the reason. Callers treat anything other than 0, 1, or 2 as "no
@@ -361,6 +497,7 @@ An invalid judge file makes the call exit 3 before any network code runs.
 | `capture-worthy` | Does a session transcript hold durable knowledge, and what kind. Used by `nudge --judge`. |
 | `route` | Question text for `judge route`. Not run by name. |
 | `dupes` | Question text for `judge dupes`. Not run by name. |
+| `rerank` | Question text for `judge rerank`: the four-level `relevance` score template. Not run by name. |
 
 `groom-triage` takes one session's state: its frontmatter, `## Bookmark`,
 `## Pinned`, the `## Git state` table, the tail of the work log, and the parent

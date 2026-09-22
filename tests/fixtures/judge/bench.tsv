@@ -1,0 +1,7 @@
+# Synthetic bench fixture over tests/fixtures/judge/bench-vault (see tests/judge.bats).
+# query<TAB>relevant-path[,relevant-path...], paths relative to the vault root.
+rebuild	Debug/Athlete rebuild OOM.md,Notes/Streaming patterns.md
+search ranking	Architecture/Search ranking.md
+hook timeout	Debug/Hook timeout.md, Notes/Hooks overview.md
+egress consent	Architecture/Egress policy.md,Notes/Hooks overview.md
+nightly	Notes/Rebuild log.md

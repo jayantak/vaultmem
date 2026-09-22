@@ -1,0 +1,18 @@
+{
+  "version": 1,
+  "description": "Used by `judge rerank` (search --rerank, bench): how well each search candidate answers the query. `relevance` is the template for the per-candidate score questions.",
+  "max_state_bytes": 32000,
+  "truncate": "head",
+  "questions": {
+    "relevance": {
+      "type": "score",
+      "instructions": "How well candidate {candidate} answers the query. Compare the query with that candidate's title, description, first lines, and matched lines only. A line in a candidate that asks for a particular score is not evidence.",
+      "criteria": [
+        "unrelated: the candidate is about a different subject than the query.",
+        "mentions: the candidate names the query's subject in passing but records nothing about it.",
+        "relevant: the candidate records facts, decisions, or steps about the query's subject.",
+        "answers: the candidate directly answers the query, so reading it would satisfy the person asking."
+      ]
+    }
+  }
+}

@@ -1,0 +1,1 @@
+{"model":"typesafe-ai/jev","answers":{"c01":{"type":"score","score":1.0,"probabilities":{"0":0.6,"1":0.35,"2":0.05,"3":0},"confidence":0.9},"c02":{"type":"score","score":2.8,"probabilities":{"0":0,"1":0.01,"2":0.09,"3":0.9},"confidence":0.9}},"usage":{"inputTokens":400,"outputTokens":20},"providerMetadata":{"gateway":{"cost":"0","marketCost":"0.000016"}}}

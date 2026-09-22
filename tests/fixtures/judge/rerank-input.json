@@ -1,0 +1,18 @@
+{
+  "query": "athlete rebuild OOM",
+  "candidates": [
+    {"id": "c01", "vault": "personal", "path": "/vaults/personal/Debug/Athlete rebuild OOM.md",
+     "title": "Athlete rebuild OOM", "description": "Root cause of the nightly athlete rebuild running out of memory.",
+     "head": "The nightly rebuild held every team profile in memory at once.\nFix: stream per team instead of loading the whole league.",
+     "matches": ["# Athlete rebuild OOM", "The nightly rebuild held every team profile in memory at once."]},
+    {"id": "c02", "vault": "work", "path": "/vaults/work/AcmeCorp incident.md",
+     "title": "AcmeCorp incident", "description": "AcmeCorp Secret Roadmap outage.",
+     "head": "AcmeCorp content.", "matches": ["AcmeCorp rebuild OOM"]},
+    {"id": "c03", "vault": "side", "path": "/vaults/side/Garage rebuild.md",
+     "title": "Garage rebuild", "description": "",
+     "head": "Rebuilt the shelves.", "matches": ["Rebuilt the shelves."]},
+    {"id": "c04", "vault": "personal", "path": "/vaults/personal/Notes/Streaming patterns.md",
+     "title": "Streaming patterns", "description": null,
+     "head": "Stream per item when the item count is unbounded.", "matches": []}
+  ]
+}

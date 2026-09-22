@@ -16,6 +16,10 @@
 #                                       summary on stdin (consenting vaults only)
 #   vaultmem-judge dupes [--vault <id>] [--subject <text>]
 #                                       notes that already cover a summary on stdin
+#   vaultmem-judge rerank --vault <id> [--vault <id>...]
+#                                       score search candidates (JSON on stdin) 0 to 3
+#   vaultmem-judge bench [--fixture <tsv>] [--vault <id>] [-n N] [--format tsv|json]
+#                                       search order vs reranked order on a fixture
 #
 # Exit codes (the contract core and hooks rely on):
 #   0   ok; with --gate, the answer is yes
@@ -23,7 +27,7 @@
 #   2   --gate only: abstain (between thresholds, or below min_confidence);
 #       route: the top vault is below min_confidence
 #   3   unavailable: disabled, no consent, no key, timeout, HTTP error, bad response
-#   64  usage error
+#   64  usage error; rerank: malformed stdin
 #
 # Config is never parsed here. It comes from `"$VAULTMEM_BIN" judge config`,
 # which prints `ext.judge.<key>=<value>` lines, then `vault.<id>.judge=true|false`.
@@ -50,6 +54,7 @@ usage_err() {
 	printf '       %s list | doctor [--live] | log [-n N]\n' "$PROG" >&2
 	printf '       %s feedback <id> right|wrong | calibration [--judge <name>]\n' "$PROG" >&2
 	printf '       %s route [--subject <text>] | dupes [--vault <id>] [--subject <text>]\n' "$PROG" >&2
+	printf '       %s rerank --vault <id> [--vault <id>...] | bench [--fixture <tsv>] [--vault <id>] [-n N]\n' "$PROG" >&2
 	exit 64
 }
 
@@ -820,6 +825,293 @@ cmd_dupes() {
 		| sort_by(-.probability)' "$TMPD/resp.json"
 }
 
+# --- subcommand: rerank ------------------------------------------------------------
+
+# How well does each search candidate answer the query? The primitive under core's
+# `search --rerank` and under `bench`. Candidates JSON on stdin, one score question
+# per candidate id, `{id, scores}` on stdout. A candidate whose vault is not a
+# consenting --vault is removed before the state is built, so none of its text
+# reaches the request, and it is absent from `scores`.
+RERANK_MAX=20
+cmd_rerank() {
+	local given="" v
+	while [ $# -gt 0 ]; do
+		case "$1" in
+		--vault)
+			[ $# -ge 2 ] || usage_err "$1 needs a value"
+			given="$given$2"$'\n'
+			shift 2
+			;;
+		*) usage_err "unknown argument: $1" ;;
+		esac
+	done
+	[ -n "$given" ] || usage_err "rerank needs at least one --vault <id>"
+	local jfile problems
+	jfile=$(judge_path rerank) || unavailable "judge file rerank.json not found"
+	command -v jq >/dev/null 2>&1 || unavailable "jq is not installed"
+	problems=$(judge_problems "$jfile")
+	[ -z "$problems" ] || unavailable "judge file $jfile is invalid: $(printf '%s' "$problems" | head -n 1)"
+	mktmp || unavailable "cannot create a temp dir"
+
+	local in="$TMPD/rerank-in.json" kept="$TMPD/rerank-kept.json"
+	cat >"$in"
+	jq -e --argjson max "$RERANK_MAX" '
+		def text: . == null or type == "string";
+		type == "object" and (.query | type) == "string" and (.query | length) > 0
+		and (.candidates | type) == "array" and (.candidates | length) <= $max
+		and (.candidates | all(type == "object"
+		  and (.id | type) == "string" and (.id | test("^[A-Za-z0-9_-]+$"))
+		  and (.vault | type) == "string" and (.vault | length) > 0
+		  and (.path | text) and (.title | text) and (.description | text) and (.head | text)
+		  and (.matches == null or ((.matches | type) == "array" and (.matches | all(type == "string"))))))
+		and ([.candidates[].id] | length == (unique | length))' "$in" >/dev/null 2>&1 ||
+		usage_err "rerank: stdin must be {\"query\": \"...\", \"candidates\": [{\"id\", \"vault\", ...}]} with unique ids and at most $RERANK_MAX candidates"
+
+	# Egress gate. A --vault counts only when it has consented; a candidate counts
+	# only when its vault is one of those.
+	load_config || unavailable "config not available (is VAULTMEM_BIN set?)"
+	[ "$(cfg enabled false)" = "true" ] || unavailable "[ext.judge] enabled is not true"
+	local ok=""
+	while IFS= read -r v; do
+		[ -n "$v" ] || continue
+		[ "$(cfg_raw "vault.$v.judge")" = "true" ] || continue
+		case $'\n'"$ok" in
+		*$'\n'"$v"$'\n'*) ;;
+		*) ok="$ok$v"$'\n' ;;
+		esac
+	done <<<"$given"
+	[ -n "$ok" ] || unavailable "no --vault has consented to egress (judge = true)"
+	jq --arg ok "$ok" '($ok | split("\n") | map(select(length > 0))) as $ok
+		| .candidates |= map(select(.vault as $v | any($ok[]; . == $v)))' "$in" >"$kept" ||
+		unavailable "could not filter the candidates"
+	[ "$(jq '.candidates | length' "$kept")" -gt 0 ] || unavailable "no candidate from a consenting vault"
+	egress_ready
+
+	# State: the query, then per candidate its id, title, description, first lines,
+	# and matched lines. The path is never sent. Over max_state_bytes: drop every
+	# candidate's matched lines, then cut each candidate to an equal share, first
+	# by shortening its first lines, so no candidate is crowded out.
+	local max state="$TMPD/state" fitted="$TMPD/rerank-fitted.json"
+	max=$(jq -r '.max_state_bytes // 32000' "$jfile")
+	jq --argjson max "$max" '
+		def cut($n): if $n <= 0 then ""
+		  elif utf8bytelength <= $n then .
+		  else .[:$n] | until(utf8bytelength <= $n;
+		    .[:(length - ((utf8bytelength - $n) / 4 | ceil))]) end;
+		def block($c; $m; $head):
+		  "\n\nCandidate \($c.id)\nTitle: \($c.title // "")"
+		  + (if ($c.description // "") == "" then "" else "\nDescription: \($c.description)" end)
+		  + (if $head == "" then "" else "\nFirst lines:\n\($head)" end)
+		  + (if $m and (($c.matches // []) | length) > 0
+		     then "\nMatched lines:\n" + ($c.matches | map("- " + .) | join("\n")) else "" end);
+		(.query | cut($max / 4 | floor)) as $q
+		| ("Query: " + $q) as $hdr
+		| .candidates as $cs
+		| ($hdr + ($cs | map(block(.; true; .head // "")) | join(""))) as $full
+		| ($hdr + ($cs | map(block(.; false; .head // "")) | join(""))) as $nomatch
+		| if ($full | utf8bytelength) <= $max then { state: $full, truncated: ($q != .query) }
+		  elif ($nomatch | utf8bytelength) <= $max then { state: $nomatch, truncated: true }
+		  else ((($max - ($hdr | utf8bytelength)) / ($cs | length)) | floor) as $share
+		    | { state: ($hdr + ($cs | map(. as $c
+		          | ($share - (block($c; false; "") | utf8bytelength)
+		             - ("\nFirst lines:\n" | utf8bytelength)) as $room
+		          | block($c; false; (($c.head // "") | cut($room))) | cut($share)) | join(""))),
+		        truncated: true }
+		  end' "$kept" >"$fitted" || unavailable "could not build the state"
+	jq -j '.state' "$fitted" >"$state"
+	TRUNCATED=$(jq -r '.truncated' "$fitted")
+
+	local q="$TMPD/questions.json" required vlist
+	jq --slurpfile j "$jfile" '[.candidates[].id | . as $id
+		| { ($id): ($j[0].questions.relevance | .instructions |= gsub("\\{candidate\\}"; $id)) }] | add' \
+		"$kept" >"$q" || unavailable "could not build the questions"
+	required=$(jq -r '[.candidates[].id] | join(" ")' "$kept")
+	vlist=$(jq -r '[.candidates[].vault] | reduce .[] as $v ([]; if any(.[]; . == $v) then . else . + [$v] end) | join(",")' "$kept")
+	evaluate rerank "$vlist" "" "$state" "$q" "$required" "$TMPD/resp-rerank.json"
+
+	jq -c --arg id "$CALL_ID" --slurpfile k "$kept" '.answers as $a
+		| { id: $id, scores: (reduce $k[0].candidates[].id as $c ({}; .[$c] = $a[$c].score)) }' \
+		"$TMPD/resp-rerank.json"
+}
+
+# --- subcommand: bench -------------------------------------------------------------
+
+# bench_note <path>: `T|D|H<TAB>text` lines for one note: its title (first `# `
+# heading), frontmatter description, and first 5 non-blank body lines after the
+# frontmatter and title, read through `vaultmem cat`.
+bench_note() {
+	"$(vaultmem_bin)" cat "$1" --lines 40 </dev/null 2>/dev/null | awk '
+		{ sub(/^ *[0-9]+\t/, "") }
+		NR == 1 && /^---[ \t]*$/ { fm = 1; next }
+		fm && /^---[ \t]*$/ { fm = 0; next }
+		fm {
+			if ($0 ~ /^description:/) {
+				d = $0; sub(/^description:[ \t]*/, "", d)
+				if (d ~ /^".*"$/ || d ~ /^'\''.*'\''$/) d = substr(d, 2, length(d) - 2)
+				print "D\t" d
+			}
+			next
+		}
+		!t && /^# / { s = $0; sub(/^# +/, "", s); print "T\t" s; t = 1; next }
+		/^[ \t]*$/ { next }
+		h < 5 { h++; print "H\t" $0 }'
+}
+
+# Search quality on your own fixture: plain search order versus reranked order,
+# precision@5, recall@10, and MRR per query and overall, plus tokens, cost, and
+# the model the gateway reported (the drift signal). Output is buffered, so an
+# unavailable run prints nothing on stdout.
+cmd_bench() {
+	local fixture="" vault="" n=20 format=tsv
+	while [ $# -gt 0 ]; do
+		case "$1" in
+		--fixture | --vault | -n | --format)
+			[ $# -ge 2 ] || usage_err "$1 needs a value"
+			case "$1" in
+			--fixture) fixture="$2" ;;
+			--vault) vault="$2" ;;
+			-n) n="$2" ;;
+			--format) format="$2" ;;
+			esac
+			shift 2
+			;;
+		*) usage_err "unknown argument: $1" ;;
+		esac
+	done
+	case "$n" in
+	"" | *[!0-9]* | 0) usage_err "-n must be an integer from 1 to $RERANK_MAX" ;;
+	esac
+	[ "$n" -le "$RERANK_MAX" ] || usage_err "-n must be an integer from 1 to $RERANK_MAX"
+	case "$format" in
+	tsv | json) ;;
+	*) usage_err "--format must be tsv or json" ;;
+	esac
+	fixture="${fixture:-${XDG_CONFIG_HOME:-$HOME/.config}/vaultmem/bench.tsv}"
+	[ -f "$fixture" ] || usage_err "no fixture at $fixture (pass --fixture <tsv>)"
+	command -v jq >/dev/null 2>&1 || unavailable "jq is not installed"
+
+	egress_gate_vault "$vault"
+	vault="$VAULT"
+	egress_ready
+
+	local bin root
+	bin=$(vaultmem_bin)
+	root=$(vault_root "$vault")
+	[ -n "$root" ] || unavailable "vault $vault has no root in \`vaultmem vaults\`"
+
+	local rows="$TMPD/bench-rows.jsonl" search="$TMPD/bench-search.json" files="$TMPD/bench-files"
+	local cands="$TMPD/bench-cands.jsonl" in="$TMPD/bench-in.json" out="$TMPD/bench-out.json"
+	local resp="$TMPD/resp-rerank.json" query rel path id title i rc nq=0
+	: >"$rows"
+	while IFS=$'\t' read -r query rel <&3; do
+		query="${query%$'\r'}"
+		rel="${rel%$'\r'}"
+		case "$query" in
+		"" | \#*) continue ;;
+		esac
+		[ -n "$rel" ] || usage_err "fixture line has no relevant paths: $query"
+		nq=$((nq + 1))
+
+		# Baseline: unique files in search order, under this vault's root only.
+		"$bin" --vault "$vault" --format json -n "$n" "$query" </dev/null 2>/dev/null >"$search" ||
+			printf '[]\n' >"$search"
+		jq -r 'if type == "array" then
+		         reduce (.[].file | strings) as $f ([]; if any(.[]; . == $f) then . else . + [$f] end) | .[]
+		       else empty end' "$search" 2>/dev/null |
+			while IFS= read -r path; do
+				case "$path" in
+				"$root"/*) printf '%s\n' "$path" ;;
+				esac
+			done | head -n "$n" >"$files"
+
+		: >"$cands"
+		rm -f "$resp" "$out"
+		i=0
+		while IFS= read -r path; do
+			i=$((i + 1))
+			id=$(printf 'c%02d' "$i")
+			title=$(basename "$path" .md)
+			bench_note "$path" | jq -R -s -c --arg id "$id" --arg vault "$vault" --arg path "$path" \
+				--arg title "$title" --slurpfile s "$search" '
+				split("\n") | map(select(length > 0) | { k: .[0:1], v: .[2:] }) as $l
+				| { id: $id, vault: $vault, path: $path,
+				    title: (first($l[] | select(.k == "T") | .v) // $title),
+				    description: (first($l[] | select(.k == "D") | .v) // ""),
+				    head: ([$l[] | select(.k == "H") | .v] | join("\n")),
+				    matches: ([$s[0][]? | select(.file == $path) | .text | strings] | .[:2]) }' >>"$cands" ||
+				unavailable "could not read candidate $path"
+		done <"$files"
+
+		if [ "$i" -gt 0 ]; then
+			jq -s -c --arg q "$query" '{ query: $q, candidates: . }' "$cands" >"$in"
+			(cmd_rerank --vault "$vault") <"$in" >"$out"
+			rc=$?
+			[ "$rc" -eq 0 ] || unavailable "rerank failed on query $nq (exit $rc)"
+		else
+			printf '{"scores":{}}\n' >"$out"
+			printf '{}\n' >"$resp"
+		fi
+
+		jq -c -n --arg q "$query" --arg rel "$rel" --arg root "$root" --rawfile files "$files" \
+			--slurpfile out "$out" --slurpfile resp "$resp" '
+			def hits($l; $r): [$l[] | select(. as $x | any($r[]; . == $x))] | length;
+			def metrics($l; $r):
+			  { p_at_5: (hits($l[:5]; $r) / 5),
+			    r_at_10: (hits($l[:10]; $r) / ($r | length)),
+			    mrr: (first(range(0; $l | length) as $i | select(any($r[]; . == $l[$i])) | 1 / ($i + 1)) // 0) };
+			($rel | split(",") | map(gsub("^ +| +$"; "")) | map(select(length > 0))) as $relp
+			| ($relp | map($root + "/" + .)) as $r
+			| ($files | split("\n") | map(select(length > 0))) as $base
+			| ($out[0].scores // {}) as $s
+			| ($base | to_entries
+			   | sort_by(-(("c" + (if .key < 9 then "0" else "" end) + (.key + 1 | tostring)) as $id
+			               | $s[$id] // -1))
+			   | map(.value)) as $rr
+			| { query: $q, relevant: $relp, candidates: ($base | length),
+			    baseline: metrics($base; $r), reranked: metrics($rr; $r),
+			    input_tokens: ($resp[0].usage.inputTokens // 0),
+			    cost: ($resp[0].providerMetadata.gateway.cost // 0 | tonumber),
+			    market_cost: ($resp[0].providerMetadata.gateway.marketCost // 0 | tonumber),
+			    model: ($resp[0].model // null) }' >>"$rows" || unavailable "could not score query $nq"
+	done 3<"$fixture"
+	[ "$nq" -gt 0 ] || usage_err "fixture $fixture has no queries"
+
+	local report="$TMPD/bench-report.json"
+	jq -s -c --arg vault "$vault" --argjson n "$n" '
+		def r4: . * 10000 | round / 10000;
+		def r10: . * 10000000000 | round / 10000000000;
+		def mean(f): map(f) | add / length | r4;
+		def side(k): { p_at_5: mean(.[k].p_at_5), r_at_10: mean(.[k].r_at_10), mrr: mean(.[k].mrr) };
+		{ model: ([.[].model | strings] | unique | if length == 0 then null else join(",") end),
+		  vault: $vault, n: $n,
+		  queries: map(del(.model) | .baseline |= map_values(r4) | .reranked |= map_values(r4)
+		               | .cost |= r10 | .market_cost |= r10),
+		  overall: { queries: length, relevant: (map(.relevant | length) | add),
+		             candidates: (map(.candidates) | add),
+		             baseline: side("baseline"), reranked: side("reranked"),
+		             input_tokens: (map(.input_tokens) | add),
+		             cost: (map(.cost) | add | r10), market_cost: (map(.market_cost) | add | r10) } }' \
+		"$rows" >"$report" || unavailable "could not build the report"
+
+	if [ "$format" = "json" ]; then
+		cat "$report"
+		return 0
+	fi
+	jq -r '
+		"# model: \(.model // "unknown")  vault: \(.vault)  n: \(.n)",
+		(["query", "candidates", "relevant", "base_p@5", "base_r@10", "base_mrr",
+		  "rerank_p@5", "rerank_r@10", "rerank_mrr", "input_tokens", "cost", "market_cost"] | @tsv),
+		(.queries[], (.overall + { query: "(all)" })
+		 | [.query, .candidates, (.relevant | if type == "array" then length else . end),
+		    .baseline.p_at_5, .baseline.r_at_10, .baseline.mrr,
+		    .reranked.p_at_5, .reranked.r_at_10, .reranked.mrr,
+		    .input_tokens, .cost, .market_cost] | @tsv)' "$report" |
+		awk -F'\t' -v OFS='\t' '
+			/^#/ || NR == 2 { print; next }
+			{ for (i = 4; i <= 9; i++) $i = sprintf("%.4f", $i)
+			  $11 = sprintf("%.8f", $11); $12 = sprintf("%.8f", $12); print }'
+}
+
 # --- subcommand: list ------------------------------------------------------------
 
 cmd_list() {
@@ -1162,7 +1454,7 @@ doctor_live() {
 [ $# -gt 0 ] || usage_err "missing judge name or subcommand"
 case "$1" in
 -h | --help)
-	sed -n '2,32p' "$0" | sed 's/^# \{0,1\}//'
+	sed -n '2,36p' "$0" | sed 's/^# \{0,1\}//'
 	exit 0
 	;;
 list)
@@ -1193,7 +1485,14 @@ dupes)
 	shift
 	cmd_dupes "$@"
 	;;
-bench) usage_err "$1 is not implemented yet (a later phase)" ;;
+rerank)
+	shift
+	cmd_rerank "$@"
+	;;
+bench)
+	shift
+	cmd_bench "$@"
+	;;
 -*) usage_err "unknown option: $1" ;;
 *) cmd_judge "$@" ;;
 esac
