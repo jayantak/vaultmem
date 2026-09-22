@@ -26,7 +26,18 @@
 #   vaultmem --exclude P <query>  drop notes whose body also matches rg pattern P (find
 #                               notes matching <query> but NOT P). Terms stay regex, so
 #                               vaultmem 'AD-4[0-9]{2}' works.
-#   vaultmem index              browse the Agent Index: section counts + MOCs (the shape)
+#   vaultmem --rerank <query>   reorder content hits by the judge extension's `rerank` score
+#                               (0 to 3), printed after each row as `[2.9]`; curated rows stay
+#                               on top, ties and unscored rows keep ripgrep order. json objects
+#                               gain `score` (null = unscored); files prints the new order.
+#                               Unavailable (not installed, disabled, no vault with `judge =
+#                               true`): plain ripgrep order, and VAULTMEM_VERBOSE=1 says why on
+#                               stderr. `rerank = true` in [ext.judge] makes it the cli default.
+#   vaultmem --no-rerank <query>  plain ripgrep order even when [ext.judge] rerank = true
+#   vaultmem --rerank --min-score S <query>
+#                               drop reranked content rows scoring below S (unscored rows
+#                               stay). Without --rerank in effect it is a usage error (exit 64).
+#   vaultmem index             browse the Agent Index: section counts + MOCs (the shape)
 #   vaultmem index <section>    expand one section (e.g. index architecture); rows capped
 #   vaultmem index all          full flat dump (escape hatch; rows still width-capped)
 #   vaultmem doctor             flag drifted index rows + vault schema lints; also lint the config;
@@ -323,6 +334,7 @@ _load_registry() {
 	_REG_DESC=""
 	_EXT_CFG=""
 	EXT_JUDGE_ENABLED=false
+	EXT_JUDGE_RERANK=false
 	DEF_VAULT=""
 	DEF_LIMIT=""
 	DEF_COLD_DAYS=""
@@ -356,6 +368,7 @@ _load_registry() {
 		case "$parsed" in *ext.*)
 			_EXT_CFG=$(printf '%s\n' "$parsed" | awk -F'\t' '$1 ~ /^ext\./')
 			[ "$(_cfg ext.judge enabled)" = true ] && EXT_JUDGE_ENABLED=true
+			[ "$(_cfg ext.judge rerank)" = true ] && EXT_JUDGE_RERANK=true
 			;;
 		esac
 		DEF_VAULT=$(_cfg defaults vault)
@@ -397,6 +410,8 @@ LIMIT="${DEF_LIMIT:-20}"
 FORMAT=cli  # search output format: cli (default) | json | files
 EXCLUDE=""  # search: drop notes whose body matches this rg pattern (empty = off)
 HAVE_EXCL=0 # whether --exclude was passed (distinguishes "" pattern from unset)
+RERANK=""   # search: 1 = --rerank, 0 = --no-rerank, "" = [ext.judge] rerank decides (cli only)
+MIN_SCORE=""
 if [ -t 1 ]; then
 	B=$'\033[1m'
 	R=$'\033[0m'
@@ -2149,6 +2164,23 @@ cmd_search() {
 	local query="$1"
 	shift || true
 	case "$FORMAT" in cli | json | files) ;; *) die "vaultmem search: --format wants cli|json|files (got '$FORMAT')" ;; esac
+	# --rerank on the command line, else [ext.judge] rerank for the cli format
+	# only: a script reading json/files never changes order behind its back.
+	local rr="$RERANK"
+	if [ -z "$rr" ]; then
+		rr=0
+		[ "$FORMAT" = cli ] && [ "$EXT_JUDGE_RERANK" = true ] && rr=1
+	fi
+	if [ -n "$MIN_SCORE" ]; then
+		if [ "$rr" != 1 ]; then
+			printf 'vaultmem search: --min-score needs --rerank\n' >&2
+			exit 64
+		fi
+		if ! printf '%s' "$MIN_SCORE" | grep -Eq '^[0-9]+([.][0-9]+)?$|^[.][0-9]+$'; then
+			printf "vaultmem search: --min-score wants a number (got '%s')\n" "$MIN_SCORE" >&2
+			exit 64
+		fi
+	fi
 	local -a roots=()
 	local _id _p
 	case "$SEL" in
@@ -2156,16 +2188,32 @@ cmd_search() {
 	*) roots=("$(_vault_path "$SEL")") ;;
 	esac
 
+	# Reranked content order: `file<TAB>score<TAB>shown` rows, highest score first.
+	# Any failure leaves rr=0, and every format below prints exactly what it
+	# prints without --rerank.
+	local ranked="" alt
+	if [ "$rr" = 1 ]; then
+		ranked=$(_search_rerank "$query" "${roots[@]}") || rr=0
+	fi
+
 	# files / json: machine-readable, no curated section, no ANSI. `files` is the
 	# cheapest agent-useful subset (bare content-hit paths, pipeable); `json` is an
 	# array of {file, line, text} content matches for structured consumers.
 	case "$FORMAT" in
 	files)
-		_search_files "$query" "${roots[@]}"
+		if [ "$rr" = 1 ]; then
+			[ -n "$ranked" ] && printf '%s\n' "$ranked" | cut -f1
+		else
+			_search_files "$query" "${roots[@]}"
+		fi
 		return 0
 		;;
 	json)
-		_search_json "$query" "${roots[@]}"
+		if [ "$rr" = 1 ]; then
+			printf '%s\n' "$ranked" | _search_json_ranked "$(_search_alt "$query")"
+		else
+			_search_json "$query" "${roots[@]}"
+		fi
 		return 0
 		;;
 	esac
@@ -2176,7 +2224,7 @@ cmd_search() {
 	# applies per ROW: every term must appear in the same row. Alternation here
 	# would make a long query match nearly every row — these lines are paragraph-
 	# sized, so any one term hits — burying the result in a wall of index dump.
-	local curated mocs_name alt term
+	local curated mocs_name term
 	alt=$(_search_alt "$query")
 	mocs_name=$(basename "$PRIMARY_MOCS")
 	curated=$({
@@ -2190,15 +2238,23 @@ cmd_search() {
 
 	# 2) Content hits: ripgrep note bodies, files ranked by match count, capped.
 	printf '%s▸ Note content matches%s\n' "$B" "$R"
-	local any=0
-	while IFS= read -r f; do
+	local any=0 sc shown
+	while IFS=$'\t' read -r f sc shown; do
 		[ -z "$f" ] && continue
 		any=1
 		local rel
 		rel="${f##*/Obsidian/}"
-		printf '  %s\n' "$rel"
+		if [ -n "$shown" ]; then
+			printf '  %s  [%s]\n' "$rel" "$shown"
+		else
+			printf '  %s\n' "$rel"
+		fi
 		rg -iN --max-count 2 -e "$alt" "$f" 2>/dev/null | sed 's/^/      /' | head -n 2
-	done < <(_search_files "$query" "${roots[@]}")
+	done < <(if [ "$rr" = 1 ]; then
+		[ -n "$ranked" ] && printf '%s\n' "$ranked"
+	else
+		_search_files "$query" "${roots[@]}"
+	fi)
 	# On an empty multi-term result, name the likeliest cause: terms are ANDed, so
 	# one term too many is a far more common miss than wrong wording. Without this
 	# the output is indistinguishable from an empty vault — the failure mode that
@@ -2258,6 +2314,224 @@ _search_json() {
       p1=index($0,":"); file=substr($0,1,p1-1); rest=substr($0,p1+1)
       p2=index(rest,":"); line=substr(rest,1,p2-1); text=substr(rest,p2+1)
       printf "%s{\"file\":\"%s\",\"line\":%s,\"text\":\"%s\"}", (n++?",\n":"[\n"), esc(file), line, esc(text)
+    }
+    END{ if(n) printf "\n]\n"; else printf "[]\n" }
+  '
+}
+
+# --- search --rerank: the judge extension's `rerank` score (judge design 8.3) ---
+# Advisory only: a score reorders content rows and nothing else. Every failure
+# returns non-zero and the caller prints plain ripgrep order, exactly as today.
+RERANK_MAX=20 # candidates per request: the extension's cap and the 8.3 budget
+
+# One stderr line saying why rerank fell back, only under VAULTMEM_VERBOSE=1.
+_rerank_note() {
+	[ "${VAULTMEM_VERBOSE:-}" = 1 ] && printf 'vaultmem: rerank unavailable (%s); plain ripgrep order\n' "$1" >&2
+	return 0
+}
+
+# Id of the registry vault whose root holds file $1 (the longest root wins, so a
+# vault nested inside another claims its own notes).
+_rerank_vault_of() {
+	printf '%s' "$_REG" | awk -F'\t' -v f="$1" '
+    $1 != "" && $2 != "" && index(f, $2 "/") == 1 && length($2) > best { best = length($2); id = $1 }
+    END{ if(id == "") exit 1; print id }'
+}
+
+# The `rerank` request body. stdin: `Q<TAB>query`, then per candidate
+# `F<TAB>id<TAB>vault<TAB>path` followed by up to two `M<TAB>matched line` rows.
+# Per candidate: title (first `# ` heading, else the file name), frontmatter
+# description, and head (the first 5 non-blank body lines after the frontmatter
+# and title, from the first 40 lines), the same fields `judge bench` builds.
+# One candidate per line, so a golden file diffs readably.
+_rerank_request() {
+	LC_ALL=C awk '
+    BEGIN{ for(i=1;i<32;i++) ctl[sprintf("%c",i)] = sprintf("\\u%04x",i); n=0 }
+    function esc(s,  o,i,c) {
+      o=""
+      for(i=1;i<=length(s);i++){ c=substr(s,i,1)
+        if(c=="\\") o=o "\\\\"
+        else if(c=="\"") o=o "\\\""
+        else if(c=="\t") o=o "\\t"
+        else if(c=="\r") o=o "\\r"
+        else if(c in ctl) o=o ctl[c]
+        else o=o c }
+      return o
+    }
+    function flush(  j, ms) {
+      if(id == "") return
+      ms = "["
+      for(j=1;j<=nm;j++) ms = ms (j>1?",":"") "\"" esc(m[j]) "\""
+      ms = ms "]"
+      printf "%s{\"id\":\"%s\",\"vault\":\"%s\",\"path\":\"%s\",\"title\":\"%s\",\"description\":\"%s\",\"head\":\"%s\",\"matches\":%s}", \
+        (n++ ? ",\n" : "\n"), esc(id), esc(vault), esc(path), esc(title), esc(desc), head, ms
+      id = ""
+    }
+    function note(p,  line, k, fm, t, h, d, b) {
+      title = p; sub(/^.*\//, "", title); sub(/\.md$/, "", title)
+      desc = ""; head = ""; fm = 0; t = 0; h = 0
+      for(k=1; k<=40 && (getline line < p) > 0; k++){
+        if(k == 1 && line ~ /^---[ \t]*$/){ fm = 1; continue }
+        if(fm && line ~ /^---[ \t]*$/){ fm = 0; continue }
+        if(fm){
+          if(line ~ /^description:/){
+            d = line; sub(/^description:[ \t]*/, "", d)
+            if(d ~ /^".*"$/ || d ~ /^'"'"'.*'"'"'$/) d = substr(d, 2, length(d) - 2)
+            desc = d
+          }
+          continue
+        }
+        if(!t && line ~ /^# /){ b = line; sub(/^# +/, "", b); title = b; t = 1; continue }
+        if(line ~ /^[ \t]*$/) continue
+        if(h < 5){ head = head (h ? "\\n" : "") esc(line); h++ }
+      }
+      close(p)
+    }
+    { tag = substr($0, 1, 1); rest = substr($0, 3) }
+    tag == "Q" { printf "{\"query\":\"%s\",\"candidates\":[", esc(rest); next }
+    tag == "F" {
+      flush()
+      p1 = index(rest, "\t"); id = substr(rest, 1, p1 - 1); rest = substr(rest, p1 + 1)
+      p2 = index(rest, "\t"); vault = substr(rest, 1, p2 - 1); path = substr(rest, p2 + 1)
+      nm = 0; note(path); next
+    }
+    tag == "M" && id != "" && nm < 2 { m[++nm] = rest }
+    END{ flush(); printf "\n]}\n" }'
+}
+
+# `id<TAB>score` per entry of the `scores` object in the extension's reply on
+# stdin. A narrow scanner like _judge_answer, not a JSON parser: the reply is
+# one flat object of id keys and numbers. No `scores` object: exit 1.
+_rerank_scores() {
+	awk '{ s = s $0 } END{
+    p = index(s, "\"scores\"")
+    if(p == 0) exit 1
+    s = substr(s, p + 8); sub(/^[[:space:]]*:[[:space:]]*/, "", s)
+    if(substr(s, 1, 1) != "{") exit 1
+    e = index(s, "}"); if(e == 0) exit 1
+    n = split(substr(s, 2, e - 2), kv, ",")
+    for(i = 1; i <= n; i++){
+      x = kv[i]; gsub(/[[:space:]]/, "", x)
+      if(x == "") continue
+      if(x !~ /^"[A-Za-z0-9_-]+":-?[0-9]+([.][0-9]+)?([eE][-+]?[0-9]+)?$/) exit 1
+      c = index(x, ":"); k = substr(x, 2, c - 3); v = substr(x, c + 1)
+      print k "\t" v
+    }
+  }'
+}
+
+# Reorder the content hits. stdin: the `id<TAB>score` rows, a sentinel line,
+# then `file<TAB>id` in ripgrep order (id empty for a candidate never sent).
+# Out: `file<TAB>score<TAB>shown`, scored rows first by score descending with
+# ties in ripgrep order, then unscored rows in ripgrep order. $1 = min score
+# (empty = keep all); only scored rows can fall below it.
+_rerank_order() {
+	awk -F'\t' -v min="$1" '
+    $0 == "---vaultmem-rerank-files---" { phase = 2; next }
+    phase != 2 { sc[$1] = $2; next }
+    {
+      if($2 != "" && ($2 in sc)){
+        if(min != "" && sc[$2] + 0 < min + 0) next
+        ns++; sf[ns] = $1; sv[ns] = sc[$2] + 0; sr[ns] = sc[$2]
+        for(j = ns; j > 1 && sv[j] > sv[j-1]; j--){
+          t = sf[j]; sf[j] = sf[j-1]; sf[j-1] = t
+          t = sv[j]; sv[j] = sv[j-1]; sv[j-1] = t
+          t = sr[j]; sr[j] = sr[j-1]; sr[j-1] = t
+        }
+      } else { nu++; uf[nu] = $1 }
+    }
+    END{
+      for(i = 1; i <= ns; i++) printf "%s\t%s\t%.1f\n", sf[i], sr[i], sv[i]
+      for(i = 1; i <= nu; i++) printf "%s\n", uf[i]
+    }'
+}
+
+# The reranked content rows for query $1 over roots $2..., as _rerank_order
+# prints them. The first RERANK_MAX hits from vaults with `judge = true` are the
+# candidates; a hit from any other vault is never read, let alone sent, and
+# keeps its ripgrep place below the scored rows (design 7, rule 3). Non-zero
+# when rerank is unavailable, with nothing on stdout.
+_search_rerank() {
+	local query="$1"
+	shift
+	if [ "$EXT_JUDGE_ENABLED" != true ]; then
+		_rerank_note "[ext.judge] enabled is not true"
+		return 3
+	fi
+	local files f vid i=0 n=0 id sent="" map="" vids=" " first="" alt req out rc scores
+	files=$(_search_files "$query" "$@")
+	[ -n "$files" ] || return 0
+	while IFS= read -r f; do
+		[ -n "$f" ] || continue
+		i=$((i + 1))
+		id=""
+		if [ "$i" -le "$RERANK_MAX" ] && vid=$(_rerank_vault_of "$f") && [ "$(_vault_judge "$vid")" = true ]; then
+			n=$((n + 1))
+			id=$(printf 'c%02d' "$n")
+			sent="${sent}${id}"$'\t'"${vid}"$'\t'"${f}"$'\n'
+			case "$vids" in *" $vid "*) ;; *) vids="${vids}${vid} " ;; esac
+			[ -n "$first" ] || first="$vid"
+		fi
+		map="${map}${f}"$'\t'"${id}"$'\n'
+	done <<<"$files"
+	if [ "$n" = 0 ]; then
+		_rerank_note "no hit is in a vault with judge = true"
+		return 3
+	fi
+	alt=$(_search_alt "$query")
+	req=$({
+		printf 'Q\t%s\n' "$query"
+		while IFS=$'\t' read -r id vid f; do
+			[ -n "$id" ] || continue
+			printf 'F\t%s\t%s\t%s\n' "$id" "$vid" "$f"
+			rg -iN --max-count 2 -e "$alt" "$f" 2>/dev/null | head -n 2 | while IFS= read -r m; do printf 'M\t%s\n' "$m"; done
+		done <<<"$sent"
+	} | _rerank_request)
+	local -a vargs=()
+	for vid in $vids; do vargs+=(--vault "$vid"); done
+	if [ "${VAULTMEM_VERBOSE:-}" = 1 ]; then
+		out=$(printf '%s\n' "$req" | _judge rerank "$first" "${vargs[@]}")
+	else
+		out=$(printf '%s\n' "$req" | _judge rerank "$first" "${vargs[@]}" 2>/dev/null)
+	fi
+	rc=$?
+	if [ "$rc" != 0 ]; then
+		_rerank_note "judge rerank exited $rc"
+		return 3
+	fi
+	if ! scores=$(printf '%s' "$out" | _rerank_scores); then
+		_rerank_note "judge rerank returned no scores"
+		return 3
+	fi
+	printf '%s\n---vaultmem-rerank-files---\n%s' "$scores" "$map" | _rerank_order "$MIN_SCORE"
+}
+
+# search --format json --rerank: the _search_json objects, file by file in the
+# reranked order on stdin (`file<TAB>score<TAB>shown`), each with a `score`
+# (null for an unscored file). $1 = the match alternation. Emits `[]` when empty.
+_search_json_ranked() {
+	local alt="$1" f sc shown
+	while IFS=$'\t' read -r f sc shown; do
+		[ -n "$f" ] || continue
+		rg -iN -n --max-count 2 -e "$alt" "$f" 2>/dev/null | while IFS= read -r l; do printf '%s\t%s\t%s\n' "${sc:-null}" "$f" "$l"; done
+	done | awk '
+    function esc(s,  o,i,c) {
+      o=""
+      for(i=1;i<=length(s);i++){ c=substr(s,i,1)
+        if(c=="\\") o=o "\\\\"
+        else if(c=="\"") o=o "\\\""
+        else if(c=="\t") o=o "\\t"
+        else if(c=="\r") o=o "\\r"
+        else o=o c }
+      return o
+    }
+    {
+      # score TAB file TAB line:text. The file comes from the shell, not from rg,
+      # so a colon in a path cannot shift the fields.
+      t=index($0,"\t"); score=substr($0,1,t-1); rest=substr($0,t+1)
+      t=index(rest,"\t"); file=substr(rest,1,t-1); rest=substr(rest,t+1)
+      p2=index(rest,":"); line=substr(rest,1,p2-1); text=substr(rest,p2+1)
+      printf "%s{\"file\":\"%s\",\"line\":%s,\"text\":\"%s\",\"score\":%s}", (n++?",\n":"[\n"), esc(file), line, esc(text), score
     }
     END{ if(n) printf "\n]\n"; else printf "[]\n" }
   '
@@ -3868,8 +4142,24 @@ while [ $# -gt 0 ]; do
 		HAVE_EXCL=1
 		shift 2
 		;;
+	--rerank)
+		RERANK=1
+		shift
+		;;
+	--no-rerank)
+		RERANK=0
+		shift
+		;;
+	--min-score)
+		if [ $# -lt 2 ]; then
+			printf 'vaultmem: --min-score needs a value\n' >&2
+			exit 64
+		fi
+		MIN_SCORE="$2"
+		shift 2
+		;;
 	-h | --help)
-		sed -n '4,165p' "$0"
+		sed -n '4,176p' "$0"
 		exit 0
 		;;
 	*)
@@ -3905,7 +4195,7 @@ status | sessions | verify | nudge | which | init | doctor | judge | _judge | ""
 esac
 
 case "${ARGS[0]:-}" in
-"") sed -n '4,165p' "$0" ;; # no args → print usage
+"") sed -n '4,176p' "$0" ;; # no args → print usage
 status) cmd_status ;;
 nudge) cmd_nudge "${ARGS[@]:1}" ;;
 index) cmd_index "${ARGS[1]:-}" ;;

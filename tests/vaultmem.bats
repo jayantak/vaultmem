@@ -3855,3 +3855,380 @@ EOF
   [ "$status" -eq 0 ]
   [ "$output" = flo ]
 }
+
+# --- search --rerank (core side) -------------------------------------------------
+# Every test runs against a stub `rerank` extension under $BATS_TEST_TMPDIR. The
+# stub records its args and stdin, then scores each candidate from its title: a
+# note titled `S2.5 beta` scores 2.5, and a title without that prefix gets no
+# score (the shape of a candidate the extension dropped). Deriving the score
+# from the request keeps these tests independent of ripgrep's file order, which
+# is not stable from run to run.
+rerank_stub() { # $1 = ext dir
+  mkdir -p "$1/judge"
+  cat >"$1/judge/vaultmem-judge" <<EOF
+#!/usr/bin/env bash
+printf 'args=%s\n' "\$*" >"$BATS_TEST_TMPDIR/stub.ran"
+cat >"$BATS_TEST_TMPDIR/stub.stdin"
+[ -n "\${STUB_EXIT:-}" ] && exit "\$STUB_EXIT"
+if [ -n "\${STUB_REPLY+x}" ]; then printf '%s\n' "\$STUB_REPLY"; exit 0; fi
+printf '{"id": "L1", "scores": {'
+sep=""
+while IFS= read -r l; do
+  case "\$l" in *'"id":"c'*'"title":"S'[0-9]*) ;; *) continue ;; esac
+  id=\$(printf '%s' "\$l" | sed 's/.*"id":"\\(c[0-9]*\\)".*/\\1/')
+  sc=\$(printf '%s' "\$l" | sed 's/.*"title":"S\\([0-9.]*\\) .*/\\1/')
+  printf '%s"%s": %s' "\$sep" "\$id" "\$sc"
+  sep=", "
+done <"$BATS_TEST_TMPDIR/stub.stdin"
+printf '}}\n'
+EOF
+  chmod +x "$1/judge/vaultmem-judge"
+}
+
+# $1 = extra [ext.judge] lines (e.g. `rerank = true`). jay consents, flo does not.
+rerank_config() {
+  cat >"$VAULTMEM_CONFIG" <<EOF
+[ext.judge]
+enabled = true
+$1
+
+[vault.jay]
+label = "Personal"
+path = "$OBS_JAY"
+judge = true
+
+[vault.flo]
+label = "Flo"
+path = "$OBS_FLO"
+EOF
+}
+
+# A note at $1 (relative to jay) titled $2 with body line $3.
+rerank_note() {
+  mkdir -p "$(dirname "$OBS_JAY/$1")"
+  printf '# %s\n\n%s\n' "$2" "$3" >"$OBS_JAY/$1"
+}
+
+rerank_setup() {
+  judge_isolate
+  rerank_config "${1:-}"
+  export VAULTMEM_EXT_DIR="$BATS_TEST_TMPDIR/extdir"
+  rerank_stub "$VAULTMEM_EXT_DIR"
+  rerank_note Notes/alpha.md 'S1.0 alpha' 'widget alpha'
+  rerank_note Notes/beta.md 'S2.5 beta' 'widget beta'
+  rerank_note Notes/gamma.md 'S0.5 gamma' 'widget gamma'
+}
+
+# Line number of the first output line containing $1 (0 when absent).
+line_of() {
+  printf '%s\n' "$output" | awk -v s="$1" 'index($0, s) { print NR; found = 1; exit } END { if (!found) print 0 }'
+}
+
+@test "search --rerank reorders cli content rows by score and prints the score" {
+  rerank_setup
+  run "$JOM" -v jay --rerank widget
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"Notes/beta.md  [2.5]"* ]]
+  [[ "$output" == *"Notes/alpha.md  [1.0]"* ]]
+  [[ "$output" == *"Notes/gamma.md  [0.5]"* ]]
+  [ "$(line_of beta.md)" -lt "$(line_of alpha.md)" ]
+  [ "$(line_of alpha.md)" -lt "$(line_of gamma.md)" ]
+  # Matched lines still follow their row.
+  [ "$(line_of 'widget beta')" -eq $(($(line_of beta.md) + 1)) ]
+  grep -qx 'args=rerank --vault jay --vault jay' "$BATS_TEST_TMPDIR/stub.ran"
+}
+
+@test "search --rerank keeps curated index rows on top, untouched" {
+  rerank_setup
+  printf -- '# Home\n<!-- AGENT-INDEX:START -->\n| [[alpha]] | widget index row |\n<!-- AGENT-INDEX:END -->\n' >"$OBS_JAY/Home.md"
+  run "$JOM" -v jay --format cli widget
+  local plain="$output"
+  run "$JOM" -v jay --rerank widget
+  [ "$status" -eq 0 ]
+  [ "${lines[0]}" = "▸ Curated index (primary Home.md + MOCs)" ]
+  [ "${lines[1]}" = "| [[alpha]] | widget index row |" ]
+  [ "$(printf '%s\n' "$plain" | sed -n 2p)" = "${lines[1]}" ]
+  [ "$(line_of 'Note content matches')" -gt 2 ]
+  # Home.md is a content hit too; the stub leaves it unscored, so it sits last.
+  [ "$(line_of "$OBS_JAY/Home.md")" -gt "$(line_of gamma.md)" ]
+  [[ "$output" != *"Home.md  ["* ]]
+}
+
+@test "search --rerank keeps ripgrep order for tied scores" {
+  rerank_setup
+  rerank_note Notes/gamma.md 'S1.0 gamma' 'widget gamma'
+  rerank_note Notes/delta.md 'S1.0 delta' 'widget delta'
+  run "$JOM" -v jay --rerank --format files widget
+  [ "$status" -eq 0 ]
+  [ "${#lines[@]}" -eq 4 ]
+  [ "${lines[0]}" = "$OBS_JAY/Notes/beta.md" ]
+  # The request lists candidates in ripgrep order (c01 first); the three tied
+  # at 1.0 must come out in that same order.
+  local want
+  want=$(grep -o '"path":"[^"]*"' "$BATS_TEST_TMPDIR/stub.stdin" | sed 's/"path":"//; s/"$//' | grep -v beta.md)
+  [ "$(printf '%s\n' "${lines[@]:1}")" = "$want" ]
+}
+
+@test "search --rerank --format json adds score, null for an unscored hit last" {
+  rerank_setup
+  printf 'widget flo\n' >"$OBS_FLO/flo.md"
+  run "$JOM" --rerank --format json widget
+  [ "$status" -eq 0 ]
+  [ "${lines[0]}" = "[" ]
+  [ "${lines[1]}" = "{\"file\":\"$OBS_JAY/Notes/beta.md\",\"line\":3,\"text\":\"widget beta\",\"score\":2.5}," ]
+  [ "${lines[2]}" = "{\"file\":\"$OBS_JAY/Notes/alpha.md\",\"line\":3,\"text\":\"widget alpha\",\"score\":1.0}," ]
+  [ "${lines[3]}" = "{\"file\":\"$OBS_JAY/Notes/gamma.md\",\"line\":3,\"text\":\"widget gamma\",\"score\":0.5}," ]
+  [ "${lines[4]}" = "{\"file\":\"$OBS_FLO/flo.md\",\"line\":1,\"text\":\"widget flo\",\"score\":null}" ]
+  [ "${lines[5]}" = "]" ]
+  # The non-consenting vault's note was never sent.
+  ! grep -q 'flo' "$BATS_TEST_TMPDIR/stub.stdin" || false
+  grep -qx 'args=rerank --vault jay --vault jay' "$BATS_TEST_TMPDIR/stub.ran"
+}
+
+@test "search --rerank --format files prints the reranked order" {
+  rerank_setup
+  run "$JOM" -v jay --rerank --format files widget
+  [ "$status" -eq 0 ]
+  [ "$output" = "$OBS_JAY/Notes/beta.md
+$OBS_JAY/Notes/alpha.md
+$OBS_JAY/Notes/gamma.md" ]
+}
+
+@test "search --rerank --min-score drops rows below it and keeps unscored rows" {
+  rerank_setup
+  printf 'widget flo\n' >"$OBS_FLO/flo.md"
+  run "$JOM" --rerank --min-score 1 --format files widget
+  [ "$status" -eq 0 ]
+  [ "$output" = "$OBS_JAY/Notes/beta.md
+$OBS_JAY/Notes/alpha.md
+$OBS_FLO/flo.md" ]
+  run "$JOM" -v jay --rerank --min-score 2.6 widget
+  [ "$status" -eq 0 ]
+  [[ "$output" != *"Notes/"* ]]
+  run "$JOM" -v jay --rerank --min-score 0.5 --format json widget
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"gamma.md"* ]]
+}
+
+@test "search --min-score without --rerank is a usage error (exit 64)" {
+  rerank_setup
+  run "$JOM" -v jay --min-score 1 widget
+  [ "$status" -eq 64 ]
+  [ "$output" = "vaultmem search: --min-score needs --rerank" ]
+  run "$JOM" -v jay --no-rerank --min-score 1 widget
+  [ "$status" -eq 64 ]
+  # rerank = true is the cli default only, so json still needs the flag.
+  rerank_config 'rerank = true'
+  run "$JOM" -v jay --format json --min-score 1 widget
+  [ "$status" -eq 64 ]
+  run "$JOM" -v jay --rerank --min-score high widget
+  [ "$status" -eq 64 ]
+  [ "${#lines[@]}" -eq 1 ]
+  run "$JOM" -v jay --rerank widget --min-score
+  [ "$status" -eq 64 ]
+  [ ! -e "$BATS_TEST_TMPDIR/stub.ran" ]
+}
+
+@test "search never runs the extension without --rerank, in all three formats" {
+  rerank_setup
+  local f
+  for f in cli json files; do
+    run "$JOM" -v jay --format "$f" widget
+    [ "$status" -eq 0 ]
+    [ ! -e "$BATS_TEST_TMPDIR/stub.ran" ]
+  done
+}
+
+# One content hit in total: ripgrep's order across several files varies from
+# run to run, and these tests compare whole outputs byte for byte. A curated row
+# for the query would make Home.md a second hit, so the curated block is
+# covered by the "curated index rows on top" test instead.
+rerank_single_hit() {
+  mkdir -p "$OBS_JAY/Notes"
+  printf -- '# Home\n<!-- AGENT-INDEX:START -->\n| [[lone]] | an index row |\n<!-- AGENT-INDEX:END -->\n' >"$OBS_JAY/Home.md"
+  printf -- '---\ndescription: one\n---\n# S2.0 lone\n\nsolo "quoted" \\ line\n' >"$OBS_JAY/Notes/lone.md"
+}
+
+@test "search without --rerank is byte-identical with the extension installed and enabled" {
+  judge_isolate
+  rerank_single_hit
+  local f base
+  for f in cli json files; do
+    cat >"$VAULTMEM_CONFIG" <<EOF
+[vault.jay]
+label = "Personal"
+path = "$OBS_JAY"
+
+[vault.flo]
+path = "$OBS_FLO"
+EOF
+    unset VAULTMEM_EXT_DIR
+    run "$JOM" --format "$f" solo
+    [ "$status" -eq 0 ]
+    base="$output"
+    [[ "$base" == *"lone.md"* ]]
+    rerank_config
+    export VAULTMEM_EXT_DIR="$BATS_TEST_TMPDIR/extdir"
+    rerank_stub "$VAULTMEM_EXT_DIR"
+    run "$JOM" --format "$f" solo
+    [ "$status" -eq 0 ]
+    [ "$output" = "$base" ]
+    run "$JOM" --no-rerank --format "$f" solo
+    [ "$output" = "$base" ]
+    # rerank = true never touches json or files.
+    if [ "$f" != cli ]; then
+      rerank_config 'rerank = true'
+      run "$JOM" --format "$f" solo
+      [ "$output" = "$base" ]
+    fi
+    [ ! -e "$BATS_TEST_TMPDIR/stub.ran" ]
+  done
+}
+
+@test "search --rerank with the stub exiting 3 is byte-identical to plain search" {
+  judge_isolate
+  rerank_config
+  export VAULTMEM_EXT_DIR="$BATS_TEST_TMPDIR/extdir"
+  rerank_stub "$VAULTMEM_EXT_DIR"
+  rerank_single_hit
+  local f base
+  for f in cli json files; do
+    run "$JOM" --format "$f" solo
+    base="$output"
+    rm -f "$BATS_TEST_TMPDIR/stub.ran"
+    STUB_EXIT=3 run "$JOM" --rerank --format "$f" solo
+    [ "$status" -eq 0 ]
+    [ "$output" = "$base" ]
+    # The stub did run: this is the fallback path, not the disabled one.
+    [ -e "$BATS_TEST_TMPDIR/stub.ran" ]
+  done
+}
+
+@test "search --rerank falls back on a reply without usable scores" {
+  judge_isolate
+  rerank_config
+  export VAULTMEM_EXT_DIR="$BATS_TEST_TMPDIR/extdir"
+  rerank_stub "$VAULTMEM_EXT_DIR"
+  rerank_single_hit
+  local reply base
+  run "$JOM" --format cli solo
+  base="$output"
+  for reply in '' 'not json' '{"id":"L1"}' '{"id":"L1","scores":{"c01":"high"}}'; do
+    STUB_REPLY="$reply" run "$JOM" --rerank solo
+    [ "$status" -eq 0 ]
+    [ "$output" = "$base" ]
+  done
+}
+
+@test "search --rerank unavailable: silent by default, one stderr note with VAULTMEM_VERBOSE=1" {
+  rerank_setup
+  mv "$VAULTMEM_EXT_DIR" "$BATS_TEST_TMPDIR/ext-gone"
+  run bash -c '"$0" -v jay --rerank widget 2>&1 >/dev/null' "$JOM"
+  [ "$status" -eq 0 ]
+  [ -z "$output" ]
+  VAULTMEM_VERBOSE=1 run bash -c '"$0" -v jay --rerank widget 2>&1 >/dev/null' "$JOM"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"vaultmem: rerank unavailable (judge rerank exited 3); plain ripgrep order"* ]]
+  # stdout carries no note either way.
+  VAULTMEM_VERBOSE=1 run bash -c '"$0" -v jay --rerank widget 2>/dev/null' "$JOM"
+  [[ "$output" != *"unavailable"* ]]
+  [[ "$output" != *"  ["* ]]
+}
+
+@test "search --rerank on a vault without judge = true never runs the extension" {
+  rerank_setup
+  printf 'widget flo\n' >"$OBS_FLO/flo.md"
+  run "$JOM" -v flo --rerank widget
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"flo.md"* ]]
+  [[ "$output" != *"flo.md  ["* ]]
+  [ ! -e "$BATS_TEST_TMPDIR/stub.ran" ]
+  # enabled = false: the same.
+  sed -i.bak 's/^enabled = true$/enabled = false/' "$VAULTMEM_CONFIG"
+  run "$JOM" -v jay --rerank widget
+  [ "$status" -eq 0 ]
+  [[ "$output" != *"  ["* ]]
+  [ ! -e "$BATS_TEST_TMPDIR/stub.ran" ]
+}
+
+@test "search --rerank sends the golden request body" {
+  judge_isolate
+  rerank_config
+  export VAULTMEM_EXT_DIR="$BATS_TEST_TMPDIR/extdir"
+  rerank_stub "$VAULTMEM_EXT_DIR"
+  mkdir -p "$OBS_JAY/Notes"
+  printf -- '---\ntitle: ignored\ndescription: "Root cause of the gadget OOM"\ntags: [a]\n---\n# S2.0 Gadget OOM\n\nfirst widget line\n\nsecond "quoted" line\n\tthird\\tabbed\nfourth\nfifth\nsixth, past the head\nwidget again\nwidget a third time\n' >"$OBS_JAY/Notes/oom.md"
+  # A hit in the non-consenting vault must not appear at all.
+  printf 'widget flo secret\n' >"$OBS_FLO/flo.md"
+  run "$JOM" --rerank widget
+  [ "$status" -eq 0 ]
+  cat >"$BATS_TEST_TMPDIR/golden.json" <<EOF
+{"query":"widget","candidates":[
+{"id":"c01","vault":"jay","path":"$OBS_JAY/Notes/oom.md","title":"S2.0 Gadget OOM","description":"Root cause of the gadget OOM","head":"first widget line\nsecond \"quoted\" line\n\tthird\\\\tabbed\nfourth\nfifth","matches":["first widget line","widget again"]}
+]}
+EOF
+  diff "$BATS_TEST_TMPDIR/golden.json" "$BATS_TEST_TMPDIR/stub.stdin"
+  ! grep -q secret "$BATS_TEST_TMPDIR/stub.stdin" || false
+}
+
+@test "search --rerank sends at most 20 candidates, ids c01 to c20, every field present" {
+  rerank_setup
+  local i
+  for i in $(seq 1 25); do rerank_note "Many/n$i.md" "S1.0 n$i" "widget n$i"; done
+  run "$JOM" -v jay -n 30 --rerank --format files widget
+  [ "$status" -eq 0 ]
+  [ "${#lines[@]}" -eq 28 ]
+  local body ids
+  body=$(sed '1d;$d' "$BATS_TEST_TMPDIR/stub.stdin")
+  [ "$(printf '%s\n' "$body" | grep -c .)" -eq 20 ]
+  ids=$(printf '%s\n' "$body" | sed 's/^{"id":"\(c[0-9]*\)".*/\1/' | paste -sd ' ' -)
+  [ "$ids" = "c01 c02 c03 c04 c05 c06 c07 c08 c09 c10 c11 c12 c13 c14 c15 c16 c17 c18 c19 c20" ]
+  local line re='^\{"id":"c[0-9]{2}","vault":"jay","path":"[^"]+","title":"[^"]*","description":"[^"]*","head":"[^"]*","matches":\[.*\]\},?$'
+  while IFS= read -r line; do
+    [[ "$line" =~ $re ]]
+  done <<<"$body"
+  [ "$(sed -n 22p "$BATS_TEST_TMPDIR/stub.stdin")" = "]}" ]
+  # The 8 hits past the cap were never sent and sit below the scored rows.
+  for i in 20 21 22 23 24 25 26 27; do
+    ! grep -qF "\"path\":\"${lines[$i]}\"" "$BATS_TEST_TMPDIR/stub.stdin" || false
+  done
+  grep -qF "\"path\":\"${lines[19]}\"" "$BATS_TEST_TMPDIR/stub.stdin"
+}
+
+@test "rerank = true makes --rerank the cli default; --no-rerank and json opt out" {
+  rerank_setup 'rerank = true'
+  run "$JOM" -v jay widget
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"Notes/beta.md  [2.5]"* ]]
+  [ -e "$BATS_TEST_TMPDIR/stub.ran" ]
+  rm "$BATS_TEST_TMPDIR/stub.ran"
+  run "$JOM" -v jay --no-rerank widget
+  [ "$status" -eq 0 ]
+  [[ "$output" != *"  ["* ]]
+  [ ! -e "$BATS_TEST_TMPDIR/stub.ran" ]
+  run "$JOM" -v jay --format json widget
+  [[ "$output" != *'"score"'* ]]
+  [ ! -e "$BATS_TEST_TMPDIR/stub.ran" ]
+  run "$JOM" -v jay --rerank --format json widget
+  [[ "$output" == *'"score":2.5'* ]]
+}
+
+@test "judge config ships rerank = false" {
+  judge_isolate
+  cat >"$VAULTMEM_CONFIG" <<EOF
+[vault.jay]
+path = "$OBS_JAY"
+EOF
+  run "$JOM" judge config
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"ext.judge.rerank=false"* ]]
+}
+
+@test "usage documents --rerank, --no-rerank, --min-score and VAULTMEM_VERBOSE" {
+  run "$OM"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"vaultmem --rerank <query>"* ]]
+  [[ "$output" == *"vaultmem --no-rerank <query>"* ]]
+  [[ "$output" == *"--min-score S <query>"* ]]
+  [[ "$output" == *"VAULTMEM_VERBOSE=1"* ]]
+}
