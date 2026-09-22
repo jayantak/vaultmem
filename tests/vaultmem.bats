@@ -3250,11 +3250,21 @@ EOF
   chmod +x "$1/judge/vaultmem-judge"
 }
 
+# `days_ago N` stamps exactly N*86400 seconds back, truncated to the minute, so
+# the age floor lands on N only while the test runs inside that same minute: a
+# second of drift makes it N-1. Tests that assert on the printed age use this
+# instead, which backs off a further 6 hours and stays on N all day.
+days_ago_stable() {
+  if date -v-1d >/dev/null 2>&1; then
+    date -v-"$1"d -v-6H +"%Y-%m-%d %H:%M"
+  else date -d "$1 days ago 6 hours ago" +"%Y-%m-%d %H:%M"; fi
+}
+
 # One cold-parked session with the sections groom --judge sends, plus its Project.
 groom_judge_fixture() {
   mkdir -p "$OBS_JAY/Sessions/cold-one" "$OBS_JAY/Projects"
   printf -- '---\nstatus: parked\nproject: p\nupdated: %s\n---\n# cold-one\n\n## Bookmark\nnext: land the parser\n\n## Pinned\n- a pin\n\n## Git state\n| repo | branch | pr | state |\n| r | b | 1 | open |\n' \
-    "$(days_ago 40)" >"$OBS_JAY/Sessions/cold-one/_index.md"
+    "$(days_ago_stable 40)" >"$OBS_JAY/Sessions/cold-one/_index.md"
   printf -- '---\ntype: project\nstatus: active\n---\n# p\n\n## Decisions\n- chose the awk scanner\n' >"$OBS_JAY/Projects/p.md"
 }
 
@@ -3379,7 +3389,7 @@ GROOM_JUDGE_OK='{"id":"20260922T101500Z-4f2a","judge":"groom-triage","answers":{
 @test "groom --judge --format json reports a stale-active session with judge null on no opinion" {
   judge_isolate
   mkdir -p "$OBS_JAY/Sessions/stale-one"
-  printf -- '---\nstatus: active\nupdated: %s\n---\n# stale-one\n' "$(days_ago 10)" >"$OBS_JAY/Sessions/stale-one/_index.md"
+  printf -- '---\nstatus: active\nupdated: %s\n---\n# stale-one\n' "$(days_ago_stable 10)" >"$OBS_JAY/Sessions/stale-one/_index.md"
   groom_judge_config true
   export VAULTMEM_EXT_DIR="$BATS_TEST_TMPDIR/extdir"
   groom_judge_stub "$VAULTMEM_EXT_DIR" '' 3
@@ -3412,7 +3422,7 @@ GROOM_JUDGE_OK='{"id":"20260922T101500Z-4f2a","judge":"groom-triage","answers":{
   judge_isolate
   groom_judge_fixture
   mkdir -p "$OBS_JAY/Sessions/stale-one"
-  printf -- '---\nstatus: active\nupdated: %s\n---\n# stale-one\n' "$(days_ago 10)" >"$OBS_JAY/Sessions/stale-one/_index.md"
+  printf -- '---\nstatus: active\nupdated: %s\n---\n# stale-one\n' "$(days_ago_stable 10)" >"$OBS_JAY/Sessions/stale-one/_index.md"
   groom_judge_config true
   export VAULTMEM_EXT_DIR="$BATS_TEST_TMPDIR/extdir"
   groom_judge_stub "$VAULTMEM_EXT_DIR" "$GROOM_JUDGE_OK"
@@ -3452,7 +3462,7 @@ EOF
   judge_isolate
   groom_judge_fixture
   mkdir -p "$OBS_JAY/Sessions/stale-one"
-  printf -- '---\nstatus: active\nupdated: %s\n---\n# stale-one\n' "$(days_ago 10)" >"$OBS_JAY/Sessions/stale-one/_index.md"
+  printf -- '---\nstatus: active\nupdated: %s\n---\n# stale-one\n' "$(days_ago_stable 10)" >"$OBS_JAY/Sessions/stale-one/_index.md"
   groom_judge_config true
   export VAULTMEM_EXT_DIR="$BATS_TEST_TMPDIR/extdir"
   groom_judge_stub "$VAULTMEM_EXT_DIR" "$GROOM_JUDGE_OK"
@@ -3468,7 +3478,7 @@ EOF
   judge_isolate
   mkdir -p "$OBS_JAY/Sessions/fat-one"
   {
-    printf -- '---\nstatus: active\nupdated: %s\n---\n# fat-one\n' "$(days_ago 1)"
+    printf -- '---\nstatus: active\nupdated: %s\n---\n# fat-one\n' "$(days_ago_stable 1)"
     i=0
     while [ "$i" -lt 200 ]; do
       printf 'line %s\n' "$i"
