@@ -9,6 +9,9 @@
 #   vaultmem-judge list                 judges available (user overrides shipped)
 #   vaultmem-judge doctor [--live]      config, key, and judge-file checks
 #   vaultmem-judge log [-n N]           tail the decision log (default 20 rows)
+#   vaultmem-judge feedback <id> right|wrong    mark a logged decision (offline)
+#   vaultmem-judge calibration [--judge <name>] [--format tsv|json]
+#                                       accuracy per confidence bucket (offline)
 #
 # Exit codes (the contract core and hooks rely on):
 #   0   ok; with --gate, the answer is yes
@@ -40,6 +43,7 @@ usage_err() {
 	printf '%s: %s\n' "$PROG" "$1" >&2
 	printf 'usage: %s <name> [--vault <id>] [--gate <question>] [--format json|tsv]\n' "$PROG" >&2
 	printf '       %s list | doctor [--live] | log [-n N]\n' "$PROG" >&2
+	printf '       %s feedback <id> right|wrong | calibration [--judge <name>]\n' "$PROG" >&2
 	exit 64
 }
 
@@ -534,12 +538,142 @@ cmd_log() {
 	esac
 	# Oldest first: the rotated generation, then the live file, so a tail spans
 	# a rotation.
-	local f files=()
+	local files
+	files=$(log_files)
+	[ -n "$files" ] || return 0
+	printf '%s\n' "$files" | tr '\n' '\0' | xargs -0 cat 2>/dev/null | tail -n "$n"
+}
+
+# --- subcommand: feedback ----------------------------------------------------------
+
+# Oldest first: the rotated generation, then the live file. Prints nothing when
+# neither exists.
+log_files() {
+	local f
 	for f in "$LOG_FILE.1" "$LOG_FILE"; do
-		[ -f "$f" ] && files+=("$f")
+		[ -f "$f" ] && printf '%s\n' "$f"
 	done
-	[ "${#files[@]}" -gt 0 ] || return 0
-	cat "${files[@]}" | tail -n "$n"
+	return 0
+}
+
+# Offline: reads and appends to the local log, never the gateway. No egress
+# gate, no config, no key, so it works with enabled = false.
+cmd_feedback() {
+	[ $# -eq 2 ] || usage_err "feedback takes <id> right|wrong"
+	local id="$1" verdict="$2"
+	case "$verdict" in
+	right | wrong) ;;
+	*) usage_err "feedback verdict must be right or wrong (got: $verdict)" ;;
+	esac
+	command -v jq >/dev/null 2>&1 || unavailable "jq is not installed"
+
+	# The id must name a decision row. Feedback rows carry no `judge` field, so
+	# they can never satisfy this and feedback on feedback is rejected.
+	local files found=""
+	files=$(log_files)
+	if [ -n "$files" ]; then
+		found=$(printf '%s\n' "$files" | tr '\n' '\0' | xargs -0 cat 2>/dev/null |
+			jq -r --arg id "$id" -s 'map(select(.id == $id and has("judge") and (.feedback | type) != "string")) | length' 2>/dev/null)
+	fi
+	case "$found" in
+	"" | 0)
+		printf '%s: no decision row with id %s in the log\n' "$PROG" "$id" >&2
+		exit 64
+		;;
+	esac
+
+	# Append only. Existing rows, including earlier feedback on this id, are
+	# never rewritten; `calibration` takes the last feedback row for an id.
+	local row
+	row=$(jq -nc --arg id "$id" --arg ts "$(date -u +%Y-%m-%dT%H:%M:%SZ)" --arg fb "$verdict" \
+		'{ id: $id, ts: $ts, feedback: $fb }') || unavailable "could not build the feedback row"
+	log_append "$row"
+}
+
+# --- subcommand: calibration ---------------------------------------------------------
+
+# Buckets the judged probability of each decision row that has feedback, so the
+# owner can see whether a stated 0.9 really means 0.9 on their own data.
+#
+# Which probability: the top choice answer's probability when the judge has a
+# choice question, else the highest boolean probability. That is the number a
+# caller acts on (`groom --judge` gates on the choice), so it is the one worth
+# calibrating.
+cmd_calibration() {
+	local judge_filter="" format="tsv"
+	while [ $# -gt 0 ]; do
+		case "$1" in
+		--judge | --format)
+			[ $# -ge 2 ] || usage_err "$1 needs a value"
+			case "$1" in
+			--judge) judge_filter="$2" ;;
+			--format) format="$2" ;;
+			esac
+			shift 2
+			;;
+		*) usage_err "unknown argument: $1" ;;
+		esac
+	done
+	case "$format" in
+	tsv | json) ;;
+	*) usage_err "--format must be tsv or json" ;;
+	esac
+	command -v jq >/dev/null 2>&1 || unavailable "jq is not installed"
+
+	local files
+	files=$(log_files)
+	if [ -z "$files" ]; then
+		# shellcheck disable=SC2016  # the backticks are literal display text, not a substitution
+		printf 'no feedback rows yet: run `%s feedback <id> right|wrong` first\n' "$PROG"
+		return 0
+	fi
+
+	# One jq pass over both files in order. Later rows win, so the latest
+	# feedback for an id is the one that counts.
+	local out
+	out=$(printf '%s\n' "$files" | tr '\n' '\0' | xargs -0 cat 2>/dev/null | jq -s -r \
+		--arg judge "$judge_filter" --arg format "$format" '
+		def prob:
+		  .answers // {} | to_entries
+		  | ((map(select(.value.type == "choice"))
+		      | map(.value.probabilities[.value.choice] // 0) | max)
+		     // (map(select(.value.type == "boolean"))
+		         | map(.value.probability) | max));
+		def bucket:
+		  if . >= 0.9 then "0.9-1.0"
+		  elif . >= 0.8 then "0.8-0.9"
+		  elif . >= 0.7 then "0.7-0.8"
+		  elif . >= 0.6 then "0.6-0.7"
+		  elif . >= 0.5 then "0.5-0.6"
+		  else null end;
+
+		# Later rows overwrite earlier ones, so the newest feedback for an id wins.
+		(reduce (.[] | select(has("judge")) | select($judge == "" or .judge == $judge)) as $d
+		 ({}; .[$d.id] = $d)) as $decisions
+		| (reduce (.[] | select(has("judge") | not)
+		           | select(.feedback == "right" or .feedback == "wrong")) as $f
+		   ({}; .[$f.id] = $f)) as $feedback
+		| [ $feedback | to_entries[]
+            | select($decisions[.key] != null)
+            | { right: (.value.feedback == "right"),
+                p: ($decisions[.key] | prob) } ]
+		| map(select(.p != null and (.p | type) == "number") | . + { b: (.p | bucket) })
+		| map(select(.b != null))
+		| group_by(.b) | map({ bucket: .[0].b, n: length, right: (map(select(.right)) | length) })
+		| map(. + { accuracy: (if .n == 0 then null else (.right / .n) end) })
+		| sort_by(.bucket)
+		| if length == 0 then "NONE"
+		  elif $format == "json" then tojson
+		  else (["bucket", "n", "right", "accuracy"] | @tsv),
+		       (.[] | [.bucket, .n, .right, (.accuracy * 100 | round / 100 | tostring)] | @tsv)
+		  end' 2>/dev/null) || out=""
+
+	if [ -z "$out" ] || [ "$out" = "NONE" ]; then
+		# shellcheck disable=SC2016  # the backticks are literal display text, not a substitution
+		printf 'no feedback rows yet: run `%s feedback <id> right|wrong` first\n' "$PROG"
+		return 0
+	fi
+	printf '%s\n' "$out"
 }
 
 # --- subcommand: doctor ----------------------------------------------------------
@@ -707,7 +841,7 @@ doctor_live() {
 [ $# -gt 0 ] || usage_err "missing judge name or subcommand"
 case "$1" in
 -h | --help)
-	sed -n '2,24p' "$0" | sed 's/^# \{0,1\}//'
+	sed -n '2,27p' "$0" | sed 's/^# \{0,1\}//'
 	exit 0
 	;;
 list)
@@ -722,7 +856,15 @@ log)
 	shift
 	cmd_log "$@"
 	;;
-feedback | calibration | bench) usage_err "$1 is not implemented yet (a later phase)" ;;
+feedback)
+	shift
+	cmd_feedback "$@"
+	;;
+calibration)
+	shift
+	cmd_calibration "$@"
+	;;
+bench) usage_err "$1 is not implemented yet (a later phase)" ;;
 -*) usage_err "unknown option: $1" ;;
 *) cmd_judge "$@" ;;
 esac

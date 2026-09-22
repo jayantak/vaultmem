@@ -107,6 +107,8 @@ vaultmem judge <name> [--vault <id>] [--gate <question>] [--format json|tsv] [--
 vaultmem judge list
 vaultmem judge doctor [--live]
 vaultmem judge log [-n N]
+vaultmem judge feedback <id> right|wrong
+vaultmem judge calibration [--judge <name>] [--format tsv|json]
 ```
 
 `<name>` reads the state to judge on stdin.
@@ -146,8 +148,56 @@ bare exit 3 would hide:
 | 404 | `model_not_found` | Wrong `model`. |
 | 400 | `invalid_request_error` | A malformed judge file. Says nothing about the key: the schema is checked first. |
 
-`feedback`, `calibration`, and `bench` arrive in later phases. Until then they
-are usage errors.
+`feedback` and `calibration` are offline. They read and append to the local
+decision log, never the gateway, so they work with `enabled = false`, with no
+key, and with no network. Neither starts `curl`.
+
+`feedback <id> right|wrong` records whether a logged judgment was correct. The
+`id` is the one printed on stdout by the call and stored in its log row;
+`groom --judge` prints it beside each row for this purpose. The row is
+**appended**, never edited, and the rotated `judge.jsonl.1` is never rewritten.
+An id is looked up in `.1` first and then the live file, so a decision that has
+rotated is still markable. An id with no decision row exits 64 with one line on
+stderr. Marking the same id twice is allowed and appends again: the latest
+feedback for an id is the one that counts.
+
+`calibration` joins feedback rows to their decision rows and buckets the judged
+probability, so you can see whether a stated 0.9 really means 0.9 on your own
+notes. The bucketed number is the top choice answer's probability when the
+judge has a `choice` question, and the highest boolean probability otherwise:
+that is the number a caller acts on. Probabilities below 0.5 fall in no bucket.
+Output is TSV with a header, or `--format json`. `--judge <name>` limits it to
+one judge. With no feedback rows it prints one line saying so and exits 0.
+
+```
+$ vaultmem judge calibration --judge groom-triage
+bucket	n	right	accuracy
+0.7-0.8	4	3	0.75
+0.8-0.9	9	8	0.89
+0.9-1.0	17	16	0.94
+```
+
+`bench` arrives in a later phase. Until then it is a usage error.
+
+### The owner review loop
+
+Calibration is the only evidence that the vendor's stated probabilities hold on
+your data, and it needs your judgment as the ground truth. Over about two weeks:
+
+1. Run `vaultmem groom --judge` as part of your normal grooming. Each row
+   carries a recommendation, a probability, and the decision log `id`.
+2. When you act on a row, say whether the judgment was right:
+   `vaultmem judge feedback <id> right` or `... wrong`. Judge the
+   recommendation, not the outcome you chose for other reasons.
+3. Read `vaultmem judge calibration` at the end.
+
+What the numbers mean: accuracy in a bucket should roughly match the bucket. A
+0.9-1.0 bucket running at 0.6 says the model is overconfident on your notes, so
+raise the thresholds in your own judge file under
+`~/.config/vaultmem/judges/groom-triage.json`, or stop acting on the column.
+A bucket with a handful of rows says nothing yet; wait for more. Nothing here
+changes behavior on its own: the judgment stays advisory, and `groom` still
+moves notes on `status:` alone.
 
 ## Exit codes
 
@@ -207,6 +257,31 @@ weak at dates and counting. Compute those in bash and keep the state small.
 
 An invalid judge file makes the call exit 3 before any network code runs.
 
+### Shipped judges
+
+| Name | Purpose |
+|---|---|
+| `smoke` | One boolean. Used by the tests and by `doctor --live`. |
+| `groom-triage` | Triage one cold or stale session. Used by `groom --judge`. |
+
+`groom-triage` takes one session's state: its frontmatter, `## Bookmark`,
+`## Pinned`, the `## Git state` table, the tail of the work log, and the parent
+Project's `## Decisions` section. Ages, line counts, and any other arithmetic
+are computed in bash and arrive as plain text; the questions never ask the model
+to count or to reason about dates. It is tail-biased at 24000 bytes, so a long
+work log keeps its most recent entries.
+
+| Question | Type | Asks |
+|---|---|---|
+| `work_complete` | boolean | The work the session describes is finished. |
+| `has_next_step` | boolean | The session names a concrete next action. |
+| `blocked_external` | boolean | Progress waits on a person, a review, or a deploy. |
+| `undistilled` | boolean | The session holds a decision or root cause the Project's Decisions section does not reflect. |
+| `recommendation` | choice | `archive`, `park`, `keep-active`, or `needs-human`. |
+
+Booleans gate at 0.85 / 0.15; `recommendation` needs 0.6 on the top choice.
+Below that, `groom --judge` prints `→ ?` rather than a recommendation.
+
 ## Decision log
 
 `${XDG_STATE_HOME:-~/.local/state}/vaultmem/judge.jsonl`, append-only, one JSON
@@ -228,14 +303,25 @@ object per gateway call:
   arrived.
 - `log = false` turns the log off.
 
+`feedback` appends a second kind of row, three fields and no `judge`:
+
+```json
+{"id":"20260921T101500Z-4f2a","ts":"2026-09-21T16:40:11Z","feedback":"right"}
+```
+
+The absence of `judge` is what distinguishes the two kinds. Decision rows are
+never edited to carry their feedback, so both files stay strictly append-only
+and a reader takes the last feedback row for an id.
+
 **Rotation.** Before each append, if `judge.jsonl` is 5 MiB or larger it is
 moved to `judge.jsonl.1`, replacing any older `.1`, and the row goes to a fresh
 live file. One generation and no compression, so the log stays under about
 10 MiB. The limit is a constant, not a config key
-(`VAULTMEM_JUDGE_LOG_MAX_BYTES` overrides it, for tests). `vaultmem judge log`
-reads `.1` first and then the live file, so a tail spans a rotation. A row that
-has rotated out of `.1` is gone. A rotation or write failure never fails the
-call: the row is skipped.
+(`VAULTMEM_JUDGE_LOG_MAX_BYTES` overrides it, for tests). `log`, `feedback`,
+and `calibration` all read `.1` first and then the live file, so a tail spans a
+rotation and a decision that has rotated is still markable and still counted. A
+row that has rotated out of `.1` is gone, along with any feedback on it. A
+rotation or write failure never fails the call: the row is skipped.
 
 ## Testing
 

@@ -569,10 +569,24 @@ use_outcome_judge() { cp "$FIX/outcome-judge.json" "$XDG_CONFIG_HOME/vaultmem/ju
 }
 
 @test "later-phase subcommands are usage errors for now" {
-  for sub in feedback calibration bench; do
-    run judge_cmd "$sub"
-    [ "$status" -eq 64 ]
-  done
+  run judge_cmd bench
+  [ "$status" -eq 64 ]
+}
+
+@test "feedback and calibration usage errors exit 64" {
+  run judge_cmd feedback
+  [ "$status" -eq 64 ]
+  run judge_cmd feedback only-an-id
+  [ "$status" -eq 64 ]
+  run judge_cmd feedback an-id maybe
+  [ "$status" -eq 64 ]
+  run judge_cmd calibration --format xml
+  [ "$status" -eq 64 ]
+  run judge_cmd calibration --bogus
+  [ "$status" -eq 64 ]
+  run judge_cmd calibration --judge
+  [ "$status" -eq 64 ]
+  curl_not_invoked
 }
 
 # --- list ---------------------------------------------------------------------------
@@ -666,6 +680,314 @@ use_outcome_judge() { cp "$FIX/outcome-judge.json" "$XDG_CONFIG_HOME/vaultmem/ju
   write_config enabled=false
   run judge_cmd doctor --live
   [ "$status" -eq 1 ]
+  curl_not_invoked
+}
+
+# --- the groom-triage judge -----------------------------------------------------------
+
+# The state a real `groom --judge` call sends: frontmatter, bookmark, pinned,
+# git state, work-log tail, and the parent Project's decisions. Ages and counts
+# arrive as plain text; the model never computes them.
+groom_state() { cat "$FIX/groom-triage-state.txt"; }
+
+@test "groom-triage: the request body matches the golden file" {
+  FAKE_CURL_RESPONSE="$FIX/groom-triage-response.json" \
+    run judge_in "$(groom_state)" groom-triage --vault personal --subject "Sessions/ad707-athlete-prepare/_index.md"
+  [ "$status" -eq 0 ]
+  diff <(jq -S . "$CURL_REC/body") <(jq -S . "$FIX/groom-triage-body.json")
+  # The state fits the budget, so nothing was cut.
+  [ "$(tail -n 1 "$LOG" | jq -r '.truncated')" = "false" ]
+}
+
+@test "groom-triage: the judge file ships with the four booleans and the choice" {
+  run judge_cmd list
+  printf '%s\n' "$output" | grep -q "^groom-triage	shipped	"
+  local j="$ROOT/ext/judge/judges/groom-triage.json"
+  [ "$(jq -r '[.questions | to_entries[] | select(.value.type == "boolean") | .key] | sort | join(",")' "$j")" = \
+    "blocked_external,has_next_step,undistilled,work_complete" ]
+  [ "$(jq -r '.questions.recommendation.type' "$j")" = "choice" ]
+  [ "$(jq -r '[.questions.recommendation.criteria | keys[]] | sort | join(",")' "$j")" = \
+    "archive,keep-active,needs-human,park" ]
+  [ "$(jq -r '.truncate' "$j")" = "tail" ]
+  [ "$(jq -r '.max_state_bytes' "$j")" = "24000" ]
+  [ "$(jq -r '.thresholds.recommendation.min_confidence' "$j")" = "0.6" ]
+  [ "$(jq -r '[.questions | to_entries[] | select(.value.type == "boolean")
+               | "\(.value.criteria | has("true")) \(.value.criteria | has("false"))"] | unique | join("")' "$j")" = \
+    "true true" ]
+  # Every boolean is gated at the documented thresholds.
+  [ "$(jq -r '[.thresholds | to_entries[] | select(.value | has("yes"))
+               | "\(.value.yes)/\(.value.no)"] | unique | join(",")' "$j")" = "0.85/0.15" ]
+}
+
+@test "groom-triage: a canned response maps to the documented answer fields" {
+  FAKE_CURL_RESPONSE="$FIX/groom-triage-response.json" \
+    run judge_in "$(groom_state)" groom-triage --vault personal
+  [ "$status" -eq 0 ]
+  # The four booleans core reads by probability.
+  [ "$(printf '%s' "$output" | jq -r '.answers.work_complete.probability')" = "0.04" ]
+  [ "$(printf '%s' "$output" | jq -r '.answers.has_next_step.probability')" = "0.93" ]
+  [ "$(printf '%s' "$output" | jq -r '.answers.blocked_external.probability')" = "0.88" ]
+  [ "$(printf '%s' "$output" | jq -r '.answers.undistilled.probability')" = "0.91" ]
+  # The choice core reads by .choice and .probabilities.<choice>.
+  [ "$(printf '%s' "$output" | jq -r '.answers.recommendation.choice')" = "park" ]
+  [ "$(printf '%s' "$output" | jq -r '.answers.recommendation.probabilities.park')" = "0.81" ]
+  [ "$(printf '%s' "$output" | jq -r '.judge')" = "groom-triage" ]
+  # The id on stdout keys `judge feedback` later.
+  [ "$(printf '%s' "$output" | jq -r '.id')" = "$(jq -r '.id' "$LOG")" ]
+}
+
+@test "groom-triage: gating the recommendation maps confidence to exit codes" {
+  FAKE_CURL_RESPONSE="$FIX/groom-triage-response.json" \
+    run judge_in "$(groom_state)" groom-triage --vault personal --gate recommendation
+  [ "$status" -eq 0 ]
+  [ "$(printf '%s' "$output" | jq -r '.gate.verdict')" = "yes" ]
+  # Below min_confidence = 0.6 the caller gets "no opinion".
+  FAKE_CURL_RESPONSE="$FIX/groom-triage-response-lowconf.json" \
+    run judge_in "$(groom_state)" groom-triage --vault personal --gate recommendation
+  [ "$status" -eq 2 ]
+  [ "$(printf '%s' "$output" | jq -r '.gate.verdict')" = "abstain" ]
+}
+
+@test "groom-triage: state over max_state_bytes is cut tail-biased" {
+  local big
+  big="$(groom_state)$(printf 'x%.0s' $(seq 1 24000))TAIL-MARKER"
+  FAKE_CURL_RESPONSE="$FIX/groom-triage-response.json" \
+    run judge_in "$big" groom-triage --vault personal
+  [ "$status" -eq 0 ]
+  [ "$(jq -r '.state | length' "$CURL_REC/body")" -eq 24000 ]
+  # tail-biased: the end survives, the head is gone.
+  jq -r '.state' "$CURL_REC/body" | grep -q 'TAIL-MARKER'
+  ! jq -r '.state' "$CURL_REC/body" | grep -q 'ad707-athlete-prepare'
+  [ "$(tail -n 1 "$LOG" | jq -r '.truncated')" = "true" ]
+}
+
+# --- feedback ---------------------------------------------------------------------------
+
+# seed_log <file> <line…>: write rows to the live log or the rotated generation.
+seed_log() {
+  local target="$1"
+  shift
+  mkdir -p "$(dirname "$LOG")"
+  printf '%s\n' "$@" >"$target"
+}
+
+DEC_A='{"id":"dec-a","ts":"2026-09-20T10:00:00Z","judge":"groom-triage","vault":"personal","answers":{"recommendation":{"type":"choice","choice":"archive","probabilities":{"archive":0.91,"park":0.09}}},"feedback":null}'
+DEC_B='{"id":"dec-b","ts":"2026-09-20T11:00:00Z","judge":"groom-triage","vault":"personal","answers":{"recommendation":{"type":"choice","choice":"park","probabilities":{"park":0.72,"archive":0.28}}},"feedback":null}'
+DEC_C='{"id":"dec-c","ts":"2026-09-20T12:00:00Z","judge":"smoke","vault":"personal","answers":{"failed":{"type":"boolean","probability":0.88}},"feedback":null}'
+
+@test "feedback: appends a row and never rewrites the existing ones" {
+  seed_log "$LOG" "$DEC_A" "$DEC_B"
+  local before
+  before=$(cat "$LOG")
+  run judge_cmd feedback dec-a right
+  [ "$status" -eq 0 ]
+  [ -z "$output" ]
+  # The original rows are byte-identical; the new row is appended after them.
+  [ "$(head -n 2 "$LOG")" = "$before" ]
+  [ "$(wc -l <"$LOG" | tr -d ' ')" -eq 3 ]
+  [ "$(tail -n 1 "$LOG" | jq -r '[.id, .feedback] | @tsv')" = "dec-a	right" ]
+  tail -n 1 "$LOG" | jq -e '.ts | test("^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9:]{8}Z$")'
+  # A feedback row carries no judge field, so it is never itself a decision.
+  [ "$(tail -n 1 "$LOG" | jq -r 'has("judge")')" = "false" ]
+  curl_not_invoked
+}
+
+@test "feedback: an unknown id exits 64 with one stderr line and appends nothing" {
+  seed_log "$LOG" "$DEC_A"
+  run judge_cmd feedback nosuch-id right
+  [ "$status" -eq 64 ]
+  [ -z "$output" ]
+  [ "$(wc -l <"$STDERR" | tr -d ' ')" -eq 1 ]
+  grep -q 'no decision row with id nosuch-id' "$STDERR"
+  [ "$(wc -l <"$LOG" | tr -d ' ')" -eq 1 ]
+  curl_not_invoked
+}
+
+@test "feedback: an id only in judge.jsonl.1 is found, and .1 is not rewritten" {
+  seed_log "$LOG.1" "$DEC_A"
+  seed_log "$LOG" "$DEC_B"
+  local rotated_before
+  rotated_before=$(cat "$LOG.1")
+  run judge_cmd feedback dec-a wrong
+  [ "$status" -eq 0 ]
+  # The rotated file is untouched; the feedback row lands in the live file.
+  [ "$(cat "$LOG.1")" = "$rotated_before" ]
+  [ "$(tail -n 1 "$LOG" | jq -r '[.id, .feedback] | @tsv')" = "dec-a	wrong" ]
+  [ "$(wc -l <"$LOG" | tr -d ' ')" -eq 2 ]
+}
+
+@test "feedback: feedback on a row that already has feedback appends again" {
+  seed_log "$LOG" "$DEC_A"
+  run judge_cmd feedback dec-a wrong
+  [ "$status" -eq 0 ]
+  run judge_cmd feedback dec-a right
+  [ "$status" -eq 0 ]
+  [ "$(wc -l <"$LOG" | tr -d ' ')" -eq 3 ]
+  [ "$(jq -r 'select(has("judge") | not) | .feedback' "$LOG" | tr '\n' ' ')" = "wrong right " ]
+  # The latest wins at read time: one row, counted right.
+  run judge_cmd calibration
+  printf '%s\n' "$output" | grep -q "^0.9-1.0	1	1	1$"
+}
+
+@test "feedback: a feedback row is not itself a feedbackable decision" {
+  seed_log "$LOG" "$DEC_A"
+  run judge_cmd feedback dec-a right
+  [ "$status" -eq 0 ]
+  # dec-a now has a feedback row; feedback on it still resolves to the decision.
+  run judge_cmd feedback dec-a wrong
+  [ "$status" -eq 0 ]
+  # An id that exists only as a feedback row is still unknown.
+  run judge_cmd feedback nosuch right
+  [ "$status" -eq 64 ]
+}
+
+@test "feedback: works with enabled=false and never invokes curl" {
+  write_config enabled=false
+  seed_log "$LOG" "$DEC_A"
+  run judge_cmd feedback dec-a right
+  [ "$status" -eq 0 ]
+  [ "$(tail -n 1 "$LOG" | jq -r '.feedback')" = "right" ]
+  curl_not_invoked
+}
+
+@test "feedback: needs no config at all (the log is local data)" {
+  seed_log "$LOG" "$DEC_A"
+  VAULTMEM_BIN="$BATS_TEST_TMPDIR/bin/does-not-exist" run judge_cmd feedback dec-a right
+  [ "$status" -eq 0 ]
+  [ "$(tail -n 1 "$LOG" | jq -r '.feedback')" = "right" ]
+  curl_not_invoked
+}
+
+@test "feedback: a rotation during the append is survived without failing" {
+  seed_log "$LOG" "$DEC_A"
+  VAULTMEM_JUDGE_LOG_MAX_BYTES=10 run judge_cmd feedback dec-a right
+  [ "$status" -eq 0 ]
+  # The decision row rotated out; the feedback row is alone in the live file.
+  [ "$(jq -r '.id' "$LOG.1")" = "dec-a" ]
+  [ "$(tail -n 1 "$LOG" | jq -r '[.id, .feedback] | @tsv')" = "dec-a	right" ]
+  # Both sides still join: the pair survives the rotation boundary.
+  run judge_cmd calibration
+  [ "$status" -eq 0 ]
+  printf '%s\n' "$output" | grep -q "^0.9-1.0	1	1	1$"
+}
+
+# --- calibration --------------------------------------------------------------------------
+
+@test "calibration: buckets a synthetic log by judged probability" {
+  # One row per bucket, plus a second 0.9-1.0 row marked wrong so accuracy != 1.
+  seed_log "$LOG" \
+    '{"id":"p55","judge":"groom-triage","answers":{"recommendation":{"type":"choice","choice":"park","probabilities":{"park":0.55}}}}' \
+    '{"id":"p65","judge":"groom-triage","answers":{"recommendation":{"type":"choice","choice":"park","probabilities":{"park":0.65}}}}' \
+    '{"id":"p75","judge":"groom-triage","answers":{"recommendation":{"type":"choice","choice":"park","probabilities":{"park":0.75}}}}' \
+    '{"id":"p85","judge":"groom-triage","answers":{"recommendation":{"type":"choice","choice":"park","probabilities":{"park":0.85}}}}' \
+    '{"id":"p95","judge":"groom-triage","answers":{"recommendation":{"type":"choice","choice":"park","probabilities":{"park":0.95}}}}' \
+    '{"id":"p97","judge":"groom-triage","answers":{"recommendation":{"type":"choice","choice":"park","probabilities":{"park":0.97}}}}'
+  for id in p55 p65 p75 p85 p95; do
+    run judge_cmd feedback "$id" right
+    [ "$status" -eq 0 ]
+  done
+  run judge_cmd feedback p97 wrong
+  [ "$status" -eq 0 ]
+
+  run judge_cmd calibration
+  [ "$status" -eq 0 ]
+  [ "${lines[0]}" = "bucket	n	right	accuracy" ]
+  [ "${lines[1]}" = "0.5-0.6	1	1	1" ]
+  [ "${lines[2]}" = "0.6-0.7	1	1	1" ]
+  [ "${lines[3]}" = "0.7-0.8	1	1	1" ]
+  [ "${lines[4]}" = "0.8-0.9	1	1	1" ]
+  [ "${lines[5]}" = "0.9-1.0	2	1	0.5" ]
+  [ "${#lines[@]}" -eq 6 ]
+  curl_not_invoked
+}
+
+@test "calibration: a decision with no feedback is not counted" {
+  seed_log "$LOG" "$DEC_A" "$DEC_B"
+  run judge_cmd feedback dec-a right
+  run judge_cmd calibration
+  [ "$status" -eq 0 ]
+  # Only dec-a (0.91) appears. dec-b (0.72) has no feedback.
+  [ "${#lines[@]}" -eq 2 ]
+  [ "${lines[1]}" = "0.9-1.0	1	1	1" ]
+}
+
+@test "calibration: --judge filters to one judge" {
+  seed_log "$LOG" "$DEC_A" "$DEC_C"
+  run judge_cmd feedback dec-a right
+  run judge_cmd feedback dec-c right
+  run judge_cmd calibration
+  [ "${#lines[@]}" -eq 3 ]
+  run judge_cmd calibration --judge groom-triage
+  [ "$status" -eq 0 ]
+  [ "${#lines[@]}" -eq 2 ]
+  [ "${lines[1]}" = "0.9-1.0	1	1	1" ]
+  run judge_cmd calibration --judge smoke
+  [ "${#lines[@]}" -eq 2 ]
+  # dec-c is a boolean judge: its probability is the one that gets bucketed.
+  [ "${lines[1]}" = "0.8-0.9	1	1	1" ]
+  run judge_cmd calibration --judge nosuchjudge
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"no feedback rows yet"* ]]
+}
+
+@test "calibration: joins feedback to decisions across a rotation boundary" {
+  seed_log "$LOG.1" "$DEC_A"
+  seed_log "$LOG" "$DEC_B"
+  run judge_cmd feedback dec-a right
+  [ "$status" -eq 0 ]
+  run judge_cmd feedback dec-b wrong
+  [ "$status" -eq 0 ]
+  run judge_cmd calibration
+  [ "$status" -eq 0 ]
+  # dec-a is in .1 at 0.91, dec-b is live at 0.72. Both join.
+  [ "${lines[1]}" = "0.7-0.8	1	0	0" ]
+  [ "${lines[2]}" = "0.9-1.0	1	1	1" ]
+}
+
+@test "calibration: no feedback rows prints one line and exits 0" {
+  run judge_cmd calibration
+  [ "$status" -eq 0 ]
+  [ "${#lines[@]}" -eq 1 ]
+  [[ "$output" == *"no feedback rows yet"* ]]
+  seed_log "$LOG" "$DEC_A"
+  run judge_cmd calibration
+  [ "$status" -eq 0 ]
+  [ "${#lines[@]}" -eq 1 ]
+  [[ "$output" == *"no feedback rows yet"* ]]
+  curl_not_invoked
+}
+
+@test "calibration: a probability below 0.5 falls in no bucket" {
+  seed_log "$LOG" \
+    '{"id":"low","judge":"groom-triage","answers":{"recommendation":{"type":"choice","choice":"park","probabilities":{"park":0.35}}}}'
+  run judge_cmd feedback low right
+  [ "$status" -eq 0 ]
+  run judge_cmd calibration
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"no feedback rows yet"* ]]
+}
+
+@test "calibration: --format json emits one object per bucket" {
+  seed_log "$LOG" "$DEC_A" "$DEC_B"
+  run judge_cmd feedback dec-a right
+  run judge_cmd feedback dec-b wrong
+  run judge_cmd calibration --format json
+  [ "$status" -eq 0 ]
+  [ "$(printf '%s' "$output" | jq -c 'map(.bucket)')" = '["0.7-0.8","0.9-1.0"]' ]
+  [ "$(printf '%s' "$output" | jq -r '.[] | select(.bucket == "0.9-1.0") | [.n, .right, .accuracy] | @tsv')" = "1	1	1" ]
+  [ "$(printf '%s' "$output" | jq -r '.[] | select(.bucket == "0.7-0.8") | [.n, .right, .accuracy] | @tsv')" = "1	0	0" ]
+}
+
+@test "calibration: works with enabled=false and with no config at all" {
+  seed_log "$LOG" "$DEC_A"
+  run judge_cmd feedback dec-a right
+  write_config enabled=false
+  run judge_cmd calibration
+  [ "$status" -eq 0 ]
+  [ "${lines[1]}" = "0.9-1.0	1	1	1" ]
+  VAULTMEM_BIN="$BATS_TEST_TMPDIR/bin/does-not-exist" run judge_cmd calibration
+  [ "$status" -eq 0 ]
+  [ "${lines[1]}" = "0.9-1.0	1	1	1" ]
   curl_not_invoked
 }
 
