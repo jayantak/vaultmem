@@ -1,0 +1,57 @@
+{
+  "version": 1,
+  "description": "Triage one cold or stale session: is the work finished, does it name a next step, is it blocked, and does it hold an undistilled decision.",
+  "max_state_bytes": 24000,
+  "truncate": "tail",
+  "questions": {
+    "work_complete": {
+      "type": "boolean",
+      "instructions": "The work this session describes is finished.",
+      "criteria": {
+        "true": "The session states its goal was met, the change shipped or merged, or the remaining text is only cleanup and notes.",
+        "false": "The session describes work still in progress, an open question, a partial implementation, or a goal it never reached."
+      }
+    },
+    "has_next_step": {
+      "type": "boolean",
+      "instructions": "The session names a concrete next action someone could start from.",
+      "criteria": {
+        "true": "The bookmark, pinned notes, or work log name a specific next action, such as a file to change, a command to run, a test to fix, or a person to ask.",
+        "false": "The session names no next action, or only a vague intention such as \"keep going\" or \"revisit later\"."
+      }
+    },
+    "blocked_external": {
+      "type": "boolean",
+      "instructions": "Progress waits on someone or something outside this session.",
+      "criteria": {
+        "true": "The session says it waits on a review, an approval, a deploy, a release, another team, a vendor, or another person's answer.",
+        "false": "The session describes work the author can continue alone, or gives no sign of waiting on anyone."
+      }
+    },
+    "undistilled": {
+      "type": "boolean",
+      "instructions": "The session holds a decision or root cause that the Project's Decisions section does not already reflect.",
+      "criteria": {
+        "true": "The session states a decision, a root cause, or a durable finding, and the Decisions text supplied with it omits that point.",
+        "false": "The Decisions text already reflects every decision and root cause the session states, or the session states none."
+      }
+    },
+    "recommendation": {
+      "type": "choice",
+      "instructions": "Choose what should happen to this session. The state gives ages and counts as plain text; read them, and reason only about what the text says.",
+      "criteria": {
+        "archive": "The work is finished and nothing remains to act on.",
+        "park": "The work is unfinished and waits on someone else, or the author set it aside with a clear place to resume.",
+        "keep-active": "The work is unfinished, names a concrete next action, and the author can continue it now.",
+        "needs-human": "The session is ambiguous, contradicts itself, or holds a decision worth reading before anything moves."
+      }
+    }
+  },
+  "thresholds": {
+    "work_complete": { "yes": 0.85, "no": 0.15 },
+    "has_next_step": { "yes": 0.85, "no": 0.15 },
+    "blocked_external": { "yes": 0.85, "no": 0.15 },
+    "undistilled": { "yes": 0.85, "no": 0.15 },
+    "recommendation": { "min_confidence": 0.6 }
+  }
+}

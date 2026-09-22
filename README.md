@@ -209,6 +209,9 @@ vaultmem task <slug> --promote
 ```
 vaultmem groom              archive done sessions/projects/tasks; report cold-parked + stale-active + checkpoint-due + stale-backlog
 vaultmem groom --dry-run    preview groom: would-move list + would-flip project lines; no writes
+vaultmem groom --judge [--format json]
+                            annotate cold-parked/stale-active rows with a `groom-triage` judgment
+                            (advisory; needs the judge extension and per-vault consent)
 vaultmem doctor             lint the config + flag drifted index rows + vault schema lints
 vaultmem doctor --deep      + vault-wide orphan/unindexed scan (slower; not run by base doctor/groom)
 vaultmem init [--vault <id>]  scaffold a compliant vault skeleton

@@ -1,0 +1,32 @@
+# Session: ad707-athlete-prepare
+
+status: parked
+updated: 2026-08-28
+project: Athlete-Team Profile Data Accuracy
+age_days: 25
+work_log_lines: 212
+
+## Bookmark
+
+Waiting on the platform team to approve the IAM change for the prepare step.
+
+## Pinned
+
+- The formation CodeBuild job needs the role before it can write to the bucket.
+
+## Git state
+
+| branch | ahead | behind | dirty |
+|---|---|---|---|
+| ad707-athlete-prepare | 3 | 0 | no |
+
+## Work log (last 40 lines)
+
+- Split the prepare step out of the monolithic job.
+- Root cause of the earlier OOM: the athlete fan-out held every team profile in
+  memory at once instead of streaming per team.
+- Opened the IAM request; no answer yet.
+
+## Project Decisions
+
+- Athlete profiles are rebuilt nightly, not on write.

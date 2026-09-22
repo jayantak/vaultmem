@@ -321,7 +321,8 @@ timeout_ms = 1500                   # curl --max-time, whole request
 key_file = "~/.config/vaultmem/ai-gateway.key"   # used when AI_GATEWAY_API_KEY is unset
 log = true
 rerank = false                      # search reranks by default only when true
-hook_judges = "nudge"               # comma list: judges allowed to run inside hooks
+hook_judges = "nudge"               # comma list: judges allowed to run inside hooks. Default empty: an
+                                    # example value, so nothing runs in a hook until named.
 
 [vault.personal]
 judge = true                        # default false. Egress consent, per vault.
@@ -550,7 +551,7 @@ not by feel. `vaultmem judge bench` makes that real:
 | Phase | Scope | Done when |
 |---|---|---|
 | 0 | Resolve section 4 unknowns with a throwaway curl. Record findings here. **Done 2026-09-21.** | ZDR behavior and model pinning are known facts |
-| 1 | Core shim, config keys + lint, `_ext_exec`, `_judge`, extension skeleton, egress gate, exit codes, log, `doctor`, tests with curl shim, `install.sh --ext` | `vaultmem judge <name>` works end to end against the shim; all CI jobs green |
+| 1 | Core shim, config keys + lint, `_ext_exec`, `_judge`, extension skeleton, egress gate, exit codes, log, `doctor`, tests with curl shim, `install.sh --ext`. **Done 2026-09-22.** | `vaultmem judge <name>` works end to end against the shim; all CI jobs green |
 | 2 | `groom --judge` + `groom-triage` judge, `feedback`, `calibration` | owner runs it on a consenting vault for two weeks and reviews calibration |
 | 3 | `nudge --judge`, `judge route`, `judge dupes` | hook stays silent and under `timeout_ms` in every failure mode |
 | 4 | `bench`, then search `--rerank` | bench numbers exist; default stays off unless they justify it |
@@ -560,9 +561,15 @@ One PR per phase. Phase 1 must not change any existing command's output.
 
 ## 14. Open questions for the owner
 
-1. `[vault.<id>] description` as a new registry key for routing criteria: accept?
-2. Should `hook_judges` default to empty (nothing runs in hooks until named)?
-   This design assumes yes.
+1. Answered 2026-09-21: **accepted.** `[vault.<id>] description` is an optional
+   string key for routing criteria. It lands in Phase 3, which owns the
+   `_parse_config` / `_lint_config` change, `docs/config.md`, `SCHEMA.md`, and
+   the `doctor hard-errors` tests. `vaultmem judge config` gains a
+   `vault.<id>.description=` line per vault, so both Phase 3 briefs state that
+   contract.
+2. Answered 2026-09-21: **`hook_judges` defaults to empty.** Nothing runs inside
+   a hook until the owner names it. The `"nudge"` in section 6 is an example
+   value, not the default.
 3. Answered 2026-09-21: the decision log rotates. One generation at 5 MiB, a
    constant and not a config key (section 9).
 4. Answered 2026-09-21: the owner accepts `zdr = false` for the personal vault

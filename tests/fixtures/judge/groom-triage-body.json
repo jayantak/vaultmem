@@ -1,0 +1,53 @@
+{
+  "model": "typesafe-ai/jev",
+  "state": "# Session: ad707-athlete-prepare\n\nstatus: parked\nupdated: 2026-08-28\nproject: Athlete-Team Profile Data Accuracy\nage_days: 25\nwork_log_lines: 212\n\n## Bookmark\n\nWaiting on the platform team to approve the IAM change for the prepare step.\n\n## Pinned\n\n- The formation CodeBuild job needs the role before it can write to the bucket.\n\n## Git state\n\n| branch | ahead | behind | dirty |\n|---|---|---|---|\n| ad707-athlete-prepare | 3 | 0 | no |\n\n## Work log (last 40 lines)\n\n- Split the prepare step out of the monolithic job.\n- Root cause of the earlier OOM: the athlete fan-out held every team profile in\n  memory at once instead of streaming per team.\n- Opened the IAM request; no answer yet.\n\n## Project Decisions\n\n- Athlete profiles are rebuilt nightly, not on write.",
+  "questions": {
+    "work_complete": {
+      "type": "boolean",
+      "instructions": "The work this session describes is finished.",
+      "criteria": {
+        "true": "The session states its goal was met, the change shipped or merged, or the remaining text is only cleanup and notes.",
+        "false": "The session describes work still in progress, an open question, a partial implementation, or a goal it never reached."
+      }
+    },
+    "has_next_step": {
+      "type": "boolean",
+      "instructions": "The session names a concrete next action someone could start from.",
+      "criteria": {
+        "true": "The bookmark, pinned notes, or work log name a specific next action, such as a file to change, a command to run, a test to fix, or a person to ask.",
+        "false": "The session names no next action, or only a vague intention such as \"keep going\" or \"revisit later\"."
+      }
+    },
+    "blocked_external": {
+      "type": "boolean",
+      "instructions": "Progress waits on someone or something outside this session.",
+      "criteria": {
+        "true": "The session says it waits on a review, an approval, a deploy, a release, another team, a vendor, or another person's answer.",
+        "false": "The session describes work the author can continue alone, or gives no sign of waiting on anyone."
+      }
+    },
+    "undistilled": {
+      "type": "boolean",
+      "instructions": "The session holds a decision or root cause that the Project's Decisions section does not already reflect.",
+      "criteria": {
+        "true": "The session states a decision, a root cause, or a durable finding, and the Decisions text supplied with it omits that point.",
+        "false": "The Decisions text already reflects every decision and root cause the session states, or the session states none."
+      }
+    },
+    "recommendation": {
+      "type": "choice",
+      "instructions": "Choose what should happen to this session. The state gives ages and counts as plain text; read them, and reason only about what the text says.",
+      "criteria": {
+        "archive": "The work is finished and nothing remains to act on.",
+        "park": "The work is unfinished and waits on someone else, or the author set it aside with a clear place to resume.",
+        "keep-active": "The work is unfinished, names a concrete next action, and the author can continue it now.",
+        "needs-human": "The session is ambiguous, contradicts itself, or holds a decision worth reading before anything moves."
+      }
+    }
+  },
+  "providerOptions": {
+    "gateway": {
+      "zeroDataRetention": true
+    }
+  }
+}
