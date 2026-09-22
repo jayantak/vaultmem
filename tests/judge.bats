@@ -32,16 +32,58 @@ setup() {
   export AI_GATEWAY_API_KEY="$KEY_VALUE"
 
   # Stub core: `judge config` prints the contract; `which` prints a vault id.
+  # For route and dupes it also answers `vaults`, `--vault <id> mocs`,
+  # `--vault <id> resolve <name>`, `--vault <id> --format json -n 5 <query>`,
+  # and `cat <path> --lines 20` from a fixture vault tree under $STUB_VAULTS.
   export STUB_CONFIG="$BATS_TEST_TMPDIR/judge-config"
   export STUB_WHICH_ID="personal" STUB_WHICH_ERR=""
+  export STUB_VAULTS="$BATS_TEST_TMPDIR/vaults"
+  export STUB_SEARCH_JSON="$BATS_TEST_TMPDIR/search.json" STUB_REC="$BATS_TEST_TMPDIR/stub-rec"
   export VAULTMEM_BIN="$BATS_TEST_TMPDIR/bin/vaultmem-stub"
+  printf '[]\n' >"$STUB_SEARCH_JSON"
   cat >"$VAULTMEM_BIN" <<'EOF'
 #!/usr/bin/env bash
-case "$1 ${2:-}" in
-"judge config") cat "$STUB_CONFIG" ;;
-"which "*)
+case "$1" in
+judge) [ "${2:-}" = config ] && cat "$STUB_CONFIG" || exit 64 ;;
+which)
   printf '%s\n' "$STUB_WHICH_ID"
   [ -z "$STUB_WHICH_ERR" ] || printf '%s\n' "$STUB_WHICH_ERR" >&2
+  ;;
+vaults)
+  for d in "$STUB_VAULTS"/*/; do
+    [ -d "$d" ] || continue
+    d="${d%/}"
+    printf '%s\t%s\tSessions\tHome.md\tdefault\n' "${d##*/}" "$d"
+  done
+  ;;
+cat)
+  [ "${3:-}" = "--lines" ] || exit 64
+  printf '%s\n' "$2" >>"$STUB_REC.cat"
+  awk -v n="$4" 'NR <= n { printf "%6d\t%s\n", NR, $0 }' "$2"
+  ;;
+--vault)
+  id="$2"
+  shift 2
+  case "$1" in
+  mocs)
+    # `mocs` lists the primary vault's hubs, whatever --vault says.
+    for f in "$STUB_VAULTS/${STUB_PRIMARY:-$id}/MOCs"/*.md; do
+      [ -f "$f" ] || continue
+      n="${f##*/}"
+      printf '%s\n' "${n%.md}"
+      awk '/^> /{ sub(/^> +/, ""); print "    " $0; exit }' "$f"
+    done
+    ;;
+  resolve)
+    f="$STUB_VAULTS/$id/MOCs/$2.md"
+    if [ -f "$f" ]; then printf '%s\n' "$f"; else printf 'DANGLING\n'; exit 1; fi
+    ;;
+  --format)
+    printf '%s\n' "$id $*" >>"$STUB_REC.search"
+    cat "$STUB_SEARCH_JSON"
+    ;;
+  *) exit 64 ;;
+  esac
   ;;
 *) exit 64 ;;
 esac
@@ -56,6 +98,8 @@ EOF
 #!/usr/bin/env bash
 mkdir -p "$CURL_REC"
 printf 'x\n' >>"$CURL_REC/calls"
+n=$(wc -l <"$CURL_REC/calls" | tr -d ' ')
+eval "resp=\${FAKE_CURL_RESPONSE_$n:-\$FAKE_CURL_RESPONSE}"
 printf '%s\n' "$@" >"$CURL_REC/argv"
 cat >"$CURL_REC/stdin"
 out=""
@@ -63,14 +107,17 @@ prev=""
 for a in "$@"; do
   case "$prev" in
   --output) out="$a" ;;
-  --data-binary) cp "${a#@}" "$CURL_REC/body" ;;
+  --data-binary)
+    cp "${a#@}" "$CURL_REC/body"
+    cp "${a#@}" "$CURL_REC/body.$n"
+    ;;
   esac
   prev="$a"
 done
 if [ "$FAKE_CURL_EXIT" -ne 0 ]; then
   exit "$FAKE_CURL_EXIT"
 fi
-[ -n "$out" ] && cp "$FAKE_CURL_RESPONSE" "$out"
+[ -n "$out" ] && cp "$resp" "$out"
 printf '%s 0.212' "$FAKE_CURL_HTTP"
 EOF
   chmod +x "$BATS_TEST_TMPDIR/bin/curl"
@@ -79,7 +126,7 @@ EOF
 
 # write_config [key=value …]: the core contract, with per-test overrides.
 write_config() {
-  local enabled=true zdr=true log=true timeout_ms=1500 personal=true work=false
+  local enabled=true zdr=true log=true timeout_ms=1500 personal=true work=false side=false nodesc=false
   local base_url="https://ai-gateway.vercel.sh" key_file="$HOME/.config/vaultmem/ai-gateway.key" extra=""
   local kv
   for kv in "$@"; do
@@ -101,6 +148,15 @@ write_config() {
     [ -z "$extra" ] || printf '%s\n' "$extra"
     printf 'vault.personal.judge=%s\n' "$personal"
     printf 'vault.work.judge=%s\n' "$work"
+    printf 'vault.side.judge=%s\n' "$side"
+    # Contract 1 (Phase 3): label and description per vault, after every other
+    # line. nodesc=true drops the description lines, as an older core would.
+    printf 'vault.personal.label=Personal\n'
+    [ "$nodesc" = true ] || printf 'vault.personal.description=Engineering notes, tooling, agent memory, and home projects.\n'
+    printf 'vault.work.label=AcmeCorp Work\n'
+    [ "$nodesc" = true ] || printf 'vault.work.description=AcmeCorp Secret Roadmap and customer incidents.\n'
+    printf 'vault.side.label=Side Projects\n'
+    [ "$nodesc" = true ] || printf 'vault.side.description=\n'
   } >"$STUB_CONFIG"
 }
 
@@ -358,10 +414,12 @@ use_outcome_judge() { cp "$FIX/outcome-judge.json" "$XDG_CONFIG_HOME/vaultmem/ju
   [ "$(jq -r '.state' "$CURL_REC/body")" = "$tricky" ]
 }
 
-@test "--gate sends only the gated question" {
+@test "--gate still sends every question, so a gated caller can read the others" {
   use_outcome_judge
-  run judge_in "$STATE_TEXT" outcome --vault personal --gate failed
-  [ "$(jq -c '.questions | keys' "$CURL_REC/body")" = '["failed"]' ]
+  FAKE_CURL_RESPONSE="$FIX/mixed.json" run judge_in "$STATE_TEXT" outcome --vault personal --gate failed
+  [ "$status" -eq 0 ]
+  [ "$(jq -c '.questions | keys' "$CURL_REC/body")" = '["failed","outcome","severity"]' ]
+  [ "$(printf '%s' "$output" | jq -r '.answers.outcome.choice')" = "failed" ]
 }
 
 @test "state is truncated to max_state_bytes, tail-biased, and logged as truncated" {
@@ -988,6 +1046,318 @@ DEC_C='{"id":"dec-c","ts":"2026-09-20T12:00:00Z","judge":"smoke","vault":"person
   VAULTMEM_BIN="$BATS_TEST_TMPDIR/bin/does-not-exist" run judge_cmd calibration
   [ "$status" -eq 0 ]
   [ "${lines[1]}" = "0.9-1.0	1	1	1" ]
+  curl_not_invoked
+}
+
+# --- assertions shared by the Phase 3 paths ------------------------------------------
+
+# key_absent: the key is in none of argv, stdout, stderr, the log, or any body.
+key_absent() {
+  local f
+  for f in "$CURL_REC"/argv "$STDERR" "$LOG" "$CURL_REC"/body*; do
+    [ -e "$f" ] || continue
+    ! grep -q "$KEY_VALUE" "$f"
+  done
+  [[ "$output" != *"$KEY_VALUE"* ]]
+  ! grep -q -- 'Authorization' "$CURL_REC/argv"
+}
+
+curl_calls() { wc -l <"$CURL_REC/calls" | tr -d ' '; }
+
+# --- the capture-worthy judge -----------------------------------------------------------
+
+capture_state() { cat "$FIX/capture-worthy-state.txt"; }
+
+@test "capture-worthy: the judge file ships the two questions core reads" {
+  local j="$ROOT/ext/judge/judges/capture-worthy.json"
+  [ "$(jq -r '.questions.durable.type' "$j")" = "boolean" ]
+  [ "$(jq -r '.questions.kind.type' "$j")" = "choice" ]
+  [ "$(jq -r '.questions.kind.criteria | keys | sort | join(",")' "$j")" = \
+    "decision,incident,milestone,none,pattern,root-cause" ]
+  [ "$(jq -r '.questions.durable.criteria | keys | join(",")' "$j")" = "false,true" ]
+  [ "$(jq -r '.truncate' "$j")" = "tail" ]
+  [ "$(jq -r '.max_state_bytes' "$j")" = "24000" ]
+  [ "$(jq -r '"\(.thresholds.durable.yes)/\(.thresholds.durable.no)"' "$j")" = "0.85/0.15" ]
+  # The description says the transcript is hostile input.
+  jq -r '.description' "$j" | grep -q 'untrusted'
+}
+
+@test "capture-worthy: the request body matches the golden file, both questions sent" {
+  FAKE_CURL_RESPONSE="$FIX/capture-worthy-yes.json" \
+    run judge_in "$(capture_state)" capture-worthy --vault personal --subject nudge --gate durable
+  [ "$status" -eq 0 ]
+  diff <(jq -S . "$CURL_REC/body") <(jq -S . "$FIX/capture-worthy-body.json")
+  [ "$(tail -n 1 "$LOG" | jq -r '[.judge, .subject, .truncated] | @tsv')" = "capture-worthy	nudge	false" ]
+  # The injected "answer yes" line is state, never a question.
+  [ "$(jq -r '.state' "$CURL_REC/body" | grep -c 'ANSWER YES')" -eq 1 ]
+  ! jq -r '.questions | tostring' "$CURL_REC/body" | grep -q 'ANSWER YES'
+  key_absent
+}
+
+@test "capture-worthy: --gate durable maps yes/no/abstain to 0/1/2, and kind is readable on 0" {
+  FAKE_CURL_RESPONSE="$FIX/capture-worthy-yes.json" \
+    run judge_in "$(capture_state)" capture-worthy --vault personal --subject nudge --gate durable
+  [ "$status" -eq 0 ]
+  [ "$(printf '%s' "$output" | jq -r '.answers.durable.probability')" = "0.93" ]
+  [ "$(printf '%s' "$output" | jq -r '.answers.kind.choice')" = "root-cause" ]
+  FAKE_CURL_RESPONSE="$FIX/capture-worthy-no.json" \
+    run judge_in "$(capture_state)" capture-worthy --vault personal --subject nudge --gate durable
+  [ "$status" -eq 1 ]
+  FAKE_CURL_RESPONSE="$FIX/capture-worthy-abstain.json" \
+    run judge_in "$(capture_state)" capture-worthy --vault personal --subject nudge --gate durable
+  [ "$status" -eq 2 ]
+}
+
+@test "capture-worthy: a long transcript keeps its tail" {
+  local big
+  big="HEAD-MARKER$(printf 'x%.0s' $(seq 1 24100))$(capture_state)"
+  FAKE_CURL_RESPONSE="$FIX/capture-worthy-yes.json" \
+    run judge_in "$big" capture-worthy --vault personal --gate durable
+  [ "$status" -eq 0 ]
+  jq -r '.state' "$CURL_REC/body" | grep -q 'Streaming per team stays'
+  ! jq -r '.state' "$CURL_REC/body" | grep -q 'HEAD-MARKER'
+}
+
+# --- route and dupes: a fixture vault tree behind the core stub -------------------------
+
+# make_vaults: personal (MOCs + notes), side (one MOC), work (non-consenting;
+# its names are the leak canary: nothing containing "AcmeCorp" may be sent).
+make_vaults() {
+  local p="$STUB_VAULTS/personal" w="$STUB_VAULTS/work" sd="$STUB_VAULTS/side"
+  mkdir -p "$p/MOCs" "$p/Debug" "$p/Notes" "$w/MOCs" "$sd/MOCs"
+  printf -- '---\ntype: moc\n---\n# Agent Memory\n\n> Vault-as-memory tooling, hooks, and the judge.\n' >"$p/MOCs/MOC - Agent Memory.md"
+  printf -- '# Home Lab\n\n> Servers, networking, and the NAS.\n' >"$p/MOCs/MOC - Home Lab.md"
+  printf -- '# Side Hustle\n' >"$sd/MOCs/MOC - Side Hustle.md"
+  printf -- '# AcmeCorp Secret Roadmap\n\n> AcmeCorp internal.\n' >"$w/MOCs/MOC - AcmeCorp Secret Roadmap.md"
+  printf -- '---\nupdated: 2026-09-01\n---\n# Athlete rebuild OOM\n\nThe fan-out held every team profile at once.\n' >"$p/Debug/Athlete rebuild OOM.md"
+  printf -- '# Streaming patterns\n\nStream per item when the item count is unbounded.\n' >"$p/Notes/Streaming patterns.md"
+  printf -- 'No heading in this one.\nIt mentions a nightly rebuild.\n' >"$p/Notes/rebuild log.md"
+  printf -- '# AcmeCorp incident\n\nAcmeCorp content.\n' >"$w/AcmeCorp incident.md"
+}
+
+# search_hits <file>...: the stub's `--format json` answer, two match lines per
+# file so the extension has to dedupe.
+search_hits() {
+  local f
+  for f in "$@"; do
+    printf '{"file":"%s","line":1,"text":"a"}\n{"file":"%s","line":3,"text":"b"}\n' "$f" "$f"
+  done | jq -s . >"$STUB_SEARCH_JSON"
+}
+
+summary() { cat "$FIX/capture-summary.txt"; }
+
+# --- route ----------------------------------------------------------------------------
+
+@test "route: one consenting vault is one request, no vault question, documented JSON" {
+  make_vaults
+  FAKE_CURL_RESPONSE="$FIX/route-one-response.json" run judge_in "$(summary)" route --subject capture
+  [ "$status" -eq 0 ]
+  [ "$(curl_calls)" -eq 1 ]
+  diff <(jq -S . "$CURL_REC/body") <(jq -S . "$FIX/route-one-body.json")
+  [ "$(printf '%s' "$output" | jq -c 'del(.id)')" = \
+    '{"vault":"personal","category":"root","moc":"MOC - Agent Memory","probabilities":{"vault":1,"category":0.88,"moc":0.79}}' ]
+  [ "$(printf '%s' "$output" | jq -r '.id')" = "$(jq -r '.id' "$LOG")" ]
+  [ "$(jq -r '[.judge, .vault, .subject] | @tsv' "$LOG")" = "route	personal	capture" ]
+  key_absent
+}
+
+@test "route: two consenting vaults are two requests; the moc request follows the chosen vault" {
+  make_vaults
+  write_config side=true
+  FAKE_CURL_RESPONSE_1="$FIX/route-two-response-1.json" FAKE_CURL_RESPONSE_2="$FIX/route-two-response-2.json" \
+    run judge_in "$(summary)" route
+  [ "$status" -eq 0 ]
+  [ "$(curl_calls)" -eq 2 ]
+  diff <(jq -S . "$CURL_REC/body.1") <(jq -S . "$FIX/route-two-body-1.json")
+  diff <(jq -S . "$CURL_REC/body.2") <(jq -S . "$FIX/route-two-body-2.json")
+  [ "$(printf '%s' "$output" | jq -c 'del(.id, .moc_id)')" = \
+    '{"vault":"personal","category":"root","moc":"MOC - Agent Memory","probabilities":{"vault":0.91,"category":0.88,"moc":0.79}}' ]
+  # Both rows are logged under the chosen vault; stdout names both ids.
+  [ "$(jq -r '.vault' "$LOG" | tr '\n' ' ')" = "personal personal " ]
+  [ "$(printf '%s' "$output" | jq -r '"\(.id) \(.moc_id)"')" = "$(jq -r '.id' "$LOG" | tr '\n' ' ' | sed 's/ $//')" ]
+  key_absent
+}
+
+@test "route: no consenting vault exits 3 and curl is never invoked" {
+  make_vaults
+  write_config personal=false
+  run judge_in "$(summary)" route
+  [ "$status" -eq 3 ]
+  [ -z "$output" ]
+  curl_not_invoked
+  [ ! -e "$LOG" ]
+}
+
+@test "route: enabled=false exits 3 and curl is never invoked" {
+  make_vaults
+  write_config enabled=false side=true
+  run judge_in "$(summary)" route
+  [ "$status" -eq 3 ]
+  curl_not_invoked
+}
+
+@test "route: a non-consenting vault's label, description, and MOCs are in no request" {
+  make_vaults
+  write_config side=true
+  # Core's `mocs` lists the primary vault's hubs whatever --vault says. Make the
+  # primary the non-consenting vault to prove those names are filtered out.
+  export STUB_PRIMARY=work
+  FAKE_CURL_RESPONSE_1="$FIX/route-two-response-1.json" FAKE_CURL_RESPONSE_2="$FIX/route-two-response-2.json" \
+    run judge_in "$(summary)" route
+  [ "$status" -eq 0 ]
+  ls "$CURL_REC"/body.* >/dev/null
+  ! grep -l 'AcmeCorp' "$CURL_REC"/body*
+  ! grep -q '"work"' "$CURL_REC"/body.1
+  # No MOC of the chosen vault survived the filter, so no moc request was sent.
+  [ "$(curl_calls)" -eq 1 ]
+  [ "$(printf '%s' "$output" | jq -r '.moc')" = "null" ]
+
+  # Same with a single consenting vault.
+  rm -r "$CURL_REC"
+  write_config
+  jq 'del(.answers.moc)' "$FIX/route-one-response.json" >"$BATS_TEST_TMPDIR/resp.json"
+  FAKE_CURL_RESPONSE="$BATS_TEST_TMPDIR/resp.json" run judge_in "$(summary)" route
+  [ "$status" -eq 0 ]
+  ! grep -q 'AcmeCorp' "$CURL_REC/body"
+  [ "$(jq -c '.questions | keys' "$CURL_REC/body")" = '["category"]' ]
+}
+
+@test "route: a top vault below min_confidence exits 2 and sends nothing more" {
+  make_vaults
+  write_config side=true
+  FAKE_CURL_RESPONSE="$FIX/route-lowconf.json" run judge_in "$(summary)" route
+  [ "$status" -eq 2 ]
+  [ "$(curl_calls)" -eq 1 ]
+  [ "$(printf '%s' "$output" | jq -c '[.vault, .moc, .probabilities.vault]')" = '["personal",null,0.52]' ]
+}
+
+@test "route: a vault the gateway was not offered is a bad response, exit 3" {
+  make_vaults
+  write_config side=true
+  jq '.answers.vault.choice = "work" | .answers.vault.probabilities = {"work": 0.99}' \
+    "$FIX/route-two-response-1.json" >"$BATS_TEST_TMPDIR/resp.json"
+  FAKE_CURL_RESPONSE="$BATS_TEST_TMPDIR/resp.json" run judge_in "$(summary)" route
+  [ "$status" -eq 3 ]
+  [ -z "$output" ]
+  [ "$(curl_calls)" -eq 1 ]
+}
+
+@test "route: a missing description line (older core) reads as empty" {
+  make_vaults
+  write_config side=true nodesc=true
+  FAKE_CURL_RESPONSE_1="$FIX/route-two-response-1.json" FAKE_CURL_RESPONSE_2="$FIX/route-two-response-2.json" \
+    run judge_in "$(summary)" route
+  [ "$status" -eq 0 ]
+  [ "$(jq -c '.questions.vault.criteria' "$CURL_REC/body.1")" = '{"personal":"Personal","side":"Side Projects"}' ]
+}
+
+@test "route: a vault with no MOCs omits the moc question" {
+  make_vaults
+  rm -r "$STUB_VAULTS/personal/MOCs"
+  jq 'del(.answers.moc)' "$FIX/route-one-response.json" >"$BATS_TEST_TMPDIR/resp.json"
+  FAKE_CURL_RESPONSE="$BATS_TEST_TMPDIR/resp.json" run judge_in "$(summary)" route
+  [ "$status" -eq 0 ]
+  [ "$(jq -c '.questions | keys' "$CURL_REC/body")" = '["category"]' ]
+  [ "$(printf '%s' "$output" | jq -c '[.moc, .probabilities.moc]')" = '[null,null]' ]
+}
+
+@test "route: a failure on either request exits 3 with empty stdout, key unseen" {
+  make_vaults
+  write_config side=true
+  jq --arg k "$KEY_VALUE" '.error.message = "bad key " + $k' "$FIX/error-401.json" >"$BATS_TEST_TMPDIR/err.json"
+  # The second request gets an error body on a 200: a bad response.
+  FAKE_CURL_RESPONSE_1="$FIX/route-two-response-1.json" FAKE_CURL_RESPONSE_2="$BATS_TEST_TMPDIR/err.json" \
+    run judge_in "$(summary)" route
+  [ "$status" -eq 3 ]
+  [ -z "$output" ]
+  # The first request gets a 401 that echoes the key.
+  FAKE_CURL_RESPONSE="$BATS_TEST_TMPDIR/err.json" FAKE_CURL_HTTP=401 run judge_in "$(summary)" route
+  [ "$status" -eq 3 ]
+  [ -z "$output" ]
+  key_absent
+}
+
+# --- dupes ----------------------------------------------------------------------------
+
+@test "dupes: candidates are judged one boolean each and come back sorted" {
+  make_vaults
+  local p="$STUB_VAULTS/personal"
+  # Duplicates and a path outside the vault root must not become candidates.
+  search_hits "$p/Debug/Athlete rebuild OOM.md" "$p/Notes/Streaming patterns.md" \
+    "$STUB_VAULTS/work/AcmeCorp incident.md" "$p/Notes/rebuild log.md"
+  FAKE_CURL_RESPONSE="$FIX/dupes-response.json" run judge_in "$(summary)" dupes --vault personal --subject capture
+  [ "$status" -eq 0 ]
+  [ "$(curl_calls)" -eq 1 ]
+  [ "$(cat "$STUB_REC.search")" = "personal --format json -n 5 Nightly athlete rebuild OOM stream per team" ]
+  diff <(jq -S . "$CURL_REC/body") <(jq -S . "$FIX/dupes-body.json")
+  [ "$(printf '%s' "$output" | jq -r '.[] | "\(.probability) \(.path)"')" = \
+    "$(printf '0.94 %s\n0.21 %s\n0.07 %s' "$p/Notes/Streaming patterns.md" "$p/Debug/Athlete rebuild OOM.md" "$p/Notes/rebuild log.md")" ]
+  ! grep -q 'AcmeCorp' "$CURL_REC/body"
+  [ "$(jq -r '[.judge, .vault, .subject] | @tsv' "$LOG")" = "dupes	personal	capture" ]
+  key_absent
+}
+
+@test "dupes: zero candidates prints [] and never invokes curl" {
+  make_vaults
+  run judge_in "$(summary)" dupes --vault personal
+  [ "$status" -eq 0 ]
+  [ "$output" = "[]" ]
+  curl_not_invoked
+  # Hits only in another vault are still zero candidates.
+  search_hits "$STUB_VAULTS/work/AcmeCorp incident.md"
+  run judge_in "$(summary)" dupes --vault personal
+  [ "$status" -eq 0 ]
+  [ "$output" = "[]" ]
+  curl_not_invoked
+}
+
+@test "dupes: a non-consenting vault exits 3 before search or curl" {
+  make_vaults
+  search_hits "$STUB_VAULTS/work/AcmeCorp incident.md"
+  run judge_in "$(summary)" dupes --vault work
+  [ "$status" -eq 3 ]
+  [ -z "$output" ]
+  curl_not_invoked
+  [ ! -e "$STUB_REC.search" ]
+}
+
+@test "dupes: without --vault a confident which is used; a guess is not consent" {
+  make_vaults
+  search_hits "$STUB_VAULTS/personal/Notes/Streaming patterns.md"
+  jq '{model, answers: {c1: .answers.c2}}' "$FIX/dupes-response.json" >"$BATS_TEST_TMPDIR/resp.json"
+  FAKE_CURL_RESPONSE="$BATS_TEST_TMPDIR/resp.json" run judge_in "$(summary)" dupes
+  [ "$status" -eq 0 ]
+  [ "$(printf '%s' "$output" | jq -c 'map(.probability)')" = '[0.94]' ]
+  rm -r "$CURL_REC"
+  STUB_WHICH_ERR="vaultmem: low-confidence guess (no match signal) → personal" run judge_in "$(summary)" dupes
+  [ "$status" -eq 3 ]
+  curl_not_invoked
+}
+
+@test "dupes: every candidate keeps a share of the state budget" {
+  make_vaults
+  local p="$STUB_VAULTS/personal"
+  jq '.max_state_bytes = 2000' "$ROOT/ext/judge/judges/dupes.json" >"$XDG_CONFIG_HOME/vaultmem/judges/dupes.json"
+  printf '# Huge\n%s\n' "$(printf 'y%.0s' $(seq 1 3000))" >"$p/Notes/Huge.md"
+  search_hits "$p/Notes/Huge.md" "$p/Notes/Streaming patterns.md"
+  jq '{model, answers: {c1: .answers.c1, c2: .answers.c2}}' "$FIX/dupes-response.json" >"$BATS_TEST_TMPDIR/resp.json"
+  FAKE_CURL_RESPONSE="$BATS_TEST_TMPDIR/resp.json" run judge_in "$(summary)" dupes --vault personal
+  [ "$status" -eq 0 ]
+  [ "$(jq -r '.state | utf8bytelength' "$CURL_REC/body")" -le 2000 ]
+  jq -r '.state' "$CURL_REC/body" | grep -q 'Candidate c2'
+  jq -r '.state' "$CURL_REC/body" | grep -q 'Stream per item'
+  [ "$(tail -n 1 "$LOG" | jq -r '.truncated')" = "true" ]
+}
+
+@test "route and dupes usage errors exit 64 and never invoke curl" {
+  run judge_in "x" route --bogus
+  [ "$status" -eq 64 ]
+  run judge_in "x" route --subject
+  [ "$status" -eq 64 ]
+  run judge_in "x" dupes --vault
+  [ "$status" -eq 64 ]
+  run judge_in "x" dupes personal
+  [ "$status" -eq 64 ]
   curl_not_invoked
 }
 

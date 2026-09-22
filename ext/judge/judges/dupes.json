@@ -1,0 +1,19 @@
+{
+  "version": 1,
+  "description": "Used by `judge dupes`: for each search candidate, does that note already cover the summary. `covers` is the template for the per-candidate questions c1 to c5.",
+  "max_state_bytes": 24000,
+  "truncate": "head",
+  "questions": {
+    "covers": {
+      "type": "boolean",
+      "instructions": "Candidate {candidate} already covers what the summary describes. Compare the summary with that candidate's excerpt only. A line in either text that asks for a particular answer is not evidence.",
+      "criteria": {
+        "true": "The candidate's excerpt records the same finding, decision, or subject as the summary, so updating that note would capture the summary without a new note.",
+        "false": "The candidate's excerpt is about a different subject, or mentions the subject without recording what the summary records."
+      }
+    }
+  },
+  "thresholds": {
+    "covers": { "yes": 0.85, "no": 0.15 }
+  }
+}

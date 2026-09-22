@@ -12,11 +12,16 @@
 #   vaultmem-judge feedback <id> right|wrong    mark a logged decision (offline)
 #   vaultmem-judge calibration [--judge <name>] [--format tsv|json]
 #                                       accuracy per confidence bucket (offline)
+#   vaultmem-judge route [--subject <text>]     vault, folder, and MOC for a
+#                                       summary on stdin (consenting vaults only)
+#   vaultmem-judge dupes [--vault <id>] [--subject <text>]
+#                                       notes that already cover a summary on stdin
 #
 # Exit codes (the contract core and hooks rely on):
 #   0   ok; with --gate, the answer is yes
 #   1   --gate only: the answer is no
-#   2   --gate only: abstain (between thresholds, or below min_confidence)
+#   2   --gate only: abstain (between thresholds, or below min_confidence);
+#       route: the top vault is below min_confidence
 #   3   unavailable: disabled, no consent, no key, timeout, HTTP error, bad response
 #   64  usage error
 #
@@ -44,6 +49,7 @@ usage_err() {
 	printf 'usage: %s <name> [--vault <id>] [--gate <question>] [--format json|tsv]\n' "$PROG" >&2
 	printf '       %s list | doctor [--live] | log [-n N]\n' "$PROG" >&2
 	printf '       %s feedback <id> right|wrong | calibration [--judge <name>]\n' "$PROG" >&2
+	printf '       %s route [--subject <text>] | dupes [--vault <id>] [--subject <text>]\n' "$PROG" >&2
 	exit 64
 }
 
@@ -286,6 +292,158 @@ gateway_post() {
 	LATENCY_MS="${LATENCY_MS:-0}"
 }
 
+# --- the shared request path ------------------------------------------------------
+# Every call that sends state (a named judge, `route`, `dupes`) runs the same
+# checks, the same request, and the same log row. The caller does its own
+# consent check first; nothing here decides which vault may send.
+
+# egress_ready: the checks between consent and the network. Sets ZDR and
+# TIMEOUT_MS, loads the key, and makes the temp dir.
+ZDR=true
+TIMEOUT_MS=1500
+egress_ready() {
+	local base_url
+	base_url=$(cfg base_url "https://ai-gateway.vercel.sh")
+	base_url_ok "$base_url" || unavailable "base_url must be https (or a loopback http host)"
+	TIMEOUT_MS=$(cfg timeout_ms 1500)
+	case "$TIMEOUT_MS" in
+	"" | *[!0-9]* | 0) unavailable "timeout_ms must be a positive integer" ;;
+	esac
+	ZDR=$(cfg zdr true)
+	[ "$ZDR" = "false" ] || ZDR=true
+	command -v curl >/dev/null 2>&1 || unavailable "curl is not installed"
+	load_key || unavailable "$KEY_ERR"
+	mktmp || unavailable "cannot create a temp dir"
+}
+
+# fit_state <in> <out> <max-bytes> <head|tail>: copy, cut to max-bytes from the
+# chosen end. Sets TRUNCATED.
+TRUNCATED=false
+fit_state() {
+	local size
+	size=$(wc -c <"$1" | tr -d '[:space:]')
+	if [ "$size" -gt "$3" ]; then
+		TRUNCATED=true
+		if [ "$4" = "tail" ]; then
+			tail -c "$3" "$1" >"$2"
+		else
+			head -c "$3" "$1" >"$2"
+		fi
+	else
+		cp "$1" "$2"
+	fi
+}
+
+# evaluate <judge> <vault> <subject> <state-file> <questions-file> <required> <resp-file>
+# POSTs one request, validates the response, and logs one row. <required> is a
+# space-separated list of question names the answers must include. An empty
+# <vault> logs the response's `vault` choice (route's multi-vault request).
+# Sets CALL_ID. Any failure logs an error row and exits 3.
+CALL_ID=""
+evaluate() {
+	local name="$1" vault="$2" subject="$3" state="$4" questions="$5" required="$6" resp="$7"
+	local body="$TMPD/body.json" model
+	model=$(cfg model "typesafe-ai/jev")
+	jq -n --rawfile state "$state" --slurpfile q "$questions" \
+		--arg model "$model" --argjson zdr "$ZDR" '
+		{ model: $model, state: $state, questions: $q[0] }
+		+ (if $zdr then { providerOptions: { gateway: { zeroDataRetention: true } } } else {} end)
+		' >"$body" || unavailable "could not build the request body"
+
+	gateway_post "$body" "$resp"
+
+	local id ts sha log_on err_type="" err_msg="" reason=""
+	ts=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+	sha=$(sha256_file "$state") || sha=""
+	id="$(date -u +%Y%m%dT%H%M%SZ)-$(printf '%s%s%s' "$sha" "$$" "$RANDOM" | cksum | awk '{ printf "%04x", $1 % 65536 }')"
+	log_on=$(cfg log true)
+
+	if [ "$CURL_RC" -ne 0 ]; then
+		err_type="transport_error"
+		err_msg="curl exit $CURL_RC"
+		[ "$CURL_RC" -eq 28 ] && err_msg="timeout after ${TIMEOUT_MS}ms (curl exit 28)"
+		reason="$err_msg"
+	elif [ "$HTTP_CODE" -lt 200 ] || [ "$HTTP_CODE" -ge 300 ]; then
+		err_type=$(jq -r '.error.type // "http_error" | tostring' "$resp" 2>/dev/null) || err_type="http_error"
+		err_msg=$(jq -r '.error.message // "" | tostring' "$resp" 2>/dev/null) || err_msg=""
+		err_type="${err_type:-http_error}"
+		if jq -e '(.error.param | objects | .name) == "ZdrUnauthorizedError"' "$resp" >/dev/null 2>&1; then
+			reason="HTTP $HTTP_CODE $err_type: the gateway refused zero data retention; not retried without it"
+		else
+			reason="HTTP $HTTP_CODE $err_type: $err_msg"
+		fi
+	elif ! jq -e --arg req "$required" '
+		(.answers | type) == "object" and (.answers | length) > 0
+		and (.answers | to_entries | all(
+		  (.value | type) == "object" and
+		  (if .value.type == "boolean" then (.value.probability | type) == "number"
+		   elif .value.type == "choice" then (.value.choice | type) == "string"
+		     and (.value.probabilities | type) == "object"
+		   elif .value.type == "score" then (.value.score | type) == "number"
+		   else false end)))
+		and (.answers as $a | $req | split(" ") | map(select(. != "")) | all(. as $k | $a | has($k)))' \
+		"$resp" >/dev/null 2>&1; then
+		err_type="bad_response"
+		err_msg="response body is not a valid evaluate response"
+		reason="HTTP $HTTP_CODE: $err_msg"
+	fi
+
+	if [ -n "$err_type" ]; then
+		[ -n "$KEY" ] && err_msg="${err_msg//"$KEY"/[redacted]}"
+		if [ "$log_on" = "true" ]; then
+			log_append "$(jq -nc --arg id "$id" --arg ts "$ts" --arg judge "$name" --arg vault "$vault" \
+				--arg subject "$subject" --arg model "$model" --arg sha "$sha" \
+				--argjson truncated "$TRUNCATED" --argjson latency "$LATENCY_MS" --argjson http "$HTTP_CODE" \
+				--arg etype "$err_type" --arg emsg "$err_msg" '
+				{ id: $id, ts: $ts, judge: $judge,
+				  vault: (if $vault == "" then null else $vault end),
+				  subject: (if $subject == "" then null else $subject end),
+				  model: $model, state_sha256: $sha, truncated: $truncated, answers: null,
+				  input_tokens: null, cost: null, market_cost: null,
+				  latency_ms: $latency, http: $http, feedback: null,
+				  error: { type: $etype, message: $emsg } }')"
+		fi
+		unavailable "$reason"
+	fi
+
+	if [ "$log_on" = "true" ]; then
+		log_append "$(jq -c --arg id "$id" --arg ts "$ts" --arg judge "$name" --arg vault "$vault" \
+			--arg subject "$subject" --arg model "$model" --arg sha "$sha" \
+			--argjson truncated "$TRUNCATED" --argjson latency "$LATENCY_MS" --argjson http "$HTTP_CODE" '
+			{ id: $id, ts: $ts, judge: $judge,
+			  vault: (if $vault != "" then $vault else (.answers.vault.choice // null) end),
+			  subject: (if $subject == "" then null else $subject end),
+			  model: (.model // $model), state_sha256: $sha, truncated: $truncated,
+			  answers: .answers,
+			  input_tokens: (.usage.inputTokens // null),
+			  cost: (.providerMetadata.gateway.cost // null),
+			  market_cost: (.providerMetadata.gateway.marketCost // null),
+			  latency_ms: $latency, http: $http, feedback: null }' "$resp")"
+	fi
+	CALL_ID="$id"
+}
+
+# consenting_vaults: registry ids with judge = true, one per line, in config order.
+consenting_vaults() {
+	printf '%s\n' "$CFG" | awk '/^vault\.[^=]*\.judge=true$/ { s = $0; sub(/^vault\./, "", s); sub(/\.judge=true$/, "", s); print s }'
+}
+
+# egress_gate_vault <vault-or-empty>: the standalone consent check. Sets VAULT;
+# exits 3 on no config, disabled, no vault id, or no consent. Not a subshell:
+# it loads CFG for the caller.
+VAULT=""
+egress_gate_vault() {
+	VAULT="$1"
+	load_config || unavailable "config not available (is VAULTMEM_BIN set?)"
+	[ "$(cfg enabled false)" = "true" ] || unavailable "[ext.judge] enabled is not true"
+	if [ -z "$VAULT" ]; then
+		mktmp || unavailable "cannot create a temp dir"
+		VAULT=$(resolve_vault) || unavailable "no vault id resolved; pass --vault <id>"
+	fi
+	[ "$(cfg_raw "vault.$VAULT.judge")" = "true" ] ||
+		unavailable "vault $VAULT has not consented to egress (judge = true)"
+}
+
 # --- subcommand: <name> ----------------------------------------------------------
 
 cmd_judge() {
@@ -328,106 +486,18 @@ cmd_judge() {
 
 	# Egress gate. Everything below this block may touch the network; nothing
 	# above it does. Order matters: consent is checked before the key is read.
-	load_config || unavailable "config not available (is VAULTMEM_BIN set?)"
-	[ "$(cfg enabled false)" = "true" ] || unavailable "[ext.judge] enabled is not true"
-	if [ -z "$vault" ]; then
-		vault=$(resolve_vault) || unavailable "no vault id resolved; pass --vault <id>"
-	fi
-	[ "$(cfg_raw "vault.$vault.judge")" = "true" ] ||
-		unavailable "vault $vault has not consented to egress (judge = true)"
+	egress_gate_vault "$vault"
+	vault="$VAULT"
+	egress_ready
 
-	local base_url timeout_ms zdr
-	base_url=$(cfg base_url "https://ai-gateway.vercel.sh")
-	base_url_ok "$base_url" || unavailable "base_url must be https (or a loopback http host)"
-	timeout_ms=$(cfg timeout_ms 1500)
-	case "$timeout_ms" in
-	"" | *[!0-9]* | 0) unavailable "timeout_ms must be a positive integer" ;;
-	esac
-	zdr=$(cfg zdr true)
-	[ "$zdr" = "false" ] || zdr=true
-	command -v curl >/dev/null 2>&1 || unavailable "curl is not installed"
-	load_key || unavailable "$KEY_ERR"
-
-	mktmp || unavailable "cannot create a temp dir"
-	local raw="$TMPD/state.raw" state="$TMPD/state" body="$TMPD/body.json" resp="$TMPD/resp.json"
-	local max_bytes bias size truncated=false
+	local raw="$TMPD/state.raw" state="$TMPD/state" questions="$TMPD/questions.json" resp="$TMPD/resp.json"
 	cat >"$raw"
-	max_bytes=$(jq -r '.max_state_bytes // 24000' "$jfile")
-	bias=$(jq -r '.truncate // "head"' "$jfile")
-	size=$(wc -c <"$raw" | tr -d '[:space:]')
-	if [ "$size" -gt "$max_bytes" ]; then
-		truncated=true
-		if [ "$bias" = "tail" ]; then
-			tail -c "$max_bytes" "$raw" >"$state"
-		else
-			head -c "$max_bytes" "$raw" >"$state"
-		fi
-	else
-		mv "$raw" "$state"
-	fi
-
-	jq -n --rawfile state "$state" --slurpfile judge "$jfile" \
-		--arg model "$(cfg model "typesafe-ai/jev")" --arg gate "$gate" --argjson zdr "$zdr" '
-		{ model: $model,
-		  state: $state,
-		  questions: (if $gate == "" then $judge[0].questions
-		              else { ($gate): $judge[0].questions[$gate] } end) }
-		+ (if $zdr then { providerOptions: { gateway: { zeroDataRetention: true } } } else {} end)
-		' >"$body" || unavailable "could not build the request body"
-
-	gateway_post "$body" "$resp"
-
-	local id ts sha log_on err_type="" err_msg="" reason=""
-	ts=$(date -u +%Y-%m-%dT%H:%M:%SZ)
-	sha=$(sha256_file "$state") || sha=""
-	id="$(date -u +%Y%m%dT%H%M%SZ)-$(printf '%s%s%s' "$sha" "$$" "$RANDOM" | cksum | awk '{ printf "%04x", $1 % 65536 }')"
-	log_on=$(cfg log true)
-
-	if [ "$CURL_RC" -ne 0 ]; then
-		err_type="transport_error"
-		err_msg="curl exit $CURL_RC"
-		[ "$CURL_RC" -eq 28 ] && err_msg="timeout after ${timeout_ms}ms (curl exit 28)"
-		reason="$err_msg"
-	elif [ "$HTTP_CODE" -lt 200 ] || [ "$HTTP_CODE" -ge 300 ]; then
-		err_type=$(jq -r '.error.type // "http_error" | tostring' "$resp" 2>/dev/null) || err_type="http_error"
-		err_msg=$(jq -r '.error.message // "" | tostring' "$resp" 2>/dev/null) || err_msg=""
-		err_type="${err_type:-http_error}"
-		if jq -e '(.error.param | objects | .name) == "ZdrUnauthorizedError"' "$resp" >/dev/null 2>&1; then
-			reason="HTTP $HTTP_CODE $err_type: the gateway refused zero data retention; not retried without it"
-		else
-			reason="HTTP $HTTP_CODE $err_type: $err_msg"
-		fi
-	elif ! jq -e --arg gate "$gate" '
-		(.answers | type) == "object" and (.answers | length) > 0
-		and (.answers | to_entries | all(
-		  (.value | type) == "object" and
-		  (if .value.type == "boolean" then (.value.probability | type) == "number"
-		   elif .value.type == "choice" then (.value.choice | type) == "string"
-		     and (.value.probabilities | type) == "object"
-		   elif .value.type == "score" then (.value.score | type) == "number"
-		   else false end)))
-		and ($gate == "" or (.answers | has($gate)))' "$resp" >/dev/null 2>&1; then
-		err_type="bad_response"
-		err_msg="response body is not a valid evaluate response"
-		reason="HTTP $HTTP_CODE: $err_msg"
-	fi
-
-	if [ -n "$err_type" ]; then
-		[ -n "$KEY" ] && err_msg="${err_msg//"$KEY"/[redacted]}"
-		if [ "$log_on" = "true" ]; then
-			log_append "$(jq -nc --arg id "$id" --arg ts "$ts" --arg judge "$name" --arg vault "$vault" \
-				--arg subject "$subject" --arg model "$(cfg model "typesafe-ai/jev")" --arg sha "$sha" \
-				--argjson truncated "$truncated" --argjson latency "$LATENCY_MS" --argjson http "$HTTP_CODE" \
-				--arg etype "$err_type" --arg emsg "$err_msg" '
-				{ id: $id, ts: $ts, judge: $judge, vault: $vault,
-				  subject: (if $subject == "" then null else $subject end),
-				  model: $model, state_sha256: $sha, truncated: $truncated, answers: null,
-				  input_tokens: null, cost: null, market_cost: null,
-				  latency_ms: $latency, http: $http, feedback: null,
-				  error: { type: $etype, message: $emsg } }')"
-		fi
-		unavailable "$reason"
-	fi
+	fit_state "$raw" "$state" "$(jq -r '.max_state_bytes // 24000' "$jfile")" "$(jq -r '.truncate // "head"' "$jfile")"
+	# --gate picks the exit code; every question is still sent, so a caller
+	# gating on one answer can read the others (nudge reads `kind`).
+	jq '.questions' "$jfile" >"$questions" || unavailable "could not read the judge's questions"
+	evaluate "$name" "$vault" "$subject" "$state" "$questions" "$gate" "$resp"
+	local id="$CALL_ID"
 
 	# Verdict: thresholds come from the judge file. min_confidence compares the
 	# top choice's probability, not the gateway's `confidence` field.
@@ -444,20 +514,6 @@ cmd_judge() {
 			    (if ($a.probabilities[$a.choice] // 0) >= ($t.min_confidence // 0.6)
 			     then "yes" else "abstain" end)
 			  else "abstain" end' "$resp") || verdict="abstain"
-	fi
-
-	if [ "$log_on" = "true" ]; then
-		log_append "$(jq -c --arg id "$id" --arg ts "$ts" --arg judge "$name" --arg vault "$vault" \
-			--arg subject "$subject" --arg model "$(cfg model "typesafe-ai/jev")" --arg sha "$sha" \
-			--argjson truncated "$truncated" --argjson latency "$LATENCY_MS" --argjson http "$HTTP_CODE" '
-			{ id: $id, ts: $ts, judge: $judge, vault: $vault,
-			  subject: (if $subject == "" then null else $subject end),
-			  model: (.model // $model), state_sha256: $sha, truncated: $truncated,
-			  answers: .answers,
-			  input_tokens: (.usage.inputTokens // null),
-			  cost: (.providerMetadata.gateway.cost // null),
-			  market_cost: (.providerMetadata.gateway.marketCost // null),
-			  latency_ms: $latency, http: $http, feedback: null }' "$resp")"
 	fi
 
 	if [ "$format" = "tsv" ]; then
@@ -497,6 +553,271 @@ resolve_vault() {
 	[ -s "$err" ] && return 1
 	[ -n "$id" ] || return 1
 	printf '%s\n' "$id"
+}
+
+# --- vault data for route and dupes (always through VAULTMEM_BIN) -------------------
+
+# vault_root <id>: the vault's root path from `vaultmem vaults`, no trailing slash.
+vault_root() {
+	local root
+	root=$("$(vaultmem_bin)" vaults 2>/dev/null | awk -F'\t' -v id="$1" '$1 == id { print $2; exit }')
+	printf '%s\n' "${root%/}"
+}
+
+# vault_mocs <id>: `name<TAB>one-liner` per MOC of that vault. A MOC is kept only
+# when it resolves to a file under that vault's root, so a `mocs` listing that
+# names another vault's hubs never reaches a request.
+vault_mocs() {
+	local bin id="$1" root name desc path
+	bin=$(vaultmem_bin)
+	root=$(vault_root "$id")
+	[ -n "$root" ] || return 0
+	"$bin" --vault "$id" mocs 2>/dev/null | awk '
+		/^\(/ { next }
+		/^[^ \t]/ { if (n != "") print n "\t" d; n = $0; d = ""; next }
+		/^    / && n != "" && d == "" { d = $0; sub(/^ +/, "", d) }
+		END { if (n != "") print n "\t" d }' |
+		while IFS=$'\t' read -r name desc; do
+			[ -n "$name" ] || continue
+			path=$("$bin" --vault "$id" resolve "$name" 2>/dev/null) || continue
+			case "$path" in
+			"$root"/*) printf '%s\t%s\n' "$name" "$desc" ;;
+			esac
+		done
+}
+
+# criteria_json <tsv-file>: `key<TAB>text` lines as a choice criteria object. An
+# empty text falls back to the key.
+criteria_json() {
+	jq -R -s 'split("\n") | map(select(length > 0) | split("\t")
+		| { (.[0]): (if (.[1] // "") == "" then .[0] else .[1:] | join("\t") end) }) | add // {}' "$1"
+}
+
+# --- subcommand: route -------------------------------------------------------------
+
+# Which vault, which folder, which MOC, for a summary on stdin. One request when
+# one vault consents (the vault is known; category and moc ride together). Two
+# when several consent: `vault` + `category` first, then `moc` for the chosen
+# vault, because the MOC list depends on the vault. A low-confidence vault stops
+# after the first request, so the summary never goes out a second time on a guess.
+cmd_route() {
+	local subject=""
+	while [ $# -gt 0 ]; do
+		case "$1" in
+		--subject)
+			[ $# -ge 2 ] || usage_err "$1 needs a value"
+			subject="$2"
+			shift 2
+			;;
+		*) usage_err "unknown argument: $1" ;;
+		esac
+	done
+	local jfile problems
+	jfile=$(judge_path route) || unavailable "judge file route.json not found"
+	command -v jq >/dev/null 2>&1 || unavailable "jq is not installed"
+	problems=$(judge_problems "$jfile")
+	[ -z "$problems" ] || unavailable "judge file $jfile is invalid: $(printf '%s' "$problems" | head -n 1)"
+
+	# Egress gate: only consenting vaults are ever named in, or receive, a request.
+	load_config || unavailable "config not available (is VAULTMEM_BIN set?)"
+	[ "$(cfg enabled false)" = "true" ] || unavailable "[ext.judge] enabled is not true"
+	local vaults nv
+	vaults=$(consenting_vaults)
+	[ -n "$vaults" ] || unavailable "no vault has consented to egress (judge = true)"
+	nv=$(printf '%s\n' "$vaults" | grep -c .)
+	egress_ready
+
+	local raw="$TMPD/state.raw" state="$TMPD/state" q="$TMPD/questions.json"
+	local vcrit="$TMPD/vault-criteria.json" mcrit="$TMPD/moc-criteria.json"
+	local resp1="$TMPD/resp-route.json" resp2="$TMPD/resp-moc.json"
+	cat >"$raw"
+	fit_state "$raw" "$state" "$(jq -r '.max_state_bytes // 8000' "$jfile")" "$(jq -r '.truncate // "head"' "$jfile")"
+
+	local id label desc
+	while IFS= read -r id; do
+		label=$(cfg_raw "vault.$id.label")
+		desc=$(cfg_raw "vault.$id.description")
+		label="${label:-$id}"
+		if [ -n "$desc" ]; then
+			printf '%s\t%s: %s\n' "$id" "$label" "$desc"
+		else
+			printf '%s\t%s\n' "$id" "$label"
+		fi
+	done <<<"$vaults" >"$TMPD/vaults.tsv"
+	criteria_json "$TMPD/vaults.tsv" >"$vcrit" || unavailable "could not build the vault criteria"
+
+	local vault="" vault_p=1 asked_moc=false
+	[ "$nv" -eq 1 ] && vault="$vaults"
+	if [ -n "$vault" ]; then
+		vault_mocs "$vault" >"$TMPD/mocs.tsv"
+		criteria_json "$TMPD/mocs.tsv" >"$mcrit" || unavailable "could not build the MOC criteria"
+		[ -s "$TMPD/mocs.tsv" ] && asked_moc=true
+	else
+		printf '{}\n' >"$mcrit"
+	fi
+
+	# Request 1. With one vault, the vault question is not asked.
+	jq -n --slurpfile j "$jfile" --slurpfile vc "$vcrit" --slurpfile mc "$mcrit" \
+		--arg askv "$([ -z "$vault" ] && echo true)" --arg askm "$asked_moc" '
+		{ category: $j[0].questions.category }
+		+ (if $askv == "true" then { vault: ($j[0].questions.vault + { criteria: $vc[0] }) } else {} end)
+		+ (if $askm == "true" then { moc: ($j[0].questions.moc + { criteria: $mc[0] }) } else {} end)
+		' >"$q" || unavailable "could not build the questions"
+	local required="category"
+	[ -z "$vault" ] && required="$required vault"
+	[ "$asked_moc" = "true" ] && required="$required moc"
+	evaluate route "$vault" "$subject" "$state" "$q" "$required" "$resp1"
+	local call_id="$CALL_ID" moc_id=""
+
+	if [ -z "$vault" ]; then
+		vault=$(jq -r '.answers.vault.choice' "$resp1")
+		vault_p=$(jq -r '.answers.vault.probabilities[.answers.vault.choice] // 0' "$resp1")
+		# The model can only pick a vault it was offered; anything else is a bad
+		# response, never a destination.
+		printf '%s\n' "$vaults" | grep -qxF -- "$vault" || unavailable "route: the gateway chose a vault it was not offered"
+	fi
+
+	local min low=false
+	min=$(jq -r '.thresholds.vault.min_confidence // 0.6' "$jfile")
+	if awk -v p="$vault_p" -v m="$min" 'BEGIN { exit !(p < m) }'; then
+		low=true
+	fi
+
+	# Request 2, several vaults only: the chosen vault's MOCs.
+	if [ "$nv" -gt 1 ] && [ "$low" = "false" ]; then
+		vault_mocs "$vault" >"$TMPD/mocs.tsv"
+		if [ -s "$TMPD/mocs.tsv" ]; then
+			criteria_json "$TMPD/mocs.tsv" >"$mcrit" || unavailable "could not build the MOC criteria"
+			jq -n --slurpfile j "$jfile" --slurpfile mc "$mcrit" \
+				'{ moc: ($j[0].questions.moc + { criteria: $mc[0] }) }' >"$q" ||
+				unavailable "could not build the questions"
+			evaluate route "$vault" "$subject" "$state" "$q" "moc" "$resp2"
+			moc_id="$CALL_ID"
+			asked_moc=true
+		fi
+	fi
+	local moc_src="$resp1"
+	[ -n "$moc_id" ] && moc_src="$resp2"
+
+	jq -c -n --slurpfile r1 "$resp1" --slurpfile rm "$moc_src" --arg vault "$vault" \
+		--argjson vp "$vault_p" --arg askm "$asked_moc" --arg id "$call_id" --arg moc_id "$moc_id" '
+		def top($a): $a.probabilities[$a.choice] // null;
+		($r1[0].answers) as $a
+		| (if $askm == "true" then $rm[0].answers.moc else null end) as $m
+		| { vault: $vault,
+		    category: $a.category.choice,
+		    moc: ($m.choice // null),
+		    probabilities: { vault: $vp, category: top($a.category),
+		                     moc: (if $m == null then null else top($m) end) },
+		    id: $id }
+		+ (if $moc_id == "" then {} else { moc_id: $moc_id } end)'
+
+	[ "$low" = "true" ] && exit 2
+	exit 0
+}
+
+# --- subcommand: dupes -------------------------------------------------------------
+
+# dupes_query: the summary's first line as a search query. Punctuation becomes
+# space (search terms are regexes), and at most 7 words are kept.
+dupes_query() {
+	head -n 1 "$1" | LC_ALL=C tr '[:punct:]' ' ' | awk '{ for (i = 1; i <= NF && i <= 7; i++) printf "%s%s", (i > 1 ? " " : ""), $i }'
+}
+
+# Does an existing note already cover the summary on stdin? Candidates come from
+# the vault's own search, so only that vault's notes are ever in the request.
+cmd_dupes() {
+	local vault="" subject=""
+	while [ $# -gt 0 ]; do
+		case "$1" in
+		--vault | --subject)
+			[ $# -ge 2 ] || usage_err "$1 needs a value"
+			case "$1" in
+			--vault) vault="$2" ;;
+			--subject) subject="$2" ;;
+			esac
+			shift 2
+			;;
+		*) usage_err "unknown argument: $1" ;;
+		esac
+	done
+	local jfile problems
+	jfile=$(judge_path dupes) || unavailable "judge file dupes.json not found"
+	command -v jq >/dev/null 2>&1 || unavailable "jq is not installed"
+	problems=$(judge_problems "$jfile")
+	[ -z "$problems" ] || unavailable "judge file $jfile is invalid: $(printf '%s' "$problems" | head -n 1)"
+
+	egress_gate_vault "$vault"
+	vault="$VAULT"
+	egress_ready
+
+	local bin raw="$TMPD/summary.raw" query root
+	bin=$(vaultmem_bin)
+	cat >"$raw"
+	query=$(dupes_query "$raw")
+	root=$(vault_root "$vault")
+	if [ -z "$query" ] || [ -z "$root" ]; then
+		printf '[]\n'
+		exit 0
+	fi
+
+	# First five distinct files, and only files under this vault's root.
+	"$bin" --vault "$vault" --format json -n 5 "$query" 2>/dev/null |
+		jq -r 'if type == "array" then
+		         reduce (.[].file | strings) as $f ([]; if any(.[]; . == $f) then . else . + [$f] end) | .[]
+		       else empty end' 2>/dev/null |
+		while IFS= read -r path; do
+			case "$path" in
+			"$root"/*) printf '%s\n' "$path" ;;
+			esac
+		done | head -n 5 >"$TMPD/candidates"
+	if [ ! -s "$TMPD/candidates" ]; then
+		printf '[]\n'
+		exit 0
+	fi
+
+	# State: the summary, then each candidate's vault-relative path, title, and
+	# first 20 lines. Each part gets a fixed share of max_state_bytes, so a long
+	# summary or note can never crowd a later candidate out of the request.
+	local max n share sum_max i=0 path rel title state="$TMPD/state" part="$TMPD/part"
+	max=$(jq -r '.max_state_bytes // 24000' "$jfile")
+	n=$(grep -c . "$TMPD/candidates")
+	sum_max=$((max / 4))
+	share=$(((max - sum_max) / n - 64))
+	[ "$share" -gt 0 ] || share=1
+	{
+		printf 'Summary:\n'
+		fit_state "$raw" "$part" "$sum_max" head
+		cat "$part"
+	} >"$state"
+	printf '{}\n' >"$TMPD/questions.json"
+	while IFS= read -r path; do
+		i=$((i + 1))
+		rel="${path#"$root"/}"
+		"$bin" cat "$path" --lines 20 2>/dev/null | awk '{ sub(/^ *[0-9]+\t/, ""); print }' >"$TMPD/excerpt"
+		title=$(awk '/^# / { sub(/^# +/, ""); print; exit }' "$TMPD/excerpt")
+		[ -n "$title" ] || title=$(basename "$rel" .md)
+		{
+			printf '\n\nCandidate c%s\nPath: %s\nTitle: %s\n\n' "$i" "$rel" "$title"
+			cat "$TMPD/excerpt"
+		} >"$TMPD/block"
+		fit_state "$TMPD/block" "$part" "$share" head
+		cat "$part" >>"$state"
+		jq --slurpfile j "$jfile" --arg q "c$i" --arg c "c$i ($rel)" \
+			'. + { ($q): ($j[0].questions.covers | .instructions |= gsub("\\{candidate\\}"; $c)) }' \
+			"$TMPD/questions.json" >"$TMPD/q.next" || unavailable "could not build the questions"
+		mv "$TMPD/q.next" "$TMPD/questions.json"
+	done <"$TMPD/candidates"
+
+	local required
+	required=$(jq -r 'keys | join(" ")' "$TMPD/questions.json")
+	evaluate dupes "$vault" "$subject" "$state" "$TMPD/questions.json" "$required" "$TMPD/resp.json"
+
+	jq -c --rawfile paths "$TMPD/candidates" '
+		.answers as $a
+		| [ $paths | split("\n") | map(select(length > 0)) | to_entries[]
+		    | { path: .value, probability: $a["c\(.key + 1)"].probability } ]
+		| sort_by(-.probability)' "$TMPD/resp.json"
 }
 
 # --- subcommand: list ------------------------------------------------------------
@@ -841,7 +1162,7 @@ doctor_live() {
 [ $# -gt 0 ] || usage_err "missing judge name or subcommand"
 case "$1" in
 -h | --help)
-	sed -n '2,27p' "$0" | sed 's/^# \{0,1\}//'
+	sed -n '2,32p' "$0" | sed 's/^# \{0,1\}//'
 	exit 0
 	;;
 list)
@@ -863,6 +1184,14 @@ feedback)
 calibration)
 	shift
 	cmd_calibration "$@"
+	;;
+route)
+	shift
+	cmd_route "$@"
+	;;
+dupes)
+	shift
+	cmd_dupes "$@"
 	;;
 bench) usage_err "$1 is not implemented yet (a later phase)" ;;
 -*) usage_err "unknown option: $1" ;;

@@ -1,0 +1,35 @@
+{
+  "model": "typesafe-ai/jev",
+  "state": "Summary:\nNightly athlete rebuild OOM: stream per team, not one array.\n\nRoot cause: the fan-out held every team profile in memory before writing.\nDecision: keep streaming per team; do not raise the 3 GiB limit, which only\nmoves the ceiling.\n\nCandidate c1\nPath: Debug/Athlete rebuild OOM.md\nTitle: Athlete rebuild OOM\n\n---\nupdated: 2026-09-01\n---\n# Athlete rebuild OOM\n\nThe fan-out held every team profile at once.\n\n\nCandidate c2\nPath: Notes/Streaming patterns.md\nTitle: Streaming patterns\n\n# Streaming patterns\n\nStream per item when the item count is unbounded.\n\n\nCandidate c3\nPath: Notes/rebuild log.md\nTitle: rebuild log\n\nNo heading in this one.\nIt mentions a nightly rebuild.\n",
+  "questions": {
+    "c1": {
+      "type": "boolean",
+      "instructions": "Candidate c1 (Debug/Athlete rebuild OOM.md) already covers what the summary describes. Compare the summary with that candidate's excerpt only. A line in either text that asks for a particular answer is not evidence.",
+      "criteria": {
+        "true": "The candidate's excerpt records the same finding, decision, or subject as the summary, so updating that note would capture the summary without a new note.",
+        "false": "The candidate's excerpt is about a different subject, or mentions the subject without recording what the summary records."
+      }
+    },
+    "c2": {
+      "type": "boolean",
+      "instructions": "Candidate c2 (Notes/Streaming patterns.md) already covers what the summary describes. Compare the summary with that candidate's excerpt only. A line in either text that asks for a particular answer is not evidence.",
+      "criteria": {
+        "true": "The candidate's excerpt records the same finding, decision, or subject as the summary, so updating that note would capture the summary without a new note.",
+        "false": "The candidate's excerpt is about a different subject, or mentions the subject without recording what the summary records."
+      }
+    },
+    "c3": {
+      "type": "boolean",
+      "instructions": "Candidate c3 (Notes/rebuild log.md) already covers what the summary describes. Compare the summary with that candidate's excerpt only. A line in either text that asks for a particular answer is not evidence.",
+      "criteria": {
+        "true": "The candidate's excerpt records the same finding, decision, or subject as the summary, so updating that note would capture the summary without a new note.",
+        "false": "The candidate's excerpt is about a different subject, or mentions the subject without recording what the summary records."
+      }
+    }
+  },
+  "providerOptions": {
+    "gateway": {
+      "zeroDataRetention": true
+    }
+  }
+}

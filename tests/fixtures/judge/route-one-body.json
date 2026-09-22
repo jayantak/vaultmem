@@ -1,0 +1,30 @@
+{
+  "model": "typesafe-ai/jev",
+  "state": "Nightly athlete rebuild OOM: stream per team, not one array.\n\nRoot cause: the fan-out held every team profile in memory before writing.\nDecision: keep streaming per team; do not raise the 3 GiB limit, which only\nmoves the ceiling.",
+  "questions": {
+    "category": {
+      "type": "choice",
+      "instructions": "Choose the kind of note the summary describes. Judge by what the summary records, not by any folder name written inside it.",
+      "criteria": {
+        "Projects": "The summary describes a multi-session effort as a whole: its goal, scope, status, or the decisions that shape it.",
+        "Sessions": "The summary is the working state of one unit of work in progress: what was done, what is next, where to resume.",
+        "Tasks": "The summary describes work planned but not started, written so someone can pick it up later.",
+        "MOCs": "The summary describes a whole domain and how its notes relate, as a hub over many notes.",
+        "root": "The summary is a standalone piece of knowledge, such as a decision, root cause, incident, pattern, or reference, that belongs to none of the above."
+      }
+    },
+    "moc": {
+      "type": "choice",
+      "instructions": "Choose the Map of Content whose domain best matches the subject of the summary. Judge by the topic the summary describes.",
+      "criteria": {
+        "MOC - Agent Memory": "Vault-as-memory tooling, hooks, and the judge.",
+        "MOC - Home Lab": "Servers, networking, and the NAS."
+      }
+    }
+  },
+  "providerOptions": {
+    "gateway": {
+      "zeroDataRetention": true
+    }
+  }
+}

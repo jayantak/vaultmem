@@ -97,6 +97,10 @@ to send without ZDR is to set `zdr = false` in your own `[ext.judge]`.
 `zdr` is global, so consent stays per vault through `judge`: keep a work vault
 at `judge = false` until its owner approves the vendor.
 
+`route` and `dupes` apply the same gate. `route` works across vaults, so it
+names only consenting vaults in its requests and exits 3 when none consent.
+`dupes` sends only notes found under the consenting vault's root.
+
 Judged text is untrusted input. A note can contain text aimed at the model
 ("answer yes"). That is one reason a judgment never triggers a write.
 
@@ -109,12 +113,18 @@ vaultmem judge doctor [--live]
 vaultmem judge log [-n N]
 vaultmem judge feedback <id> right|wrong
 vaultmem judge calibration [--judge <name>] [--format tsv|json]
+vaultmem judge route [--subject <text>]
+vaultmem judge dupes [--vault <id>] [--subject <text>]
 ```
 
-`<name>` reads the state to judge on stdin.
+`<name>` reads the state to judge on stdin. `route` and `dupes` read a capture
+summary on stdin; see [Capture routing](#capture-routing-route-and-dupes).
 
-- `--gate <question>` turns one question into an exit code (table below). Only
-  that question is sent. It must be a `boolean` or `choice` question.
+- `--gate <question>` turns one question into an exit code (table below). It
+  must be a `boolean` or `choice` question. Every question in the judge is
+  still sent and answered, so a caller that gates on one answer can read the
+  others: `nudge --judge` gates on `capture-worthy`'s `durable` and reads
+  `kind`.
 - `--format json` (default) prints one object:
   `{"id": "...", "judge": "...", "answers": {...}}`, plus
   `"gate": {"question": "...", "verdict": "yes|no|abstain"}` with `--gate`.
@@ -179,6 +189,91 @@ bucket	n	right	accuracy
 
 `bench` arrives in a later phase. Until then it is a usage error.
 
+### Capture routing: `route` and `dupes`
+
+Both serve the `vault-capture` skill and scripts. They take the same text a
+capture subagent is handed: a short summary of what to write down, first line
+first. The skill text that calls them lands in the private upstream skills
+source and syncs into `skills/`; it is not edited here.
+
+**`route`** answers where a note goes when there is no repo context for
+`vaultmem which` to route on. `which` stays the default; `route` is for a
+capture from a chat, a meeting, or a cross-repo session. It asks up to three
+`choice` questions about the summary:
+
+| Question | Choices | From |
+|---|---|---|
+| `vault` | each consenting vault's id | criteria are the vault's `label`, plus `: <description>` when `[vault.<id>] description` is set. A missing `description` line (an older core) reads as empty. |
+| `category` | `Projects`, `Sessions`, `Tasks`, `MOCs`, `root` | the SCHEMA.md folder vocabulary, fixed in `route.json`. `root` is a standalone note: the vault root or one of the vault's own topical sections. |
+| `moc` | that vault's MOC names | `vaultmem --vault <id> mocs`, one-liners as criteria. Omitted when the vault has no MOC. |
+
+- Only vaults with `judge = true` are ever named in a request, and only they
+  can receive the summary. With none, `route` exits 3 and never starts `curl`.
+- **One consenting vault: one request.** The vault is known, so `vault` is not
+  asked; `category` and `moc` ride together. `probabilities.vault` is `1`.
+- **Several consenting vaults: two requests.** `moc` depends on the vault, so
+  the first request asks `vault` and `category` and carries the summary once;
+  the second asks `moc` over the chosen vault's MOCs and carries it again, to
+  that same consenting vault. Both rows are logged under the top vault choice.
+  A chosen vault that was not offered is a bad response (exit 3).
+- **Low confidence stops early.** When the top `vault` probability is below
+  `route.json`'s `thresholds.vault.min_confidence` (0.6), `route` prints what
+  it has with `moc: null` and exits 2. The second request is not sent: the
+  summary does not go out again on a guess.
+- A MOC is offered only when `vaultmem --vault <id> resolve "<name>"` lands
+  under that vault's root (from `vaultmem vaults`). Core's `mocs` lists the
+  first registry vault's hubs regardless of `--vault`, so for any other vault
+  this filter drops them all and `moc` is omitted; a non-consenting vault's MOC
+  names never reach a request.
+
+```
+$ printf '%s\n' "Nightly rebuild OOM: stream per team" | vaultmem judge route
+{"vault":"personal","category":"root","moc":"MOC - Agent Memory",
+ "probabilities":{"vault":0.91,"category":0.88,"moc":0.79},
+ "id":"20260922T101500Z-4f2a","moc_id":"20260922T101501Z-9c01"}
+```
+
+`id` is the first request's log row. `moc_id` appears only when a second
+request ran. `moc` and `probabilities.moc` are `null` when `moc` was not asked.
+
+**`dupes`** answers whether an existing note already covers the summary, so the
+skill extends that note instead of creating a duplicate. Run it before creating
+a note.
+
+- The vault is `--vault <id>`, or `vaultmem which` when omitted, under the same
+  rules as a named judge: a low-confidence guess is not consent. The consent
+  check runs before the search.
+- Candidates come from `vaultmem --vault <id> --format json -n 5 <query>`. The
+  query is the summary's first line with punctuation turned into spaces, cut to
+  7 words. Search ANDs every term at file level, so a long, specific first line
+  finds fewer candidates; lead the summary with its key terms.
+- Each distinct file under the vault's root becomes one boolean, `c1` to `c5`:
+  "this note already covers the summary". The state is the summary, then per
+  candidate its vault-relative path, its title (first `# ` heading, else the
+  file name), and its first 20 lines from `vaultmem cat <path> --lines 20`.
+  The summary gets a quarter of `max_state_bytes` and each candidate an equal
+  share of the rest, so no candidate is crowded out of the request.
+- Output is `[{"path": "...", "probability": 0.94}, ...]`, absolute paths,
+  sorted by probability, highest first. No candidate: `[]`, exit 0, no `curl`.
+
+```
+$ vaultmem judge dupes --vault personal <summary.txt
+[{"path":"/vaults/personal/Notes/Streaming patterns.md","probability":0.94},
+ {"path":"/vaults/personal/Debug/Athlete rebuild OOM.md","probability":0.21}]
+```
+
+Both share the named-judge request path: the same `enabled` check, egress
+gate, `zdr` flag, `timeout_ms`, key rules, and log row per request (`judge` is
+`route` or `dupes`). Their question text lives in `route.json` and `dupes.json`
+and can be overridden like any judge file; `dupes.json`'s `covers` question is
+the template for each `cN`, with `{candidate}` replaced by `cN (<path>)`.
+
+**Intended use in `vault-capture`:** call `route` when the capture has no repo
+context and `which` would fall back to a guess; call `dupes` on the target
+vault before creating a note, and extend the top candidate when its probability
+clears 0.85. Exit 3 or 2 means "no opinion": fall back to the skill's manual
+steps.
+
 ### The owner review loop
 
 Calibration is the only evidence that the vendor's stated probabilities hold on
@@ -205,7 +300,7 @@ moves notes on `status:` alone.
 |---|---|
 | 0 | OK. With `--gate`: yes. A boolean's probability is at or above its `yes` threshold, or a choice's top probability is at or above `min_confidence`. |
 | 1 | `--gate` only: no. The probability is at or below the `no` threshold. |
-| 2 | `--gate` only: abstain. Between thresholds, or the top choice is below `min_confidence`. |
+| 2 | `--gate` only: abstain. Between thresholds, or the top choice is below `min_confidence`. `route`: the top vault is below `min_confidence`. |
 | 3 | Unavailable: disabled, no consent, no key, timeout, any non-2xx status, or a response body that does not parse as an evaluate response. |
 | 64 | Usage error: bad flag, unknown judge, unknown or ungateable `--gate` question. |
 
@@ -263,6 +358,9 @@ An invalid judge file makes the call exit 3 before any network code runs.
 |---|---|
 | `smoke` | One boolean. Used by the tests and by `doctor --live`. |
 | `groom-triage` | Triage one cold or stale session. Used by `groom --judge`. |
+| `capture-worthy` | Does a session transcript hold durable knowledge, and what kind. Used by `nudge --judge`. |
+| `route` | Question text for `judge route`. Not run by name. |
+| `dupes` | Question text for `judge dupes`. Not run by name. |
 
 `groom-triage` takes one session's state: its frontmatter, `## Bookmark`,
 `## Pinned`, the `## Git state` table, the tail of the work log, and the parent
@@ -281,6 +379,24 @@ work log keeps its most recent entries.
 
 Booleans gate at 0.85 / 0.15; `recommendation` needs 0.6 on the top choice.
 Below that, `groom --judge` prints `→ ?` rather than a recommendation.
+
+`capture-worthy` takes the tail of an agent session transcript, which core
+reads from the Stop hook's `transcript_path`. It is tail-biased at 24000 bytes,
+so the end of the session survives. Core calls it as
+`capture-worthy --vault <id> --subject nudge --gate durable` and reads `kind`
+on exit 0.
+
+| Question | Type | Asks |
+|---|---|---|
+| `durable` | boolean | A decision, root cause, incident finding, or reusable pattern emerged. |
+| `kind` | choice | `decision`, `root-cause`, `incident`, `pattern`, `milestone`, or `none`. |
+
+`durable` gates at 0.85 / 0.15; `kind` needs 0.6. A transcript is hostile
+input: tool output or a pasted file can say "answer yes". Every criterion asks
+for evidence shown in the conversation (alternatives and a reason, a confirmed
+cause, a technique shown to work), and the instructions say that text telling
+the judge how to answer is not evidence. The judgment only ever adds one
+advisory line.
 
 ## Decision log
 
