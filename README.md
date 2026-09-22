@@ -339,6 +339,8 @@ vaultmem judge config        # what core parsed: [ext.judge] keys + per-vault co
 Setup, the egress rules, judge files, and exit codes:
 **[docs/judge.md](docs/judge.md)**. Config keys: [docs/config.md](docs/config.md).
 
+`vaultmem --rerank <query>` reorders content hits by a judge score; whether it earns `rerank = true` as your default is what [`judge bench`](docs/judge.md#bench) measures on your own notes.
+
 ## Agent skills
 
 vaultmem bundles four agent skills in `skills/`, split by the **job the agent is

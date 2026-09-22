@@ -75,7 +75,9 @@ router (`vaults`/`path`/`which`), the lifecycle tier
 annotates its cold-parked/stale-active rows with a `groom-triage` judgment and
 is advisory only: judging runs after the scan, so it never reaches a move.
 `nudge --judge` adds a second Stop-hook line when `capture-worthy` finds a
-durable decision/root cause in the transcript tail.
+durable decision/root cause in the transcript tail. `search --rerank` reorders
+content hits (never curated rows) by the extension's `rerank` score; any
+failure prints plain ripgrep order.
 
 **Adding usage lines? Bump the `sed` range.** The usage block is printed by a
 hardcoded `sed -n '4,Np' "$0"` in *two* places (the `-h` branch and the no-args
