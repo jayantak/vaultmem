@@ -1389,9 +1389,19 @@ _judge_answer() { # $1 = dotted key path; JSON on stdin
       s = substr(s, pos)
       for(i=1;i<=n;i++){
         k = "\"" want[i] "\""
-        p = index(s, k)
-        if(p==0) exit 1
-        s = substr(s, p + length(k))
+        # Match the token only where it is a KEY, i.e. followed by a colon. The
+        # same text also occurs as a VALUE ("type":"choice"), and accepting
+        # that would read the value of whatever key comes next.
+        off = 0
+        while(1){
+          p = index(substr(s, off+1), k)
+          if(p==0) exit 1
+          p = off + p
+          rest = substr(s, p + length(k))
+          if(rest ~ /^[[:space:]]*:/) break
+          off = p + length(k) - 1
+        }
+        s = rest
         sub(/^[[:space:]]*:[[:space:]]*/, "", s)
       }
       # s now starts at the value. Strings are quoted, numbers are bare.
@@ -1503,9 +1513,18 @@ _groom_judge_json_add() { # vid name status age lines id json
 # The decision-log id from the extension's JSON on stdin (top-level "id").
 _judge_log_id() {
 	awk '{ s = s $0 } END{
-    p = index(s, "\"id\"")
-    if(p==0) exit 1
-    s = substr(s, p + 4); sub(/^[[:space:]]*:[[:space:]]*/, "", s)
+    # As in _judge_answer: accept "id" only where it is a key, never where the
+    # same text appears as a value.
+    off = 0
+    while(1){
+      p = index(substr(s, off+1), "\"id\"")
+      if(p==0) exit 1
+      p = off + p
+      rest = substr(s, p + 4)
+      if(rest ~ /^[[:space:]]*:/) break
+      off = p + 3
+    }
+    s = rest; sub(/^[[:space:]]*:[[:space:]]*/, "", s)
     if(substr(s,1,1)!="\"") exit 1
     s = substr(s,2); q = index(s, "\""); if(q==0) exit 1
     print substr(s,1,q-1)

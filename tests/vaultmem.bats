@@ -3497,6 +3497,24 @@ EOF
   [ ! -e "$BATS_TEST_TMPDIR/stub.ran" ]
 }
 
+@test "groom --judge parses the gateway answer shape, with its type fields" {
+  judge_isolate
+  groom_judge_fixture
+  groom_judge_config true
+  export VAULTMEM_EXT_DIR="$BATS_TEST_TMPDIR/extdir"
+  # The extension emits {id, judge, answers} where answers is the gateway object
+  # verbatim, so every answer carries a "type" and a choice answer also carries
+  # "confidence". A scanner that matches `"choice"` anywhere rather than only
+  # where it is a key reads `"type":"choice"` instead and loses the choice.
+  groom_judge_stub "$VAULTMEM_EXT_DIR" \
+    '{"id":"gw-1","judge":"groom-triage","answers":{"work_complete":{"type":"boolean","probability":0.04},"has_next_step":{"type":"boolean","probability":0.93},"blocked_external":{"type":"boolean","probability":0.88},"undistilled":{"type":"boolean","probability":0.91},"recommendation":{"type":"choice","choice":"park","probabilities":{"archive":0.02,"park":0.81,"keep-active":0.13,"needs-human":0.04},"confidence":0.81}}}'
+  run "$JOM" -v jay groom --judge
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"→ park 0.81 · has_next_step, blocked_external, undistilled [gw-1]"* ]]
+  # 0.04 is below the flag threshold, so the flag list must not carry it.
+  [[ "$output" != *"work_complete"* ]]
+}
+
 @test "usage documents groom --judge" {
   run "$OM"
   [ "$status" -eq 0 ]
