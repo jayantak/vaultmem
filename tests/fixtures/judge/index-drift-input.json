@@ -1,0 +1,5 @@
+{"rows": [
+  {"id": "r1", "row": "- [[Athlete rebuild OOM]] — root cause of the nightly rebuild running out of memory", "title": "Athlete rebuild OOM", "frontmatter": "type: debug\nupdated: 2026-09-01", "head": "# Athlete rebuild OOM\nThe nightly rebuild held every team profile in memory at once.\nFix: stream per team."},
+  {"id": "r2", "row": "- [[Egress policy]] — which vaults may send content to the judge", "title": "Egress policy", "frontmatter": "type: architecture", "head": "# Egress policy\nGrocery list: eggs, milk, bread."},
+  {"id": "r3", "row": "- [[Hook timeout]] — why hooks time out", "title": "Hook timeout", "frontmatter": null, "head": null}
+]}

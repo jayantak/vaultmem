@@ -20,6 +20,10 @@
 #                                       score search candidates (JSON on stdin) 0 to 3
 #   vaultmem-judge bench [--fixture <tsv>] [--vault <id>] [-n N] [--format tsv|json]
 #                                       search order vs reranked order on a fixture
+#   vaultmem-judge index-drift --vault <id>   is each Agent Index row (JSON on
+#                                       stdin, at most 5) accurate for its note
+#   vaultmem-judge prompt               UserPromptSubmit hook: one line on a
+#                                       confident "why" question, else nothing
 #
 # Exit codes (the contract core and hooks rely on):
 #   0   ok; with --gate, the answer is yes
@@ -27,7 +31,8 @@
 #   2   --gate only: abstain (between thresholds, or below min_confidence);
 #       route: the top vault is below min_confidence
 #   3   unavailable: disabled, no consent, no key, timeout, HTTP error, bad response
-#   64  usage error; rerank: malformed stdin
+#   64  usage error; rerank, index-drift: malformed stdin
+#   prompt exits 0 in every case but a usage error.
 #
 # Config is never parsed here. It comes from `"$VAULTMEM_BIN" judge config`,
 # which prints `ext.judge.<key>=<value>` lines, then `vault.<id>.judge=true|false`.
@@ -55,6 +60,7 @@ usage_err() {
 	printf '       %s feedback <id> right|wrong | calibration [--judge <name>]\n' "$PROG" >&2
 	printf '       %s route [--subject <text>] | dupes [--vault <id>] [--subject <text>]\n' "$PROG" >&2
 	printf '       %s rerank --vault <id> [--vault <id>...] | bench [--fixture <tsv>] [--vault <id>] [-n N]\n' "$PROG" >&2
+	printf '       %s index-drift --vault <id> | prompt\n' "$PROG" >&2
 	exit 64
 }
 
@@ -1112,6 +1118,142 @@ cmd_bench() {
 			  $11 = sprintf("%.8f", $11); $12 = sprintf("%.8f", $12); print }'
 }
 
+# --- subcommand: index-drift -------------------------------------------------------
+
+# Does each Agent Index row still describe the note it points at? The primitive
+# under core's `doctor --judge`. Rows JSON on stdin, one boolean question per row
+# id, `{id, answers: {<row-id>: {probability}}}` on stdout, where probability is
+# the chance the row is accurate. Core applies the `no` threshold itself.
+INDEX_DRIFT_MAX=5
+cmd_index_drift() {
+	local vault=""
+	while [ $# -gt 0 ]; do
+		case "$1" in
+		--vault)
+			[ $# -ge 2 ] || usage_err "$1 needs a value"
+			vault="$2"
+			shift 2
+			;;
+		*) usage_err "unknown argument: $1" ;;
+		esac
+	done
+	local jfile problems
+	jfile=$(judge_path index-drift) || unavailable "judge file index-drift.json not found"
+	command -v jq >/dev/null 2>&1 || unavailable "jq is not installed"
+	problems=$(judge_problems "$jfile")
+	[ -z "$problems" ] || unavailable "judge file $jfile is invalid: $(printf '%s' "$problems" | head -n 1)"
+	mktmp || unavailable "cannot create a temp dir"
+
+	local in="$TMPD/drift-in.json"
+	cat >"$in"
+	jq -e --argjson max "$INDEX_DRIFT_MAX" '
+		def text: . == null or type == "string";
+		type == "object" and (.rows | type) == "array"
+		and (.rows | length) > 0 and (.rows | length) <= $max
+		and (.rows | all(type == "object"
+		  and (.id | type) == "string" and (.id | test("^[A-Za-z0-9_-]+$"))
+		  and (.row | type) == "string" and (.row | length) > 0
+		  and (.title | text) and (.frontmatter | text) and (.head | text)))
+		and ([.rows[].id] | length == (unique | length))' "$in" >/dev/null 2>&1 ||
+		usage_err "index-drift: stdin must be {\"rows\": [{\"id\", \"row\", \"title\", \"frontmatter\", \"head\"}]} with unique ids and 1 to $INDEX_DRIFT_MAX rows"
+
+	egress_gate_vault "$vault"
+	vault="$VAULT"
+	egress_ready
+
+	# State: per row its id, the index row text, the note's title, frontmatter,
+	# and first lines. Over max_state_bytes, each row is cut to an equal share,
+	# shortening its first lines first, so no row is crowded out.
+	local max state="$TMPD/state" fitted="$TMPD/drift-fitted.json"
+	max=$(jq -r '.max_state_bytes // 24000' "$jfile")
+	jq --argjson max "$max" '
+		def cut($n): if $n <= 0 then ""
+		  elif utf8bytelength <= $n then .
+		  else .[:$n] | until(utf8bytelength <= $n;
+		    .[:(length - ((utf8bytelength - $n) / 4 | ceil))]) end;
+		def block($r; $head):
+		  "Row \($r.id)\nIndex row: \($r.row)\nNote title: \($r.title // "")"
+		  + (if ($r.frontmatter // "") == "" then "" else "\nFrontmatter:\n\($r.frontmatter)" end)
+		  + (if $head == "" then "" else "\nFirst lines:\n\($head)" end);
+		.rows as $rs
+		| ($rs | map(block(.; .head // "")) | join("\n\n")) as $full
+		| if ($full | utf8bytelength) <= $max then { state: $full, truncated: false }
+		  else ((($max - 2 * ($rs | length)) / ($rs | length)) | floor) as $share
+		    | { state: ($rs | map(. as $r
+		          | ($share - (block($r; "") | utf8bytelength)
+		             - ("\nFirst lines:\n" | utf8bytelength)) as $room
+		          | block($r; (($r.head // "") | cut($room))) | cut($share)) | join("\n\n")),
+		        truncated: true }
+		  end' "$in" >"$fitted" || unavailable "could not build the state"
+	jq -j '.state' "$fitted" >"$state"
+	TRUNCATED=$(jq -r '.truncated' "$fitted")
+
+	local q="$TMPD/questions.json" required
+	jq --slurpfile j "$jfile" '[.rows[].id | . as $id
+		| { ($id): ($j[0].questions.accurate | .instructions |= gsub("\\{row\\}"; $id)) }] | add' \
+		"$in" >"$q" || unavailable "could not build the questions"
+	required=$(jq -r '[.rows[].id] | join(" ")' "$in")
+	evaluate index-drift "$vault" "" "$state" "$q" "$required" "$TMPD/resp-drift.json"
+
+	jq -c --arg id "$CALL_ID" --slurpfile i "$in" '.answers as $a
+		| { id: $id, answers: (reduce $i[0].rows[].id as $r ({}; .[$r] = { probability: $a[$r].probability })) }' \
+		"$TMPD/resp-drift.json"
+}
+
+# --- subcommand: prompt ------------------------------------------------------------
+
+# The recall reflex gate for a UserPromptSubmit hook. Prompt on stdin (the hook's
+# JSON `prompt` field, or raw text). Prints one line on a confident `asks_why`
+# and nothing otherwise. Every outcome but a usage error exits 0, and stderr stays
+# empty unless VAULTMEM_VERBOSE=1: a hook must never fail or chatter.
+# shellcheck disable=SC2016  # the backticks are literal display text, not a substitution
+PROMPT_LINE='vaultmem: this looks like a "why" question; run `vaultmem <query>` before re-deriving.'
+
+prompt_skip() {
+	[ "${VAULTMEM_VERBOSE:-}" = "1" ] && printf '%s: prompt: %s\n' "$PROG" "$1" >&2
+	exit 0
+}
+
+# hook_judge_listed <name>: is <name> in [ext.judge] hook_judges (a comma list)?
+hook_judge_listed() {
+	case ",$(cfg hook_judges "" | tr -d '[:space:]')," in
+	*,"$1",*) return 0 ;;
+	esac
+	return 1
+}
+
+cmd_prompt() {
+	[ $# -eq 0 ] || usage_err "prompt takes no arguments (the prompt is on stdin)"
+	command -v jq >/dev/null 2>&1 || prompt_skip "jq is not installed"
+	mktmp || prompt_skip "cannot create a temp dir"
+	local raw="$TMPD/prompt.raw" text="$TMPD/prompt.txt" vault
+	cat >"$raw"
+
+	# Gate: every check that can refuse runs before any network code.
+	load_config || prompt_skip "config not available (is VAULTMEM_BIN set?)"
+	[ "$(cfg enabled false)" = "true" ] || prompt_skip "[ext.judge] enabled is not true"
+	hook_judge_listed prompt || prompt_skip "prompt is not in [ext.judge] hook_judges"
+	vault=$(resolve_vault) || prompt_skip "no confident vault for $PWD"
+	[ "$(cfg_raw "vault.$vault.judge")" = "true" ] ||
+		prompt_skip "vault $vault has not consented to egress (judge = true)"
+
+	# A JSON object is the hook payload: only its `prompt` field is sent, never
+	# the session id, paths, or anything else in it. Anything else is raw text.
+	if jq -e 'type == "object"' "$raw" >/dev/null 2>&1; then
+		jq -j '.prompt | strings' "$raw" >"$text" 2>/dev/null || : >"$text"
+	else
+		cp "$raw" "$text"
+	fi
+	[ -n "$(tr -d '[:space:]' <"$text")" ] || prompt_skip "empty prompt"
+
+	local err=/dev/null rc
+	[ "${VAULTMEM_VERBOSE:-}" = "1" ] && err=/dev/stderr
+	(cmd_judge prompt --vault "$vault" --gate asks_why --subject prompt) <"$text" >/dev/null 2>"$err"
+	rc=$?
+	[ "$rc" -eq 0 ] || prompt_skip "no confident yes (exit $rc)"
+	printf '%s\n' "$PROMPT_LINE"
+}
+
 # --- subcommand: list ------------------------------------------------------------
 
 cmd_list() {
@@ -1454,7 +1596,7 @@ doctor_live() {
 [ $# -gt 0 ] || usage_err "missing judge name or subcommand"
 case "$1" in
 -h | --help)
-	sed -n '2,36p' "$0" | sed 's/^# \{0,1\}//'
+	sed -n '2,41p' "$0" | sed 's/^# \{0,1\}//'
 	exit 0
 	;;
 list)
@@ -1492,6 +1634,14 @@ rerank)
 bench)
 	shift
 	cmd_bench "$@"
+	;;
+index-drift)
+	shift
+	cmd_index_drift "$@"
+	;;
+prompt)
+	shift
+	cmd_prompt "$@"
 	;;
 -*) usage_err "unknown option: $1" ;;
 *) cmd_judge "$@" ;;

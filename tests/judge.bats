@@ -135,7 +135,7 @@ EOF
 # write_config [key=value …]: the core contract, with per-test overrides.
 write_config() {
   local enabled=true zdr=true log=true timeout_ms=1500 personal=true work=false side=false nodesc=false
-  local base_url="https://ai-gateway.vercel.sh" key_file="$HOME/.config/vaultmem/ai-gateway.key" extra=""
+  local base_url="https://ai-gateway.vercel.sh" key_file="$HOME/.config/vaultmem/ai-gateway.key" extra="" hook_judges=""
   local kv
   for kv in "$@"; do
     case "$kv" in
@@ -152,7 +152,7 @@ write_config() {
     printf 'ext.judge.key_file=%s\n' "$key_file"
     printf 'ext.judge.log=%s\n' "$log"
     printf 'ext.judge.rerank=false\n'
-    printf 'ext.judge.hook_judges=\n'
+    printf 'ext.judge.hook_judges=%s\n' "$hook_judges"
     [ -z "$extra" ] || printf '%s\n' "$extra"
     printf 'vault.personal.judge=%s\n' "$personal"
     printf 'vault.work.judge=%s\n' "$work"
@@ -1668,6 +1668,245 @@ TSV
   [ -z "$output" ]
   printf '# only a comment\n' >"$BATS_TEST_TMPDIR/empty.tsv"
   run judge_cmd bench --fixture "$BATS_TEST_TMPDIR/empty.tsv" --vault personal
+  [ "$status" -eq 64 ]
+  curl_not_invoked
+}
+
+# --- index-drift ------------------------------------------------------------------------
+
+drift_in() {
+  local input="$1"
+  shift
+  "$JUDGE_SH" "$JUDGE" index-drift "$@" <"$input" 2>"$STDERR"
+}
+
+@test "index-drift: the judge file ships the accurate template with 0.85/0.15" {
+  local j="$ROOT/ext/judge/judges/index-drift.json"
+  [ "$(jq -r '.questions.accurate.type' "$j")" = "boolean" ]
+  [ "$(jq -c '.thresholds.accurate' "$j")" = '{"yes":0.85,"no":0.15}' ]
+  jq -r '.questions.accurate.instructions' "$j" | grep -q '{row}'
+}
+
+@test "index-drift: the request body matches the golden file, one question per row" {
+  FAKE_CURL_RESPONSE="$FIX/index-drift-response.json" run drift_in "$FIX/index-drift-input.json" --vault personal
+  [ "$status" -eq 0 ]
+  [ "$(curl_calls)" -eq 1 ]
+  diff <(jq -S . "$CURL_REC/body") <(jq -S . "$FIX/index-drift-body.json")
+  [ "$(jq -c '.questions | keys' "$CURL_REC/body")" = '["r1","r2","r3"]' ]
+  jq -r '.questions.r2.instructions' "$CURL_REC/body" | grep -q '^Index row r2 accurately describes'
+  key_absent
+}
+
+@test "index-drift: answers map to {id, answers: {row: {probability}}}" {
+  FAKE_CURL_RESPONSE="$FIX/index-drift-response.json" run drift_in "$FIX/index-drift-input.json" --vault personal
+  [ "$status" -eq 0 ]
+  [ "$(printf '%s' "$output" | jq -c '.answers')" = '{"r1":{"probability":0.97},"r2":{"probability":0.04},"r3":{"probability":0.5}}' ]
+  [ "$(printf '%s' "$output" | jq -c 'keys')" = '["answers","id"]' ]
+  [ "$(printf '%s' "$output" | jq -r '.id')" = "$(jq -r '.id' "$LOG")" ]
+  [ "$(jq -r '[.judge, .vault, .truncated] | @tsv' "$LOG")" = "index-drift	personal	false" ]
+}
+
+@test "index-drift: more than 5 rows, zero rows, or malformed stdin exits 64 and never invokes curl" {
+  jq '.rows = [range(6) | {id: "r\(.)", row: "row \(.)"}]' "$FIX/index-drift-input.json" >"$BATS_TEST_TMPDIR/six.json"
+  run drift_in "$BATS_TEST_TMPDIR/six.json" --vault personal
+  [ "$status" -eq 64 ]
+  [ -z "$output" ]
+  jq '.rows = [range(5) | {id: "r\(.)", row: "row \(.)"}]' "$FIX/index-drift-input.json" >"$BATS_TEST_TMPDIR/five.json"
+  jq '.rows = []' "$FIX/index-drift-input.json" >"$BATS_TEST_TMPDIR/zero.json"
+  run drift_in "$BATS_TEST_TMPDIR/zero.json" --vault personal
+  [ "$status" -eq 64 ]
+  printf 'not json' >"$BATS_TEST_TMPDIR/bad.json"
+  run drift_in "$BATS_TEST_TMPDIR/bad.json" --vault personal
+  [ "$status" -eq 64 ]
+  jq '.rows[1].id = "r1"' "$FIX/index-drift-input.json" >"$BATS_TEST_TMPDIR/dup.json"
+  run drift_in "$BATS_TEST_TMPDIR/dup.json" --vault personal
+  [ "$status" -eq 64 ]
+  jq 'del(.rows[0].row)' "$FIX/index-drift-input.json" >"$BATS_TEST_TMPDIR/norow.json"
+  run drift_in "$BATS_TEST_TMPDIR/norow.json" --vault personal
+  [ "$status" -eq 64 ]
+  run drift_in "$FIX/index-drift-input.json" --vault
+  [ "$status" -eq 64 ]
+  curl_not_invoked
+  # Exactly 5 is allowed.
+  jq -n '{model: "typesafe-ai/jev", answers: ([range(5) | {("r\(.)"): {type: "boolean", probability: 0.9}}] | add)}' >"$BATS_TEST_TMPDIR/resp5.json"
+  FAKE_CURL_RESPONSE="$BATS_TEST_TMPDIR/resp5.json" run drift_in "$BATS_TEST_TMPDIR/five.json" --vault personal
+  [ "$status" -eq 0 ]
+  [ "$(printf '%s' "$output" | jq '.answers | length')" -eq 5 ]
+}
+
+@test "index-drift: a non-consenting vault, or enabled=false, exits 3 and never invokes curl" {
+  run drift_in "$FIX/index-drift-input.json" --vault work
+  [ "$status" -eq 3 ]
+  [ -z "$output" ]
+  write_config enabled=false
+  run drift_in "$FIX/index-drift-input.json" --vault personal
+  [ "$status" -eq 3 ]
+  [ -z "$output" ]
+  curl_not_invoked
+  [ ! -e "$LOG" ]
+}
+
+@test "index-drift: a response missing a row is a bad response, exit 3" {
+  jq '.answers |= { r1: .r1, r2: .r2 }' "$FIX/index-drift-response.json" >"$BATS_TEST_TMPDIR/resp.json"
+  FAKE_CURL_RESPONSE="$BATS_TEST_TMPDIR/resp.json" run drift_in "$FIX/index-drift-input.json" --vault personal
+  [ "$status" -eq 3 ]
+  [ -z "$output" ]
+}
+
+@test "index-drift: over max_state_bytes every row keeps its block" {
+  jq '.rows |= map(.head = ("h" * 400 + " HEADEND"))' "$FIX/index-drift-input.json" >"$BATS_TEST_TMPDIR/big.json"
+  jq '.max_state_bytes = 600' "$ROOT/ext/judge/judges/index-drift.json" >"$XDG_CONFIG_HOME/vaultmem/judges/index-drift.json"
+  FAKE_CURL_RESPONSE="$FIX/index-drift-response.json" run drift_in "$BATS_TEST_TMPDIR/big.json" --vault personal
+  [ "$status" -eq 0 ]
+  [ "$(jq -r '.state | utf8bytelength' "$CURL_REC/body")" -le 600 ]
+  local r
+  for r in r1 r2 r3; do jq -r '.state' "$CURL_REC/body" | grep -q "^Row $r$"; done
+  ! jq -r '.state' "$CURL_REC/body" | grep -q 'HEADEND' || false
+  [ "$(jq -r '.truncated' "$LOG")" = "true" ]
+}
+
+@test "index-drift: a failed request exits 3 with empty stdout, key unseen" {
+  jq --arg k "$KEY_VALUE" '.error.message = "bad key " + $k' "$FIX/error-401.json" >"$BATS_TEST_TMPDIR/err.json"
+  FAKE_CURL_RESPONSE="$BATS_TEST_TMPDIR/err.json" FAKE_CURL_HTTP=401 \
+    run drift_in "$FIX/index-drift-input.json" --vault personal
+  [ "$status" -eq 3 ]
+  [ -z "$output" ]
+  [ "$(jq -r '.error.type' "$LOG")" = "authentication_error" ]
+  key_absent
+}
+
+# --- prompt (UserPromptSubmit) -------------------------------------------------------------
+
+PROMPT_LINE='vaultmem: this looks like a "why" question; run `vaultmem <query>` before re-deriving.'
+HOOK_JSON='{"session_id":"abc123","prompt_id":"p-1","transcript_path":"/home/u/t.jsonl","cwd":"/home/u/proj","permission_mode":"default","hook_event_name":"UserPromptSubmit","prompt":"Why did we pick ripgrep over grep?"}'
+
+prompt_in() { printf '%s' "$1" | "$JUDGE_SH" "$JUDGE" prompt 2>"$STDERR"; }
+
+@test "prompt: a confident yes prints exactly the one line and exits 0" {
+  write_config hook_judges=nudge,prompt
+  FAKE_CURL_RESPONSE="$FIX/prompt-yes.json" run prompt_in "$HOOK_JSON"
+  [ "$status" -eq 0 ]
+  [ "$output" = "$PROMPT_LINE" ]
+  [ "${#lines[@]}" -eq 1 ]
+  [ ! -s "$STDERR" ]
+  diff <(jq -S . "$CURL_REC/body") <(jq -S . "$FIX/prompt-body.json")
+  [ "$(jq -r '[.judge, .vault, .subject] | @tsv' "$LOG")" = "prompt	personal	prompt" ]
+  key_absent
+}
+
+@test "prompt: JSON stdin sends only the prompt field; raw text is sent as is" {
+  write_config hook_judges=prompt
+  FAKE_CURL_RESPONSE="$FIX/prompt-yes.json" run prompt_in "$HOOK_JSON"
+  [ "$status" -eq 0 ]
+  [ "$(jq -r '.state' "$CURL_REC/body")" = "Why did we pick ripgrep over grep?" ]
+  ! grep -q 'abc123\|transcript_path\|/home/u' "$CURL_REC/body" || false
+  FAKE_CURL_RESPONSE="$FIX/prompt-yes.json" run prompt_in "why is the cache keyed by vault id?"
+  [ "$status" -eq 0 ]
+  [ "$output" = "$PROMPT_LINE" ]
+  [ "$(jq -r '.state' "$CURL_REC/body")" = "why is the cache keyed by vault id?" ]
+}
+
+@test "prompt: a JSON object without a prompt field, or an empty prompt, sends nothing" {
+  write_config hook_judges=prompt
+  run prompt_in '{"session_id":"abc123","cwd":"/home/u/proj"}'
+  [ "$status" -eq 0 ]
+  [ -z "$output" ]
+  run prompt_in '{"prompt":"   "}'
+  [ "$status" -eq 0 ]
+  [ -z "$output" ]
+  run prompt_in ''
+  [ "$status" -eq 0 ]
+  [ -z "$output" ]
+  curl_not_invoked
+  [ ! -s "$STDERR" ]
+}
+
+@test "prompt: no, abstain, and every unavailable answer print nothing and exit 0" {
+  write_config hook_judges=prompt
+  local r
+  for r in prompt-no prompt-abstain empty-answers; do
+    FAKE_CURL_RESPONSE="$FIX/$r.json" run prompt_in "$HOOK_JSON"
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]
+    [ ! -s "$STDERR" ]
+  done
+  FAKE_CURL_RESPONSE="$FIX/error-500.json" FAKE_CURL_HTTP=500 run prompt_in "$HOOK_JSON"
+  [ "$status" -eq 0 ]
+  [ -z "$output" ]
+  [ ! -s "$STDERR" ]
+  FAKE_CURL_EXIT=28 run prompt_in "$HOOK_JSON"
+  [ "$status" -eq 0 ]
+  [ -z "$output" ]
+  [ ! -s "$STDERR" ]
+  FAKE_CURL_RESPONSE="$FIX/malformed.txt" run prompt_in "$HOOK_JSON"
+  [ "$status" -eq 0 ]
+  [ -z "$output" ]
+  [ ! -s "$STDERR" ]
+}
+
+@test "prompt: timeout_ms reaches curl as --max-time" {
+  write_config hook_judges=prompt timeout_ms=800
+  FAKE_CURL_RESPONSE="$FIX/prompt-yes.json" run prompt_in "$HOOK_JSON"
+  [ "$status" -eq 0 ]
+  grep -A1 -x -- '--max-time' "$CURL_REC/argv" | tail -n 1 | grep -qx '0.800'
+}
+
+@test "prompt: gated off prints nothing, exits 0, and never invokes curl" {
+  # prompt absent from hook_judges (default empty, and a list naming only nudge).
+  run prompt_in "$HOOK_JSON"
+  [ "$status" -eq 0 ]
+  [ -z "$output" ]
+  write_config hook_judges=nudge
+  run prompt_in "$HOOK_JSON"
+  [ "$status" -eq 0 ]
+  [ -z "$output" ]
+  # enabled=false.
+  write_config hook_judges=prompt enabled=false
+  run prompt_in "$HOOK_JSON"
+  [ "$status" -eq 0 ]
+  [ -z "$output" ]
+  # The vault for $PWD does not consent.
+  write_config hook_judges=prompt
+  STUB_WHICH_ID=work run prompt_in "$HOOK_JSON"
+  [ "$status" -eq 0 ]
+  [ -z "$output" ]
+  # which only guessed (the default-vault fallback): not consent.
+  STUB_WHICH_ERR="vaultmem: low-confidence guess (no match signal) → personal" run prompt_in "$HOOK_JSON"
+  [ "$status" -eq 0 ]
+  [ -z "$output" ]
+  # No config at all.
+  VAULTMEM_BIN="$BATS_TEST_TMPDIR/nonexistent" run prompt_in "$HOOK_JSON"
+  [ "$status" -eq 0 ]
+  [ -z "$output" ]
+  curl_not_invoked
+  [ ! -s "$STDERR" ]
+  [ ! -e "$LOG" ]
+}
+
+@test "prompt: VAULTMEM_VERBOSE=1 names the reason on stderr; stdout stays empty" {
+  VAULTMEM_VERBOSE=1 run prompt_in "$HOOK_JSON"
+  [ "$status" -eq 0 ]
+  [ -z "$output" ]
+  grep -q 'prompt is not in \[ext.judge\] hook_judges' "$STDERR"
+  write_config hook_judges=prompt
+  FAKE_CURL_RESPONSE="$FIX/prompt-no.json" VAULTMEM_VERBOSE=1 run prompt_in "$HOOK_JSON"
+  [ "$status" -eq 0 ]
+  [ -z "$output" ]
+  grep -q 'no confident yes (exit 1)' "$STDERR"
+}
+
+@test "prompt: a failed request leaves the key out of stdout, stderr, argv, body, and log" {
+  write_config hook_judges=prompt
+  jq --arg k "$KEY_VALUE" '.error.message = "bad key " + $k' "$FIX/error-401.json" >"$BATS_TEST_TMPDIR/err.json"
+  FAKE_CURL_RESPONSE="$BATS_TEST_TMPDIR/err.json" FAKE_CURL_HTTP=401 VAULTMEM_VERBOSE=1 run prompt_in "$HOOK_JSON"
+  [ "$status" -eq 0 ]
+  [ -z "$output" ]
+  grep -q 'unavailable' "$STDERR"
+  key_absent
+}
+
+@test "prompt: arguments are a usage error, exit 64" {
+  run judge_cmd prompt --vault personal
   [ "$status" -eq 64 ]
   curl_not_invoked
 }
