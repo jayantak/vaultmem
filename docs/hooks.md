@@ -304,6 +304,78 @@ nothing extra and exits `0`. The extension enforces `timeout_ms`; core adds no
 timer of its own. `nudge` without `--judge` never reads stdin and never runs the
 extension.
 
+## UserPromptSubmit: `vaultmem judge prompt`
+
+With the optional [judge extension](judge.md#recall-reflex-gate-prompt),
+`vaultmem judge prompt` backs the "check the vault before you re-derive" reflex
+with a check on every prompt. When the prompt asks about a past decision, a
+root cause, or why something is built the way it is, and the judge is
+confident, it prints one line the harness adds to the agent's context:
+
+```
+vaultmem: this looks like a "why" question; run `vaultmem <query>` before re-deriving.
+```
+
+```jsonc
+// ~/.claude/settings.json → "hooks"
+{
+  "hooks": {
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "command -v vaultmem >/dev/null && vaultmem judge prompt"
+          }
+        ]
+      }
+    ]
+  }
+}
+```
+
+It sends anything only when **all three** preconditions hold:
+
+1. The extension is installed and `[ext.judge] enabled = true`.
+2. `prompt` is named in `[ext.judge] hook_judges` (default empty). This entry
+   is separate from `nudge`: naming one does not enable the other.
+3. `vaultmem which` routes `$PWD` to a vault **confidently** (a `match_owners`
+   or `match_paths` rule, not the fallback), and that vault sets `judge = true`.
+
+**When all three hold, every prompt you type leaves the machine**: it is sent
+to the remote evaluation model through the extension. Leave `prompt` out of
+`hook_judges`, or keep `judge = false` on the vault, to keep prompts local.
+
+Every other outcome prints nothing and exits `0`: a precondition not met, an
+empty prompt, a `no` or abstain answer, a timeout, an HTTP error, a bad
+response. Stderr stays empty too; set `VAULTMEM_VERBOSE=1` in the hook command
+to see why a prompt printed nothing. The extension enforces `timeout_ms`
+(default 1500), well inside Claude Code's 30-second `UserPromptSubmit` default,
+so a slow gateway delays a prompt by at most that long. The command never exits
+`2`, which in this hook would block and erase the prompt.
+
+### What the UserPromptSubmit hook receives on stdin
+
+Confirmed 2026-09-22 against the Claude Code hooks reference
+([code.claude.com/docs/en/hooks](https://code.claude.com/docs/en/hooks)): a
+JSON object with `session_id`, `prompt_id`, `transcript_path`, `cwd`,
+`permission_mode`, `hook_event_name` (`"UserPromptSubmit"`), and `prompt`, "the
+user's input text that Claude Code is about to process". The common fields
+`scratchpad_dir` and `effort` may also appear. On exit 0, plain-text stdout "is
+added as context that Claude can see and act on"; exit 2 "blocks prompt
+processing and erases the prompt".
+
+`judge prompt` sends only the `prompt` field. The session id, paths, and every
+other field stay local. Stdin that is not a JSON object is sent as raw text, so
+the command also works from a script: `printf '%s' "why X?" | vaultmem judge prompt`.
+
+**Codex** ([developers.openai.com/codex/hooks](https://developers.openai.com/codex/hooks),
+which redirects to learn.chatgpt.com/docs/hooks), confirmed the same day: its
+`UserPromptSubmit` event carries the common fields plus `turn_id` and `prompt`
+("User prompt that's about to be sent"), and on exit 0 "plain text on `stdout`
+is added as extra developer context". The same command works in
+`~/.codex/hooks.json`.
+
 ## PostCompact: re-anchor after a context compaction
 
 A context compaction throws away everything a SessionStart hook injected

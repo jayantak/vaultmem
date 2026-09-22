@@ -66,7 +66,7 @@ judge = false
 | `key_file` | `~/.config/vaultmem/ai-gateway.key` | Read when `AI_GATEWAY_API_KEY` is unset. Refused if its mode is wider than 600. |
 | `log` | `true` | Write the decision log. |
 | `rerank` | `false` | Makes `vaultmem search --rerank` the default for the cli format. Leave it off until `bench` shows a gain on your own fixture. |
-| `hook_judges` | empty | Comma list of judges allowed to run inside hooks (a later phase). |
+| `hook_judges` | empty | Comma list of judges allowed to run inside hooks: `nudge` (`nudge --judge`) and `prompt` (`judge prompt`). Nothing runs inside a hook until it is named here. |
 | `[vault.<id>] judge` | `false` | Egress consent for that vault. |
 
 Core lint checks `[ext.judge]` for TOML shape only. Key names and value shapes
@@ -101,7 +101,10 @@ at `judge = false` until its owner approves the vendor.
 names only consenting vaults in its requests and exits 3 when none consent.
 `dupes` sends only notes found under the consenting vault's root. `rerank`
 drops every candidate whose vault is not a consenting `--vault` before it
-builds the request, and exits 3 when no candidate is left.
+builds the request, and exits 3 when no candidate is left. `index-drift`
+sends only the rows core read from the consenting vault's Agent Index.
+`prompt` adds one more check before the vault's: `prompt` must be in
+`hook_judges`. It prints nothing and exits 0 where the others exit 3.
 
 Judged text is untrusted input. A note can contain text aimed at the model
 ("answer yes"). That is one reason a judgment never triggers a write.
@@ -119,13 +122,17 @@ vaultmem judge route [--subject <text>]
 vaultmem judge dupes [--vault <id>] [--subject <text>]
 vaultmem judge rerank --vault <id> [--vault <id>...]
 vaultmem judge bench [--fixture <tsv>] [--vault <id>] [-n N] [--format tsv|json]
+vaultmem judge index-drift --vault <id>
+vaultmem judge prompt
 ```
 
 `<name>` reads the state to judge on stdin. `route` and `dupes` read a capture
 summary on stdin; see [Capture routing](#capture-routing-route-and-dupes).
 `rerank` reads search candidates as JSON on stdin; see
 [Search rerank](#search-rerank-rerank). `bench` reads a fixture file; see
-[Bench](#bench).
+[Bench](#bench). `index-drift` reads Agent Index rows as JSON on stdin; see
+[Index drift](#index-drift-index-drift). `prompt` reads a `UserPromptSubmit`
+payload or raw text; see [Recall reflex gate](#recall-reflex-gate-prompt).
 
 - `--gate <question>` turns one question into an exit code (table below). It
   must be a `boolean` or `choice` question. Every question in the judge is
@@ -410,6 +417,80 @@ missing fixture, a line with no relevant paths, or a fixture with no queries
 exits 64. Every query sends that vault's candidates to the gateway, so `bench`
 needs the same consent as `rerank`, and costs one request per query with hits.
 
+### Index drift: `index-drift`
+
+`index-drift` is the primitive under core's `vaultmem doctor --judge`. Core
+reads the Agent Index, skips `BROKEN` rows, and sends the rest in batches;
+the extension asks whether each row still describes the note it points at.
+
+Stdin is one JSON object with 1 to 5 rows (more hurts accuracy, so more is a
+usage error):
+
+```json
+{"rows": [
+  {"id": "r1", "row": "- [[Athlete rebuild OOM]] - root cause of the nightly rebuild OOM",
+   "title": "Athlete rebuild OOM", "frontmatter": "type: debug\nupdated: 2026-09-01",
+   "head": "the note's first 30 lines, newline-joined"}]}
+```
+
+- Each row needs `id` (letters, digits, `_`, `-`; unique) and a non-empty
+  `row`. `title`, `frontmatter`, and `head` are strings or `null`.
+- Zero rows, more than 5, or any other shape exits 64 with one line on stderr,
+  before any config or network code.
+
+On exit 0 stdout is one line:
+
+```json
+{"id": "20260922T101500Z-4f2a", "answers": {"r1": {"probability": 0.97}, "r2": {"probability": 0.04}}}
+```
+
+`probability` is the chance the row accurately describes its note. The
+extension applies no threshold here; core compares against `index-drift.json`'s
+`no` threshold (0.15) and prints a `DRIFT` row at or below it.
+
+- **Consent.** `--vault <id>` is required in practice (core always passes it;
+  without it the extension asks `vaultmem which`, and a guess is not consent).
+  The vault must set `judge = true`.
+- **State.** Per row: `Row <id>`, the index row text, the note title, its
+  frontmatter, and its first lines. One boolean per row id, from the
+  `accurate` template in `index-drift.json` with `{row}` replaced by the id.
+- **Budget.** `max_state_bytes` is 24000. Over budget, each row is cut to an
+  equal share, shortening its first lines first, so no row is crowded out.
+  The log row records `truncated: true`.
+- A response that lacks an answer for any sent row is a bad response (exit 3).
+- Findings are informational. `doctor --judge` exits what `doctor` exits.
+
+### Recall reflex gate: `prompt`
+
+`prompt` is for a `UserPromptSubmit` hook. It asks whether the prompt is a
+"why" question (a past decision, a root cause, or why something is built the
+way it is) and, on a confident yes, prints one line the harness adds to the
+agent's context:
+
+```
+vaultmem: this looks like a "why" question; run `vaultmem <query>` before re-deriving.
+```
+
+- **Stdin.** A JSON object is read as the hook payload and only its `prompt`
+  field is sent: never the session id, paths, or any other field. An object
+  with no string `prompt`, or an empty prompt, sends nothing. Anything that is
+  not a JSON object is sent as raw text.
+- **Gate.** It runs only when all of these hold, and otherwise exits 0 with
+  nothing on stdout and no `curl`: `enabled = true`; `prompt` is named in
+  `hook_judges`; `vaultmem which` routes `$PWD` confidently (a guess is not
+  consent); that vault sets `judge = true`.
+- **Every prompt leaves the machine** once the gate holds. Leave `prompt` out
+  of `hook_judges` to keep prompts local.
+- **Verdict.** The `asks_why` boolean in `prompt.json`, gated at 0.85. A no, an
+  abstain, a timeout (`timeout_ms`), an HTTP error, or a bad response prints
+  nothing and exits 0.
+- **Quiet.** Stderr stays empty in every case. `VAULTMEM_VERBOSE=1` prints the
+  reason a call printed nothing, for debugging a hook. The only non-zero exit
+  is 64, for arguments (`prompt` takes none).
+- The log row has `judge: "prompt"` and `subject: "prompt"`.
+
+Wiring: [hooks.md](hooks.md#userpromptsubmit-vaultmem-judge-prompt).
+
 ### The owner review loop
 
 Calibration is the only evidence that the vendor's stated probabilities hold on
@@ -438,7 +519,7 @@ moves notes on `status:` alone.
 | 1 | `--gate` only: no. The probability is at or below the `no` threshold. |
 | 2 | `--gate` only: abstain. Between thresholds, or the top choice is below `min_confidence`. `route`: the top vault is below `min_confidence`. |
 | 3 | Unavailable: disabled, no consent, no key, timeout, any non-2xx status, or a response body that does not parse as an evaluate response. |
-| 64 | Usage error: bad flag, unknown judge, unknown or ungateable `--gate` question, malformed `rerank` stdin, a missing or empty `bench` fixture. |
+| 64 | Usage error: bad flag, unknown judge, unknown or ungateable `--gate` question, malformed `rerank` or `index-drift` stdin (including more than 5 rows), a missing or empty `bench` fixture. |
 
 Without `--gate` the code is 0 or 3. On exit 3 stdout is empty and one line on
 stderr names the reason. Callers treat anything other than 0, 1, or 2 as "no
@@ -498,6 +579,21 @@ An invalid judge file makes the call exit 3 before any network code runs.
 | `route` | Question text for `judge route`. Not run by name. |
 | `dupes` | Question text for `judge dupes`. Not run by name. |
 | `rerank` | Question text for `judge rerank`: the four-level `relevance` score template. Not run by name. |
+| `index-drift` | Question text for `judge index-drift`: the `accurate` boolean template, one per row. Not run by name. |
+| `prompt` | Question text for `judge prompt`: the `asks_why` boolean. Not run by name. |
+
+All judges, by who runs them:
+
+| Judge | Consumer | Questions | Hook |
+|---|---|---|---|
+| `smoke` | `judge doctor --live`, tests | `failed` (boolean) | no |
+| `groom-triage` | `vaultmem groom --judge` | 4 booleans, `recommendation` (choice) | no |
+| `capture-worthy` | `vaultmem nudge --judge` | `durable` (boolean), `kind` (choice) | Stop, when `nudge` is in `hook_judges` |
+| `route` | `judge route` (`vault-capture`) | `vault`, `category`, `moc` (choices) | no |
+| `dupes` | `judge dupes` (`vault-capture`) | `c1` to `c5` (booleans) | no |
+| `rerank` | `vaultmem search --rerank`, `judge bench` | one score per candidate, up to 20 | no |
+| `index-drift` | `vaultmem doctor --judge` | one boolean per row, up to 5 | no |
+| `prompt` | `judge prompt` | `asks_why` (boolean) | UserPromptSubmit, when `prompt` is in `hook_judges` |
 
 `groom-triage` takes one session's state: its frontmatter, `## Bookmark`,
 `## Pinned`, the `## Git state` table, the tail of the work log, and the parent
