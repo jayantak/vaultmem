@@ -4232,3 +4232,176 @@ EOF
   [[ "$output" == *"--min-score S <query>"* ]]
   [[ "$output" == *"VAULTMEM_VERBOSE=1"* ]]
 }
+
+# --- doctor --judge: semantic index drift (judge design 8.5) ---------------------
+# A stub `index-drift` extension: each call appends its args, saves its stdin to
+# drift.stdin.<n>, and answers with canned probabilities for r1..r5. The first
+# batch drifts r1 (0.05) and r2 (0.15, the threshold itself); r3 (0.16) does not.
+drift_stub() { # $1 = ext dir, $2 = exit code
+  mkdir -p "$1/judge"
+  cat >"$1/judge/vaultmem-judge" <<EOS
+#!/usr/bin/env bash
+n=\$(cat "$BATS_TEST_TMPDIR/drift.calls" 2>/dev/null || echo 0)
+n=\$((n + 1))
+echo "\$n" >"$BATS_TEST_TMPDIR/drift.calls"
+printf 'args=%s\n' "\$*" >>"$BATS_TEST_TMPDIR/drift.args"
+cat >"$BATS_TEST_TMPDIR/drift.stdin.\$n"
+printf '%s\n' '{"id":"20260922T120000Z-dd01","judge":"index-drift","answers":{"r1":{"probability":0.05},"r2":{"probability":0.15},"r3":{"probability":0.16},"r4":{"probability":0.9},"r5":{"probability":0.99}}}'
+exit ${2:-0}
+EOS
+  chmod +x "$1/judge/vaultmem-judge"
+}
+
+# Six indexed notes that exist, plus one BROKEN row that must never be judged.
+drift_fixture() { # $1 = jay's judge value
+  mkdir -p "$OBS_JAY/Architecture"
+  local i
+  for i in 1 2 3 4 5 6; do
+    printf -- '---\ntype: architecture\nstatus: active\n---\n# Note %s\n\nBody of note %s.\n' "$i" "$i" >"$OBS_JAY/Architecture/Note $i.md"
+  done
+  {
+    printf -- '---\nschema: 1\n---\n# Home\n<!-- AGENT-INDEX:START -->\n### Architecture\n'
+    for i in 1 2 3 4 5 6; do printf '| [[Architecture/Note %s]] | summary "%s" of note | 2026-09-01 |\n' "$i" "$i"; done
+    printf '| [[Architecture/Gone]] | a note that is not there | 2026-09-01 |\n'
+    printf '<!-- AGENT-INDEX:END -->\n'
+  } >"$OBS_JAY/Home.md"
+  cat >"$VAULTMEM_CONFIG" <<EOC
+[ext.judge]
+enabled = true
+
+[vault.jay]
+label = "Personal"
+path = "$OBS_JAY"
+judge = $1
+EOC
+}
+
+# The growth line times a search, so two runs never match byte for byte there.
+drift_norm() { printf '%s\n' "$1" | sed -E 's/search [0-9.]+s/search Xs/'; }
+
+@test "doctor --judge prints DRIFT rows in batches of at most 5 and keeps doctor's exit code" {
+  judge_isolate
+  drift_fixture true
+  export VAULTMEM_EXT_DIR="$BATS_TEST_TMPDIR/extdir"
+  drift_stub "$VAULTMEM_EXT_DIR"
+  run "$JOM" doctor
+  local plain_status="$status"
+  [ ! -e "$BATS_TEST_TMPDIR/drift.calls" ]
+  run "$JOM" doctor --judge
+  # The stub reports drift and a BROKEN row exists: the exit is plain doctor's.
+  [ "$status" -eq "$plain_status" ]
+  [ "$status" -eq 2 ]
+  # Six judgeable rows, BROKEN skipped: one call of 5 rows, one of 1.
+  [ "$(cat "$BATS_TEST_TMPDIR/drift.calls")" = 2 ]
+  [ "$(grep -o '"id":"r[0-9]*"' "$BATS_TEST_TMPDIR/drift.stdin.1" | wc -l | tr -d ' ')" = 5 ]
+  [ "$(grep -o '"id":"r[0-9]*"' "$BATS_TEST_TMPDIR/drift.stdin.2" | wc -l | tr -d ' ')" = 1 ]
+  ! grep -q 'Gone' "$BATS_TEST_TMPDIR/drift.stdin.1" "$BATS_TEST_TMPDIR/drift.stdin.2"
+  [ "$(grep -c '^args=index-drift --vault jay$' "$BATS_TEST_TMPDIR/drift.args")" = 2 ]
+  # The state carries row, title, frontmatter and head, as valid JSON.
+  grep -q '"row":"| \[\[Architecture/Note 1\]\] | summary \\"1\\" of note | 2026-09-01 |"' "$BATS_TEST_TMPDIR/drift.stdin.1"
+  grep -q '"title":"Note 1"' "$BATS_TEST_TMPDIR/drift.stdin.1"
+  grep -q '"frontmatter":"type: architecture\\nstatus: active"' "$BATS_TEST_TMPDIR/drift.stdin.1"
+  grep -q '"head":"---\\ntype: architecture\\nstatus: active\\n---\\n# Note 1\\n\\nBody of note 1."' "$BATS_TEST_TMPDIR/drift.stdin.1"
+  if command -v python3 >/dev/null; then
+    python3 -c 'import json,sys; [json.load(open(f)) for f in sys.argv[1:]]' \
+      "$BATS_TEST_TMPDIR/drift.stdin.1" "$BATS_TEST_TMPDIR/drift.stdin.2"
+  fi
+  [[ "$output" == *"▸ DRIFT (judged, informational)"* ]]
+  [[ "$output" == *$'DRIFT\tArchitecture/Note 1\t0.05\tsummary "1" of note'* ]]
+  [[ "$output" == *$'DRIFT\tArchitecture/Note 2\t0.15\tsummary "2" of note'* ]]
+  [[ "$output" == *$'DRIFT\tArchitecture/Note 6\t0.05\tsummary "6" of note'* ]]
+  [[ "$output" != *"Note 3"$'\t'* ]]
+  [ "$(printf '%s\n' "$output" | grep -c $'^DRIFT\t')" = 3 ]
+}
+
+@test "doctor --judge exits 0 on a clean vault even when the judge reports drift" {
+  judge_isolate
+  drift_fixture true
+  # Drop the BROKEN row so plain doctor is clean.
+  grep -v Gone "$OBS_JAY/Home.md" >"$BATS_TEST_TMPDIR/h" && mv "$BATS_TEST_TMPDIR/h" "$OBS_JAY/Home.md"
+  export VAULTMEM_EXT_DIR="$BATS_TEST_TMPDIR/extdir"
+  drift_stub "$VAULTMEM_EXT_DIR"
+  run "$JOM" doctor
+  [ "$status" -eq 0 ]
+  run "$JOM" doctor --judge
+  [ "$status" -eq 0 ]
+  [[ "$output" == *$'DRIFT\tArchitecture/Note 1\t0.05'* ]]
+}
+
+@test "doctor --judge prints no DRIFT section when the extension fails" {
+  judge_isolate
+  drift_fixture true
+  export VAULTMEM_EXT_DIR="$BATS_TEST_TMPDIR/extdir"
+  drift_stub "$VAULTMEM_EXT_DIR" 1
+  run "$JOM" doctor
+  local plain_status="$status" plain_out
+  plain_out=$(drift_norm "$output")
+  run "$JOM" doctor --judge
+  [ "$status" -eq "$plain_status" ]
+  [ -e "$BATS_TEST_TMPDIR/drift.calls" ]
+  [[ "$output" != *"DRIFT"* ]]
+  [ "$(drift_norm "$output")" = "$plain_out" ]
+}
+
+@test "doctor --judge never invokes the extension for a vault that has not consented" {
+  judge_isolate
+  drift_fixture false
+  export VAULTMEM_EXT_DIR="$BATS_TEST_TMPDIR/extdir"
+  drift_stub "$VAULTMEM_EXT_DIR"
+  run "$JOM" doctor --judge
+  [ "$status" -eq 2 ]
+  [[ "$output" != *"DRIFT"* ]]
+  [ ! -e "$BATS_TEST_TMPDIR/drift.calls" ]
+}
+
+@test "doctor without --judge is byte-identical with and without the extension installed" {
+  judge_isolate
+  drift_fixture true
+  export VAULTMEM_EXT_DIR="$BATS_TEST_TMPDIR/extdir"
+  drift_stub "$VAULTMEM_EXT_DIR"
+  run "$JOM" doctor
+  local with_status="$status" with_out
+  with_out=$(drift_norm "$output")
+  export VAULTMEM_EXT_DIR="$BATS_TEST_TMPDIR/empty"
+  run "$JOM" doctor
+  [ "$status" -eq "$with_status" ]
+  [ "$(drift_norm "$output")" = "$with_out" ]
+  [ ! -e "$BATS_TEST_TMPDIR/drift.calls" ]
+}
+
+@test "doctor --judge --deep composes with the deep scan" {
+  judge_isolate
+  drift_fixture true
+  printf -- '---\ntype: architecture\n---\n# Lonely\n' >"$OBS_JAY/Architecture/Lonely.md"
+  export VAULTMEM_EXT_DIR="$BATS_TEST_TMPDIR/extdir"
+  drift_stub "$VAULTMEM_EXT_DIR"
+  run "$JOM" doctor --deep
+  local deep_status="$status"
+  [[ "$output" == *"Lonely"* ]]
+  rm -f "$BATS_TEST_TMPDIR/drift.calls"
+  for order in "--judge --deep" "--deep --judge"; do
+    # shellcheck disable=SC2086
+    run "$JOM" doctor $order
+    [ "$status" -eq "$deep_status" ]
+    [[ "$output" == *"Lonely"* ]]
+    [[ "$output" == *$'DRIFT\tArchitecture/Note 1\t0.05'* ]]
+  done
+}
+
+@test "groom never runs the index-drift judge" {
+  judge_isolate
+  drift_fixture true
+  export VAULTMEM_EXT_DIR="$BATS_TEST_TMPDIR/extdir"
+  drift_stub "$VAULTMEM_EXT_DIR"
+  run "$JOM" groom --judge
+  [ "$status" -eq 0 ]
+  [[ "$output" != *"DRIFT"* ]]
+  ! grep -q index-drift "$BATS_TEST_TMPDIR/drift.args" 2>/dev/null
+}
+
+@test "usage documents doctor [--deep] [--judge]" {
+  run "$OM" -h
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"vaultmem doctor [--deep] [--judge]"* ]]
+  [[ "$output" == *"DRIFT (judged, informational)"* ]]
+}

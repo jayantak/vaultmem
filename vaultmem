@@ -40,7 +40,8 @@
 #   vaultmem index             browse the Agent Index: section counts + MOCs (the shape)
 #   vaultmem index <section>    expand one section (e.g. index architecture); rows capped
 #   vaultmem index all          full flat dump (escape hatch; rows still width-capped)
-#   vaultmem doctor             flag drifted index rows + vault schema lints; also lint the config;
+#   vaultmem doctor [--deep] [--judge]
+#                               flag drifted index rows + vault schema lints; also lint the config;
 #                               prints a per-vault growth line (note count + timed representative
 #                               search) — the ripgrep-vs-FTS5 tripwire, informational, never affects exit
 #                               index drift: BROKEN (missing/0-byte note) + STALE (note reverted/done but row reads live)
@@ -50,6 +51,11 @@
 #                               exit codes: 0=clean 1=config errors 2=drift/lint findings 3=both
 #   vaultmem doctor --deep      + vault-wide ORPHAN (no inbound links) and UNINDEXED (not in
 #                               Agent Index or any MOC) scan; slower, not run by base doctor/groom
+#   vaultmem doctor --judge     + DRIFT: the `index-drift` judge asks whether each primary-vault
+#                               Agent-Index row still describes its note (at most 5 rows per call);
+#                               rows at p <= 0.15 print as `DRIFT <note> <p> <row excerpt>` under
+#                               `▸ DRIFT (judged, informational)`. Never changes the exit code. Needs
+#                               the judge extension enabled and `judge = true` on that vault.
 #   vaultmem mocs               list Maps of Content (the domain hubs)
 #   vaultmem vaults             print vault registry (id, path, MOC, routing rules)
 #   vaultmem path <id>          print the vault root path (for V="$(…)" in scripts)
@@ -1130,9 +1136,120 @@ _doctor_growth() {
 
 # Exit codes (bitwise, so they compose): 0=clean 1=config errors 2=drift/lint
 # findings (index drift and/or schema lints) 3=both.
+# --- doctor --judge: semantic index drift (judge design 8.5) ---------------------
+# STALE is a string heuristic; DRIFT asks the `index-drift` judge whether each
+# Agent-Index row still describes its note. Informational only: nothing here
+# touches doctor's exit code, because a probabilistic lint must not break CI or
+# a hook. Any extension failure prints no DRIFT section at all.
+
+# A multi-line string as a JSON string body: backslash, quote and tab escaped,
+# lines joined with \n, other control characters dropped. Text on stdin.
+_json_esc_ml() {
+	awk 'BEGIN{ ORS="" }
+    { s=$0; o=""
+      for(i=1;i<=length(s);i++){ c=substr(s,i,1)
+        if(c=="\\") o=o "\\\\"
+        else if(c=="\"") o=o "\\\""
+        else if(c=="\t") o=o "\\t"
+        else if(c < " ") continue
+        else o=o c }
+      if(NR>1) print "\\n"
+      print o
+    }'
+}
+
+# Each index row that points at an existing, non-empty note, as
+# `<note path>\t<target>\t<summary>\t<raw row>`. Same link resolution as
+# _doctor_scan (glyph-prefixed fallback); BROKEN rows are skipped.
+_doctor_judge_rows() { # $1 = vault root
+	local root="$1" raw t s note
+	while IFS= read -r raw; do
+		case "$raw" in "| [["*) ;; *) continue ;; esac
+		t=$(printf '%s\n' "$raw" | awk -F'|' '{ t=$2; sub(/.*\[\[/,"",t); sub(/\]\].*/,"",t); sub(/#.*/,"",t); sub(/\|.*/,"",t); gsub(/^[[:space:]]+|[[:space:]]+$/,"",t); print t }')
+		s=$(printf '%s\n' "$raw" | awk -F'|' '{ s=$3; gsub(/^[[:space:]]+|[[:space:]]+$/,"",s); print s }')
+		[ -n "$t" ] || continue
+		note="$root/$t.md"
+		if [ ! -f "$note" ]; then
+			local g
+			g=$(_first_glob "$(dirname "$note")/"*" $(basename "$t").md") || true
+			[ -n "$g" ] && note="$g"
+		fi
+		[ -s "$note" ] || continue
+		printf '%s\t%s\t%s\t%s\n' "$note" "$t" "$s" "$raw"
+	done < <(_index_rows)
+}
+
+# Judge one batch (≤ DOCTOR_JUDGE_BATCH rows of _doctor_judge_rows output, in
+# $2) for vault $1. Prints `DRIFT\t<note>\t<p>\t<excerpt>` per drifted row.
+# Returns non-zero when the extension gave no usable answer.
+_doctor_judge_batch() { # $1 = vault id, $2 = rows
+	local vid="$1" json="" i=0 note t s raw out p ex
+	while IFS=$'\t' read -r note t s raw; do
+		[ -n "$note" ] || continue
+		i=$((i + 1))
+		[ "$i" -gt 1 ] && json="${json},"
+		json="${json}{\"id\":\"r${i}\",\"row\":\"$(printf '%s' "$raw" | _json_esc_ml)\",\"title\":\"$(basename "$t" | _json_esc_ml)\",\"frontmatter\":\"$(_note_frontmatter "$note" | _json_esc_ml)\",\"head\":\"$(head -n 30 "$note" | _json_esc_ml)\"}"
+	done <<<"$2"
+	[ "$i" -gt 0 ] || return 0
+	out=$(printf '{"rows":[%s]}\n' "$json" | _judge index-drift "$vid" 2>/dev/null) || return 1
+	[ -n "$out" ] || return 1
+	i=0
+	while IFS=$'\t' read -r note t s raw; do
+		[ -n "$note" ] || continue
+		i=$((i + 1))
+		p=$(printf '%s' "$out" | _judge_answer "r${i}.probability") || continue
+		[ -n "$p" ] || continue
+		if _judge_ge "$DOCTOR_JUDGE_DRIFT_AT" "$p"; then
+			ex=$(printf '%s\n' "$s" | awk -v cap=80 '{ if (length($0) > cap) print substr($0,1,cap-1) "…"; else print }')
+			printf 'DRIFT\t%s\t%s\t%s\n' "$t" "$p" "$ex"
+		fi
+	done <<<"$2"
+}
+
+# The DRIFT section for the primary vault's Agent Index. Consent is read once
+# from `judge config`; a vault that has not consented is skipped before any
+# note is read.
+_doctor_judge() {
+	[ "$EXT_JUDGE_ENABLED" = true ] || return 0
+	[ -f "$PRIMARY_HOME" ] || return 0
+	local vid jid ok=0 rows batch="" n=0 line found="" part
+	vid=$(printf '%s\n' "$_REG" | awk -F'\t' 'NR==1{print $1; exit}')
+	[ -n "$vid" ] || return 0
+	case "$SEL" in both | "$vid") ;; *) return 0 ;; esac
+	while IFS= read -r jid; do
+		[ "$jid" = "vault.${vid}.judge=true" ] && ok=1
+	done <<<"$(cmd_judge_config 2>/dev/null)"
+	[ "$ok" = 1 ] || return 0
+	rows=$(_doctor_judge_rows "$PRIMARY")
+	[ -n "$rows" ] || return 0
+	while IFS= read -r line; do
+		[ -n "$line" ] || continue
+		batch="${batch}${line}"$'\n'
+		n=$((n + 1))
+		if [ "$n" -ge "$DOCTOR_JUDGE_BATCH" ]; then
+			part=$(_doctor_judge_batch "$vid" "$batch") || return 0
+			found="${found}${part:+$part$'\n'}"
+			batch=""
+			n=0
+		fi
+	done <<<"$rows"
+	if [ "$n" -gt 0 ]; then
+		part=$(_doctor_judge_batch "$vid" "$batch") || return 0
+		found="${found}${part:+$part$'\n'}"
+	fi
+	[ -n "$found" ] || return 0
+	printf '%s▸ DRIFT (judged, informational)%s\n' "$B" "$R"
+	printf '%s' "$found"
+}
+
 cmd_doctor() {
-	local deep=0
-	case "${1:-}" in --deep) deep=1 ;; esac
+	local deep=0 judge=0 _a
+	for _a in "$@"; do
+		case "$_a" in
+		--deep) deep=1 ;;
+		--judge) judge=1 ;;
+		esac
+	done
 	local rc=0
 	# 1) config lint — the accepted TOML subset is enforced here.
 	if [ -r "$VAULTMEM_CONFIG" ]; then
@@ -1213,6 +1330,7 @@ ${deep_issues}"
 	# Vault-growth watch (informational; never affects rc). See _doctor_growth.
 	printf '%s▸ Vault growth (ripgrep tripwire)%s\n' "$B" "$R"
 	_doctor_growth
+	[ "$judge" = 1 ] && _doctor_judge
 	return "$rc"
 }
 
@@ -2790,6 +2908,12 @@ BLOAT_LINES="${VAULTMEM_BLOAT_LINES:-${DEF_BLOAT_LINES:-150}}"
 # judge file stays authoritative for the extension's exit code.
 GROOM_JUDGE_MIN_CONFIDENCE=0.6
 GROOM_JUDGE_FLAG_AT=0.85
+# `doctor --judge`: a row whose "accurately describes its note" probability is at
+# or below this prints as DRIFT. Mirrors the index-drift judge file's `no`
+# threshold. Rows per extension call are capped (irrelevant context hurts
+# accuracy; the extension rejects more than 5).
+DOCTOR_JUDGE_DRIFT_AT=0.15
+DOCTOR_JUDGE_BATCH=5
 # Filled by _groom_judge_run: `<name>\t<column>` rows and the --format json body.
 _GROOM_JUDGE_ANNOT=""
 _GROOM_JUDGE_JSON=""
@@ -4159,7 +4283,7 @@ while [ $# -gt 0 ]; do
 		shift 2
 		;;
 	-h | --help)
-		sed -n '4,176p' "$0"
+		sed -n '4,182p' "$0"
 		exit 0
 		;;
 	*)
@@ -4195,11 +4319,11 @@ status | sessions | verify | nudge | which | init | doctor | judge | _judge | ""
 esac
 
 case "${ARGS[0]:-}" in
-"") sed -n '4,176p' "$0" ;; # no args → print usage
+"") sed -n '4,182p' "$0" ;; # no args → print usage
 status) cmd_status ;;
 nudge) cmd_nudge "${ARGS[@]:1}" ;;
 index) cmd_index "${ARGS[1]:-}" ;;
-doctor) cmd_doctor "${ARGS[1]:-}" ;;
+doctor) cmd_doctor "${ARGS[@]:1}" ;;
 mocs) cmd_mocs ;;
 vaults) cmd_vaults ;;
 path) cmd_path "${ARGS[1]:-}" ;;
