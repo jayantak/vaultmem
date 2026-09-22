@@ -1,0 +1,1 @@
+{"model":"typesafe-ai/jev","answers":{"failed":{"type":"boolean","probability":0.99}},"usage":{"inputTokens":304,"outputTokens":20},"providerMetadata":{"typesafe":{"confidence":{}},"gateway":{"cost":"0","marketCost":"0.000012768","generationId":"gen_test_yes"}}}

@@ -120,6 +120,24 @@
 #                               (exit 0, silent) for any path outside a configured
 #                               vault root; non-zero only on a real finding.
 #
+# Judge extension (optional, ext/judge/: typed yes/no, choice, and score answers from
+# a remote evaluation model. Core opens no socket; all HTTP lives in the extension):
+#   vaultmem judge config       print the parsed [ext.judge] keys (defaults filled in) and
+#                               each vault's egress consent, as `ext.judge.<key>=<value>`
+#                               then `vault.<id>.judge=true|false` lines. Answered by core,
+#                               extension or not; it is how the extension reads the config.
+#   vaultmem judge <name> [--vault <id>] [--gate <question>] [--format json|tsv]
+#                               ask judge <name> about the state on stdin
+#   vaultmem judge list         judges available (shipped + user)
+#   vaultmem judge doctor [--live]  key present, config valid, judges parse; --live = one call
+#   vaultmem judge bench [--fixture F]  measure a judge against a labelled fixture
+#   vaultmem judge log [-n N]   tail the decision log
+#   vaultmem judge feedback <id> right|wrong
+#   vaultmem judge calibration  accuracy per confidence bucket, from feedback rows
+#     Every form but `config` runs the extension; args after `judge` pass through verbatim.
+#     exit codes: 0=ok/yes 1=no (--gate) 2=abstain 3=unavailable (not installed, disabled,
+#     vault has not set `judge = true`, no key, timeout, HTTP error) 64=usage
+#
 # Design notes:
 #   - Curated hits (Home.md Agent Index + MOCs/) come first: they are
 #     human/agent-curated summaries, the highest-signal entry points.
@@ -166,7 +184,7 @@ _expand_path() {
 }
 
 # Parse restricted-TOML config to "section<TAB>key<TAB>value" rows. Accepted
-# subset: [section] / [vault.<id>] headers; key = "string" | bare token (bool /
+# subset: [section] / [vault.<id>] / [ext.<name>] headers; key = "string" | bare token (bool /
 # int / comma-list); # comments; nothing else (no arrays, no nested tables). A
 # quoted value is taken verbatim between the first pair of quotes; a bare value
 # has any trailing " # comment" stripped.
@@ -198,10 +216,13 @@ _parse_config() { # $1 = config path
 # Lint the config against the accepted TOML subset. Prints one "line: reason"
 # per violation on stdout; returns non-zero if any violation was found. A
 # mis-parse must fail loudly (§3 of the design), never mis-route silently.
-# Accepted headers: [defaults], [vault.<id>]. Accepted keys per section are a
-# fixed allow-list. Values must be a quoted string, a bare bool/int, or a bare
-# comma-list token. Rejected: [[array tables]], deeper nesting ([a.b.c]),
-# arrays ([...] / {...} inline), unknown keys, unquoted string values.
+# Accepted headers: [defaults], [vault.<id>], [ext.<name>]. Accepted keys per
+# section are a fixed allow-list, except [ext.<name>]: an extension owns its key
+# names (`vaultmem judge doctor` validates them), so core checks those values
+# for subset shape only. Values must be a quoted string, a bare bool/int, or a
+# bare comma-list token. Rejected: [[array tables]], deeper nesting ([a.b.c]),
+# arrays ([...] / {...} inline), unknown keys, unquoted string values, a
+# non-boolean [vault.<id>] judge.
 _lint_config() { # $1 = config path
 	awk '
     function trim(s){ gsub(/^[[:space:]]+|[[:space:]]+$/, "", s); return s }
@@ -212,6 +233,7 @@ _lint_config() { # $1 = config path
       ok_vault["label"]=1; ok_vault["path"]=1; ok_vault["sessions"]=1
       ok_vault["home"]=1; ok_vault["mocs"]=1
       ok_vault["match_owners"]=1; ok_vault["match_paths"]=1
+      ok_vault["judge"]=1
     }
     /^[[:space:]]*#/ { next }
     /^[[:space:]]*$/ { next }
@@ -223,6 +245,7 @@ _lint_config() { # $1 = config path
       section=s
       if (section == "defaults") { kind="defaults"; next }
       if (section ~ /^vault\.[A-Za-z0-9_-]+$/) { kind="vault"; next }
+      if (section ~ /^ext\.[A-Za-z0-9_-]+$/) { kind="ext"; next }
       printf "%d: unknown or nested section [%s]\n", NR, section; bad=1; kind="?"; next
     }
     {
@@ -234,6 +257,11 @@ _lint_config() { # $1 = config path
       if (kind == "?") { next }
       # strip a trailing inline comment for bare values before shape checks
       bare=val; sub(/[[:space:]]*#.*$/, "", bare); bare=trim(bare)
+      # judge is egress consent: only a bare true/false, never a quoted or fuzzy truthy value
+      if (kind == "vault" && key == "judge") {
+        if (bare != "true" && bare != "false") { printf "%d: \"judge\" in [%s] must be true or false\n", NR, section; bad=1 }
+        next
+      }
       if (substr(val,1,1) == "\"") {
         if (substr(val, length(val)) != "\"" && val !~ /".*"/) { printf "%d: unterminated string for \"%s\"\n", NR, key; bad=1 }
         next
@@ -269,15 +297,21 @@ _vault_path() {
 }
 _vault_known() { [ -n "$1" ] && _vault_path "$1" >/dev/null; }
 
+# Two side tables sit beside $_REG rather than widening it (every reader splits
+# $_REG on its fixed 8 columns): $_REG_JUDGE is "id<TAB>true|false" per vault (the
+# per-vault egress consent), $_EXT_CFG the raw "ext.<name><TAB>key<TAB>value" rows.
 _load_registry() {
 	_REG=""
+	_REG_JUDGE=""
+	_EXT_CFG=""
+	EXT_JUDGE_ENABLED=false
 	DEF_VAULT=""
 	DEF_LIMIT=""
 	DEF_COLD_DAYS=""
 	DEF_DIRECTIVE_FILE=""
 	DEF_BLOAT_LINES=""
 	if [ -r "$VAULTMEM_CONFIG" ]; then
-		local parsed ids id path label sess home mocs mo mp
+		local parsed ids id path label sess home mocs mo mp vj
 		parsed=$(_parse_config "$VAULTMEM_CONFIG")
 		_cfg() { printf '%s\n' "$parsed" | awk -F'\t' -v s="$1" -v k="$2" '$1==s && $2==k{print $3; exit}'; }
 		ids=$(printf '%s\n' "$parsed" | awk -F'\t' '
@@ -296,7 +330,15 @@ _load_registry() {
 			mo=$(_cfg "vault.$id" match_owners)
 			mp=$(_expand_path "$(_cfg "vault.$id" match_paths)")
 			_reg_add "$id" "$path" "$label" "$sess" "$home" "$mocs" "$mo" "$mp"
+			vj=false
+			[ "$(_cfg "vault.$id" judge)" = true ] && vj=true
+			_REG_JUDGE="${_REG_JUDGE}${id}"$'\t'"${vj}"$'\n'
 		done <<<"$ids"
+		case "$parsed" in *ext.*)
+			_EXT_CFG=$(printf '%s\n' "$parsed" | awk -F'\t' '$1 ~ /^ext\./')
+			[ "$(_cfg ext.judge enabled)" = true ] && EXT_JUDGE_ENABLED=true
+			;;
+		esac
 		DEF_VAULT=$(_cfg defaults vault)
 		DEF_LIMIT=$(_cfg defaults limit)
 		DEF_COLD_DAYS=$(_cfg defaults cold_days)
@@ -3175,6 +3217,128 @@ cmd_init() {
 	esac
 }
 
+# --- extensions: the `judge` shim ------------------------------------------------
+# Core opens no socket. An extension is a separate executable that owns its own
+# dependencies and network code; core only locates it, hands it two env vars, and
+# serves it the parsed config (`judge config`) so it never needs a TOML parser.
+
+# Absolute, symlink-resolved path of the running script. No `readlink -f`: it is
+# missing on older macOS, so walk the link chain by hand.
+_self_path() {
+	local src="$0" dir link
+	case "$src" in
+	*/*) ;;
+	*) if [ -f "./$src" ]; then src="./$src"; else src=$(command -v -- "$src" 2>/dev/null || printf '%s' "$src"); fi ;;
+	esac
+	while [ -L "$src" ]; do
+		dir=$(cd -P "$(dirname "$src")" 2>/dev/null && pwd)
+		link=$(readlink "$src")
+		case "$link" in
+		/*) src="$link" ;;
+		*) src="$dir/$link" ;;
+		esac
+	done
+	dir=$(cd -P "$(dirname "$src")" 2>/dev/null && pwd)
+	printf '%s/%s' "$dir" "$(basename "$src")"
+}
+
+# Run extension $1 with the remaining args; stdin passes through. Resolution is a
+# fixed three-step order and deliberately never consults $PATH: with search as the
+# default dispatch case, "any vaultmem-<x> on PATH is a subcommand" is ambiguous.
+# Returns the extension's exit code, or 3 ("unavailable") when none is installed.
+_ext_exec() {
+	local name="$1" self cand bin=""
+	shift
+	self=$(_self_path)
+	for cand in \
+		"${VAULTMEM_EXT_DIR:+$VAULTMEM_EXT_DIR/$name/vaultmem-$name}" \
+		"${XDG_DATA_HOME:-$HOME/.local/share}/vaultmem/ext/$name/vaultmem-$name" \
+		"$(dirname "$self")/ext/$name/vaultmem-$name"; do
+		if [ -n "$cand" ] && [ -f "$cand" ] && [ -x "$cand" ]; then
+			bin="$cand"
+			break
+		fi
+	done
+	if [ -z "$bin" ]; then
+		printf 'vaultmem: extension "%s" is not installed (run: ./install.sh --ext %s)\n' "$name" "$name" >&2
+		return 3
+	fi
+	VAULTMEM_BIN="$self" VAULTMEM_CONFIG="$VAULTMEM_CONFIG" "$bin" "$@"
+}
+
+# `vaultmem judge config`: the core/extension config contract, answered by core.
+# FROZEN FORMAT, one per line, values unquoted, defaults filled in:
+#   ext.judge.<key>=<value>     the nine known keys in the order below, then any
+#                               other [ext.judge] key in file order (the extension's
+#                               own doctor rejects unknown names; core does not)
+#   vault.<id>.judge=true|false every registry vault that has a path
+_JUDGE_KEYS="enabled model base_url zdr timeout_ms key_file log rerank hook_judges"
+_judge_default() {
+	case "$1" in
+	enabled | rerank) printf 'false' ;;
+	zdr | log) printf 'true' ;;
+	model) printf 'typesafe-ai/jev' ;;
+	base_url) printf 'https://ai-gateway.vercel.sh' ;;
+	timeout_ms) printf '1500' ;;
+	key_file) printf '%s' "$HOME/.config/vaultmem/ai-gateway.key" ;;
+	esac
+}
+cmd_judge_config() {
+	local k s key val found id
+	for k in $_JUDGE_KEYS; do
+		found=0
+		while IFS=$'\t' read -r s key val; do
+			if [ "$s" = ext.judge ] && [ "$key" = "$k" ]; then
+				found=1
+				break
+			fi
+		done <<<"$_EXT_CFG"
+		[ "$found" = 1 ] || val=$(_judge_default "$k")
+		[ "$k" = key_file ] && val=$(_expand_path "$val")
+		printf 'ext.judge.%s=%s\n' "$k" "$val"
+	done
+	while IFS=$'\t' read -r s key val; do
+		[ "$s" = ext.judge ] || continue
+		case " $_JUDGE_KEYS " in *" $key "*) continue ;; esac
+		printf 'ext.judge.%s=%s\n' "$key" "$val"
+	done <<<"$_EXT_CFG"
+	# awk, not `read`: TAB is IFS whitespace, so `read` collapses an empty path
+	# column and a pathless vault would look like it had one.
+	while IFS= read -r id; do
+		[ -n "$id" ] || continue
+		printf 'vault.%s.judge=%s\n' "$id" "$(_vault_judge "$id")"
+	done < <(printf '%s' "$_REG" | awk -F'\t' '$1 != "" && $2 != "" { print $1 }')
+}
+
+# true|false: has vault $1 consented to egress ([vault.<id>] judge = true)?
+_vault_judge() {
+	local jid vj
+	while IFS=$'\t' read -r jid vj; do
+		if [ "$jid" = "$1" ]; then
+			printf '%s' "$vj"
+			return 0
+		fi
+	done <<<"$_REG_JUDGE"
+	printf 'false'
+}
+
+# Internal: ask judge $1 about the state on stdin, on behalf of vault $2; any
+# further args go to the extension verbatim. Returns 3 ("unavailable") WITHOUT
+# forking when [ext.judge] enabled is not true or the vault has not consented, so
+# a disabled judge costs an integrated command (and a hook) nothing. Callers treat
+# anything other than 0/1/2 as "no opinion" and behave exactly as they do today.
+_judge() {
+	[ "$EXT_JUDGE_ENABLED" = true ] || return 3
+	local name="${1:-}" vid="${2:-}" jid vj ok=0
+	if [ -z "$name" ] || [ -z "$vid" ]; then return 3; fi
+	while IFS=$'\t' read -r jid vj; do
+		if [ "$jid" = "$vid" ] && [ "$vj" = true ]; then ok=1; fi
+	done <<<"$_REG_JUDGE"
+	[ "$ok" = 1 ] || return 3
+	shift 2
+	_ext_exec judge "$name" --vault "$vid" "$@"
+}
+
 # --- arg parsing ---------------------------------------------------------------
 VAULT=both
 ARGS=()
@@ -3198,12 +3362,21 @@ while [ $# -gt 0 ]; do
 		shift 2
 		;;
 	-h | --help)
-		sed -n '4,136p' "$0"
+		sed -n '4,154p' "$0"
 		exit 0
 		;;
 	*)
 		ARGS+=("$1")
 		shift
+		# Everything after `judge` belongs to the extension, verbatim: it has its
+		# own --vault/--format/-h, which the flags above would otherwise swallow.
+		case "${ARGS[0]}" in judge | _judge)
+			while [ $# -gt 0 ]; do
+				ARGS+=("$1")
+				shift
+			done
+			;;
+		esac
 		;;
 	esac
 done
@@ -3217,14 +3390,15 @@ SEL=both
 # verify/nudge stay fail-quiet (the hook path); which/init/usage are
 # vault-independent or scaffold; doctor must run its config-lint even when the
 # config is too broken to register a vault (that is exactly what it exists to
-# report).
+# report). judge answers "unavailable" (exit 3) on its own terms, and `judge
+# config` must print its defaults with no vault at all: the extension reads it.
 case "${ARGS[0]:-}" in
-status | sessions | verify | nudge | which | init | doctor | "") ;;
+status | sessions | verify | nudge | which | init | doctor | judge | _judge | "") ;;
 *) [ "${REG_HAVE_PATH:-0}" = 1 ] || die "no vault configured — create $VAULTMEM_CONFIG (run 'vaultmem init --config') or set OBS_FLO/OBS_JAY (legacy)" ;;
 esac
 
 case "${ARGS[0]:-}" in
-"") sed -n '4,136p' "$0" ;; # no args → print usage
+"") sed -n '4,154p' "$0" ;; # no args → print usage
 status) cmd_status ;;
 nudge) cmd_nudge ;;
 index) cmd_index "${ARGS[1]:-}" ;;
@@ -3250,5 +3424,13 @@ worktrees) cmd_worktrees "${ARGS[1]:-}" ;;
 cat) cmd_cat "${ARGS[@]:1}" ;;
 verify) cmd_verify "${ARGS[1]:-}" ;;
 frontier) cmd_frontier ;;
+judge)
+	if [ "${ARGS[1]:-}" = config ]; then
+		cmd_judge_config
+	else
+		_ext_exec judge "${ARGS[@]:1}"
+	fi
+	;;
+_judge) _judge "${ARGS[@]:1}" ;; # test seam for the internal helper; not a public command
 *) cmd_search "${ARGS[*]}" ;;
 esac

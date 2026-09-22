@@ -34,7 +34,7 @@ cd "$ROOT"
 # This file is deliberately NOT scanned: it necessarily contains every construct
 # it searches for, as pattern strings, so including it makes the lint unable to
 # pass. It is plain bash 3.2 itself (verified by CI running it under /bin/bash).
-FILES=(vaultmem install.sh tests/subcommand-lint.sh)
+FILES=(vaultmem install.sh tests/subcommand-lint.sh ext/judge/vaultmem-judge tests/judge.bats)
 
 fail=0
 report() { # $1=label  $2=grep-E pattern  $3=remedy

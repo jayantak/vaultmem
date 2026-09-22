@@ -60,9 +60,16 @@ it. Enforcement is therefore two layers vaultmem owns:
 Locally, before pushing anything non-trivial:
 
 ```bash
-BASH=/bin/bash bats tests/vaultmem.bats   # the suite, under macOS system bash
+# the suite, under macOS system bash: a `bash` that is /bin/bash, first on PATH
+d=$(mktemp -d) && ln -s /bin/bash "$d/bash" && PATH="$d:$PATH" bats tests/vaultmem.bats
 ./tests/bash32-lint.sh                     # the fast specific check
 ```
+
+Both `bats` and `vaultmem` start through `#!/usr/bin/env bash`, so whichever
+`bash` comes first on `PATH` runs the suite and the script. Setting
+`BASH=/bin/bash` does nothing: bash overwrites `$BASH` with its own path at
+startup, and the suite runs on bash 5 as before. To check which shell a run
+used, `echo "$BASH_VERSION"` inside a test must print `3.2.x`.
 
 Note that the ordinary `bats (macos-latest)` matrix job does **not** cover this:
 `brew install bats-core` pulls in bash 5, and bats runs under that.
@@ -90,7 +97,7 @@ The full gate, matching CI:
 
 ```bash
 bats tests/vaultmem.bats
-BASH=/bin/bash bats tests/vaultmem.bats
+d=$(mktemp -d) && ln -s /bin/bash "$d/bash" && PATH="$d:$PATH" bats tests/vaultmem.bats   # under bash 3.2
 ./tests/subcommand-lint.sh
 ./tests/bash32-lint.sh
 shellcheck vaultmem install.sh tests/subcommand-lint.sh tests/bash32-lint.sh

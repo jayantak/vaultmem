@@ -1,0 +1,728 @@
+#!/usr/bin/env bash
+# vaultmem-judge: the `judge` extension: typed decisions about vault content
+# from an evaluation model behind Vercel AI Gateway. All of vaultmem's HTTP
+# lives here; the core script never opens a socket.
+#
+# Usage:
+#   vaultmem-judge <name> [--vault <id>] [--gate <question>] [--format json|tsv]
+#                         [--subject <text>]        state on stdin
+#   vaultmem-judge list                 judges available (user overrides shipped)
+#   vaultmem-judge doctor [--live]      config, key, and judge-file checks
+#   vaultmem-judge log [-n N]           tail the decision log (default 20 rows)
+#
+# Exit codes (the contract core and hooks rely on):
+#   0   ok; with --gate, the answer is yes
+#   1   --gate only: the answer is no
+#   2   --gate only: abstain (between thresholds, or below min_confidence)
+#   3   unavailable: disabled, no consent, no key, timeout, HTTP error, bad response
+#   64  usage error
+#
+# Config is never parsed here. It comes from `"$VAULTMEM_BIN" judge config`,
+# which prints `ext.judge.<key>=<value>` lines, then `vault.<id>.judge=true|false`.
+#
+# bash 3.2 floor applies (see docs/development.md). Deps: curl, jq.
+# Reference: docs/judge.md. Design: docs/design/judge-extension.md.
+set -uo pipefail
+
+PROG="vaultmem-judge"
+KNOWN_KEYS="enabled model base_url zdr timeout_ms key_file log rerank hook_judges"
+LOG_MAX_BYTES_DEFAULT=5242880 # 5 MiB; one rotated generation (judge.jsonl.1)
+LIVE_STATE="The build failed with exit code 1."
+
+TMPD=""
+CFG=""
+KEY=""
+
+cleanup() { [ -n "$TMPD" ] && rm -rf "$TMPD"; }
+trap cleanup EXIT
+
+usage_err() {
+	printf '%s: %s\n' "$PROG" "$1" >&2
+	printf 'usage: %s <name> [--vault <id>] [--gate <question>] [--format json|tsv]\n' "$PROG" >&2
+	printf '       %s list | doctor [--live] | log [-n N]\n' "$PROG" >&2
+	exit 64
+}
+
+# Exit 3 with one stderr line and nothing on stdout. Any key text is redacted
+# in case a gateway error message ever echoes it back.
+unavailable() {
+	local msg="$1"
+	[ -n "$KEY" ] && msg="${msg//"$KEY"/[redacted]}"
+	printf '%s: unavailable: %s\n' "$PROG" "$msg" >&2
+	exit 3
+}
+
+mktmp() {
+	[ -n "$TMPD" ] && return 0
+	TMPD=$(mktemp -d "${TMPDIR:-/tmp}/vaultmem-judge.XXXXXX") || return 1
+	chmod 700 "$TMPD"
+}
+
+# Directory of this script after symlink resolution (install.sh may symlink it).
+self_dir() {
+	local src="$0" dir link
+	while [ -L "$src" ]; do
+		dir=$(cd -P "$(dirname "$src")" && pwd)
+		link=$(readlink "$src")
+		case "$link" in
+		/*) src="$link" ;;
+		*) src="$dir/$link" ;;
+		esac
+	done
+	cd -P "$(dirname "$src")" && pwd
+}
+
+SHIPPED_DIR="$(self_dir)/judges"
+USER_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/vaultmem/judges"
+LOG_FILE="${XDG_STATE_HOME:-$HOME/.local/state}/vaultmem/judge.jsonl"
+
+valid_name() {
+	case "$1" in
+	"" | *[!A-Za-z0-9._-]* | .*) return 1 ;;
+	esac
+	return 0
+}
+
+# --- config (the core/extension contract) --------------------------------------
+
+vaultmem_bin() {
+	if [ -n "${VAULTMEM_BIN:-}" ]; then
+		printf '%s\n' "$VAULTMEM_BIN"
+	else
+		command -v vaultmem 2>/dev/null
+	fi
+}
+
+load_config() {
+	local bin
+	bin=$(vaultmem_bin) || return 1
+	[ -n "$bin" ] || return 1
+	CFG=$("$bin" judge config 2>/dev/null) || return 1
+	[ -n "$CFG" ]
+}
+
+# cfg_raw <full.key>: value as printed by core, empty when absent.
+cfg_raw() {
+	printf '%s\n' "$CFG" | awk -v k="$1" '
+		{ i = index($0, "="); if (i && substr($0, 1, i - 1) == k) { print substr($0, i + 1); exit } }'
+}
+
+# cfg <key> <default>: an [ext.judge] key. Core fills defaults; these are a
+# second line of defense, and the conservative ones (enabled=false, zdr=true).
+cfg() {
+	local v
+	v=$(cfg_raw "ext.judge.$1")
+	printf '%s\n' "${v:-$2}"
+}
+
+expand_tilde() {
+	case "$1" in
+	\~) printf '%s\n' "$HOME" ;;
+	\~/*) printf '%s/%s\n' "$HOME" "${1#\~/}" ;;
+	*) printf '%s\n' "$1" ;;
+	esac
+}
+
+# base_url must be https, except a loopback host: the key rides on every call.
+base_url_ok() {
+	case "$1" in
+	https://?*) return 0 ;;
+	http://localhost | http://localhost[:/]* | http://127.0.0.1 | http://127.0.0.1[:/]*) return 0 ;;
+	esac
+	return 1
+}
+
+# --- key -----------------------------------------------------------------------
+
+# key_file_mode_ok <file>: refuse anything wider than 600. Reads the `ls -l`
+# mode string because `stat` flags differ between macOS and Linux.
+key_file_mode_ok() {
+	local perms
+	perms=$(ls -ldL "$1" 2>/dev/null) || return 1
+	case "${perms:0:10}" in
+	-[r-][w-]-------) return 0 ;;
+	esac
+	return 1
+}
+
+# load_key: sets KEY. Returns 1 with KEY_ERR set on failure. Never prints KEY.
+KEY_ERR=""
+KEY_SRC=""
+load_key() {
+	local file
+	if [ -n "${AI_GATEWAY_API_KEY:-}" ]; then
+		KEY="$AI_GATEWAY_API_KEY"
+		KEY_SRC="AI_GATEWAY_API_KEY"
+		return 0
+	fi
+	file=$(expand_tilde "$(cfg key_file "$HOME/.config/vaultmem/ai-gateway.key")")
+	KEY_SRC="$file"
+	if [ ! -f "$file" ]; then
+		KEY_ERR="no key: AI_GATEWAY_API_KEY is unset and key_file does not exist ($file)"
+		return 1
+	fi
+	if ! key_file_mode_ok "$file"; then
+		KEY_ERR="key_file permissions are wider than 600 ($file)"
+		return 1
+	fi
+	KEY=$(head -n 1 "$file" | tr -d '[:space:]')
+	if [ -z "$KEY" ]; then
+		KEY_ERR="key_file is empty ($file)"
+		return 1
+	fi
+	return 0
+}
+
+# --- judge files -----------------------------------------------------------------
+
+judge_path() {
+	if [ -f "$USER_DIR/$1.json" ]; then
+		printf '%s\n' "$USER_DIR/$1.json"
+	elif [ -f "$SHIPPED_DIR/$1.json" ]; then
+		printf '%s\n' "$SHIPPED_DIR/$1.json"
+	else
+		return 1
+	fi
+}
+
+# Prints one problem per line; empty output means the judge file is valid.
+judge_problems() {
+	if ! jq -e . "$1" >/dev/null 2>&1; then
+		printf 'not valid JSON\n'
+		return 0
+	fi
+	jq -r '
+		def posint: type == "number" and . > 0 and . == floor;
+		def prob: type == "number" and . >= 0 and . <= 1;
+		def qtype_ok: type == "object" and (.type == "boolean" or .type == "choice" or .type == "score");
+		if type != "object" then "top level is not an object" else
+		  . as $j
+		  | (if .version != 1 then "version must be 1" else empty end),
+		    (if has("max_state_bytes") and (.max_state_bytes | posint | not)
+		     then "max_state_bytes must be a positive integer" else empty end),
+		    (if has("truncate") and .truncate != "head" and .truncate != "tail"
+		     then "truncate must be \"head\" or \"tail\"" else empty end),
+		    (if (.questions | type) != "object" or (.questions | length) == 0
+		     then "questions must be a non-empty object"
+		     else (.questions | to_entries[] | select(.value | qtype_ok | not)
+		           | "question \(.key): type must be boolean, choice, or score") end),
+		    (if has("thresholds") | not then empty
+		     elif (.thresholds | type) != "object" then "thresholds must be an object"
+		     else (.thresholds | to_entries[] | . as $e
+		           | if ($j.questions | type) == "object" and ($j.questions | has($e.key) | not)
+		             then "thresholds.\($e.key): no such question"
+		             elif ($e.value | type) != "object" then "thresholds.\($e.key): must be an object"
+		             elif ($e.value | to_entries | all(.value | prob) | not)
+		             then "thresholds.\($e.key): values must be numbers from 0 to 1"
+		             else empty end) end)
+		end' "$1"
+}
+
+# --- decision log ----------------------------------------------------------------
+
+sha256_file() {
+	if command -v shasum >/dev/null 2>&1; then
+		shasum -a 256 "$1" | awk '{print $1}'
+	elif command -v sha256sum >/dev/null 2>&1; then
+		sha256sum "$1" | awk '{print $1}'
+	else
+		return 1
+	fi
+}
+
+# log_append <json-row>. Never fails the call: any rotation or write problem
+# skips the row.
+log_append() {
+	local dir max size
+	dir=$(dirname "$LOG_FILE")
+	mkdir -p "$dir" 2>/dev/null || return 0
+	max="${VAULTMEM_JUDGE_LOG_MAX_BYTES:-$LOG_MAX_BYTES_DEFAULT}"
+	case "$max" in
+	"" | *[!0-9]*) max=$LOG_MAX_BYTES_DEFAULT ;;
+	esac
+	if [ -f "$LOG_FILE" ]; then
+		size=$(wc -c <"$LOG_FILE" 2>/dev/null | tr -d '[:space:]')
+		case "$size" in
+		"" | *[!0-9]*) return 0 ;;
+		esac
+		if [ "$size" -ge "$max" ]; then
+			mv -f "$LOG_FILE" "$LOG_FILE.1" 2>/dev/null || return 0
+		fi
+	fi
+	{ printf '%s\n' "$1" >>"$LOG_FILE"; } 2>/dev/null || return 0
+}
+
+# --- the gateway call ------------------------------------------------------------
+
+# gateway_post <body-file> <resp-file>: POST /v1/evaluate. Sets HTTP_CODE,
+# LATENCY_MS, CURL_RC. The key travels only on curl's stdin (`--config -`),
+# written by the printf builtin: never argv, never a file.
+HTTP_CODE=0
+LATENCY_MS=0
+CURL_RC=0
+gateway_post() {
+	local body="$1" resp="$2" url max_time esc meta
+	url="$(cfg base_url "https://ai-gateway.vercel.sh")"
+	url="${url%/}/v1/evaluate"
+	max_time=$(awk -v ms="$(cfg timeout_ms 1500)" 'BEGIN { printf "%.3f", ms / 1000 }')
+	esc="${KEY//\\/\\\\}"
+	esc="${esc//\"/\\\"}"
+	meta=$(printf 'header = "Authorization: Bearer %s"\n' "$esc" |
+		curl --silent --max-time "$max_time" --config - \
+			--request POST \
+			--header 'Content-Type: application/json' \
+			--data-binary "@$body" \
+			--output "$resp" \
+			--write-out '%{http_code} %{time_total}' \
+			"$url" 2>/dev/null)
+	CURL_RC=$?
+	HTTP_CODE=$(printf '%s' "$meta" | awk '{ print ($1 ~ /^[0-9]+$/) ? $1 + 0 : 0 }')
+	LATENCY_MS=$(printf '%s' "$meta" | awk '{ gsub(",", ".", $2); printf "%d", $2 * 1000 }')
+	HTTP_CODE="${HTTP_CODE:-0}"
+	LATENCY_MS="${LATENCY_MS:-0}"
+}
+
+# --- subcommand: <name> ----------------------------------------------------------
+
+cmd_judge() {
+	local name="$1" vault="" gate="" format="json" subject=""
+	shift
+	while [ $# -gt 0 ]; do
+		case "$1" in
+		--vault | --gate | --format | --subject)
+			[ $# -ge 2 ] || usage_err "$1 needs a value"
+			case "$1" in
+			--vault) vault="$2" ;;
+			--gate) gate="$2" ;;
+			--format) format="$2" ;;
+			--subject) subject="$2" ;;
+			esac
+			shift 2
+			;;
+		*) usage_err "unknown argument: $1" ;;
+		esac
+	done
+	valid_name "$name" || usage_err "invalid judge name: $name"
+	case "$format" in
+	json | tsv) ;;
+	*) usage_err "--format must be json or tsv" ;;
+	esac
+
+	local jfile problems gate_type
+	jfile=$(judge_path "$name") || usage_err "no such judge: $name"
+	command -v jq >/dev/null 2>&1 || unavailable "jq is not installed"
+	problems=$(judge_problems "$jfile")
+	[ -z "$problems" ] || unavailable "judge file $jfile is invalid: $(printf '%s' "$problems" | head -n 1)"
+	if [ -n "$gate" ]; then
+		gate_type=$(jq -r --arg q "$gate" '.questions[$q].type // ""' "$jfile")
+		case "$gate_type" in
+		boolean | choice) ;;
+		"") usage_err "--gate: judge $name has no question named $gate" ;;
+		*) usage_err "--gate: question $gate is a $gate_type question; only boolean and choice can gate" ;;
+		esac
+	fi
+
+	# Egress gate. Everything below this block may touch the network; nothing
+	# above it does. Order matters: consent is checked before the key is read.
+	load_config || unavailable "config not available (is VAULTMEM_BIN set?)"
+	[ "$(cfg enabled false)" = "true" ] || unavailable "[ext.judge] enabled is not true"
+	if [ -z "$vault" ]; then
+		vault=$(resolve_vault) || unavailable "no vault id resolved; pass --vault <id>"
+	fi
+	[ "$(cfg_raw "vault.$vault.judge")" = "true" ] ||
+		unavailable "vault $vault has not consented to egress (judge = true)"
+
+	local base_url timeout_ms zdr
+	base_url=$(cfg base_url "https://ai-gateway.vercel.sh")
+	base_url_ok "$base_url" || unavailable "base_url must be https (or a loopback http host)"
+	timeout_ms=$(cfg timeout_ms 1500)
+	case "$timeout_ms" in
+	"" | *[!0-9]* | 0) unavailable "timeout_ms must be a positive integer" ;;
+	esac
+	zdr=$(cfg zdr true)
+	[ "$zdr" = "false" ] || zdr=true
+	command -v curl >/dev/null 2>&1 || unavailable "curl is not installed"
+	load_key || unavailable "$KEY_ERR"
+
+	mktmp || unavailable "cannot create a temp dir"
+	local raw="$TMPD/state.raw" state="$TMPD/state" body="$TMPD/body.json" resp="$TMPD/resp.json"
+	local max_bytes bias size truncated=false
+	cat >"$raw"
+	max_bytes=$(jq -r '.max_state_bytes // 24000' "$jfile")
+	bias=$(jq -r '.truncate // "head"' "$jfile")
+	size=$(wc -c <"$raw" | tr -d '[:space:]')
+	if [ "$size" -gt "$max_bytes" ]; then
+		truncated=true
+		if [ "$bias" = "tail" ]; then
+			tail -c "$max_bytes" "$raw" >"$state"
+		else
+			head -c "$max_bytes" "$raw" >"$state"
+		fi
+	else
+		mv "$raw" "$state"
+	fi
+
+	jq -n --rawfile state "$state" --slurpfile judge "$jfile" \
+		--arg model "$(cfg model "typesafe-ai/jev")" --arg gate "$gate" --argjson zdr "$zdr" '
+		{ model: $model,
+		  state: $state,
+		  questions: (if $gate == "" then $judge[0].questions
+		              else { ($gate): $judge[0].questions[$gate] } end) }
+		+ (if $zdr then { providerOptions: { gateway: { zeroDataRetention: true } } } else {} end)
+		' >"$body" || unavailable "could not build the request body"
+
+	gateway_post "$body" "$resp"
+
+	local id ts sha log_on err_type="" err_msg="" reason=""
+	ts=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+	sha=$(sha256_file "$state") || sha=""
+	id="$(date -u +%Y%m%dT%H%M%SZ)-$(printf '%s%s%s' "$sha" "$$" "$RANDOM" | cksum | awk '{ printf "%04x", $1 % 65536 }')"
+	log_on=$(cfg log true)
+
+	if [ "$CURL_RC" -ne 0 ]; then
+		err_type="transport_error"
+		err_msg="curl exit $CURL_RC"
+		[ "$CURL_RC" -eq 28 ] && err_msg="timeout after ${timeout_ms}ms (curl exit 28)"
+		reason="$err_msg"
+	elif [ "$HTTP_CODE" -lt 200 ] || [ "$HTTP_CODE" -ge 300 ]; then
+		err_type=$(jq -r '.error.type // "http_error" | tostring' "$resp" 2>/dev/null) || err_type="http_error"
+		err_msg=$(jq -r '.error.message // "" | tostring' "$resp" 2>/dev/null) || err_msg=""
+		err_type="${err_type:-http_error}"
+		if jq -e '(.error.param | objects | .name) == "ZdrUnauthorizedError"' "$resp" >/dev/null 2>&1; then
+			reason="HTTP $HTTP_CODE $err_type: the gateway refused zero data retention; not retried without it"
+		else
+			reason="HTTP $HTTP_CODE $err_type: $err_msg"
+		fi
+	elif ! jq -e --arg gate "$gate" '
+		(.answers | type) == "object" and (.answers | length) > 0
+		and (.answers | to_entries | all(
+		  (.value | type) == "object" and
+		  (if .value.type == "boolean" then (.value.probability | type) == "number"
+		   elif .value.type == "choice" then (.value.choice | type) == "string"
+		     and (.value.probabilities | type) == "object"
+		   elif .value.type == "score" then (.value.score | type) == "number"
+		   else false end)))
+		and ($gate == "" or (.answers | has($gate)))' "$resp" >/dev/null 2>&1; then
+		err_type="bad_response"
+		err_msg="response body is not a valid evaluate response"
+		reason="HTTP $HTTP_CODE: $err_msg"
+	fi
+
+	if [ -n "$err_type" ]; then
+		[ -n "$KEY" ] && err_msg="${err_msg//"$KEY"/[redacted]}"
+		if [ "$log_on" = "true" ]; then
+			log_append "$(jq -nc --arg id "$id" --arg ts "$ts" --arg judge "$name" --arg vault "$vault" \
+				--arg subject "$subject" --arg model "$(cfg model "typesafe-ai/jev")" --arg sha "$sha" \
+				--argjson truncated "$truncated" --argjson latency "$LATENCY_MS" --argjson http "$HTTP_CODE" \
+				--arg etype "$err_type" --arg emsg "$err_msg" '
+				{ id: $id, ts: $ts, judge: $judge, vault: $vault,
+				  subject: (if $subject == "" then null else $subject end),
+				  model: $model, state_sha256: $sha, truncated: $truncated, answers: null,
+				  input_tokens: null, cost: null, market_cost: null,
+				  latency_ms: $latency, http: $http, feedback: null,
+				  error: { type: $etype, message: $emsg } }')"
+		fi
+		unavailable "$reason"
+	fi
+
+	# Verdict: thresholds come from the judge file. min_confidence compares the
+	# top choice's probability, not the gateway's `confidence` field.
+	local verdict=""
+	if [ -n "$gate" ]; then
+		verdict=$(jq -r --arg q "$gate" --slurpfile judge "$jfile" '
+			($judge[0].thresholds[$q] // {}) as $t
+			| .answers[$q] as $a
+			| if $a.type == "boolean" then
+			    (if $a.probability >= ($t.yes // 0.85) then "yes"
+			     elif $a.probability <= ($t.no // 0.15) then "no"
+			     else "abstain" end)
+			  elif $a.type == "choice" then
+			    (if ($a.probabilities[$a.choice] // 0) >= ($t.min_confidence // 0.6)
+			     then "yes" else "abstain" end)
+			  else "abstain" end' "$resp") || verdict="abstain"
+	fi
+
+	if [ "$log_on" = "true" ]; then
+		log_append "$(jq -c --arg id "$id" --arg ts "$ts" --arg judge "$name" --arg vault "$vault" \
+			--arg subject "$subject" --arg model "$(cfg model "typesafe-ai/jev")" --arg sha "$sha" \
+			--argjson truncated "$truncated" --argjson latency "$LATENCY_MS" --argjson http "$HTTP_CODE" '
+			{ id: $id, ts: $ts, judge: $judge, vault: $vault,
+			  subject: (if $subject == "" then null else $subject end),
+			  model: (.model // $model), state_sha256: $sha, truncated: $truncated,
+			  answers: .answers,
+			  input_tokens: (.usage.inputTokens // null),
+			  cost: (.providerMetadata.gateway.cost // null),
+			  market_cost: (.providerMetadata.gateway.marketCost // null),
+			  latency_ms: $latency, http: $http, feedback: null }' "$resp")"
+	fi
+
+	if [ "$format" = "tsv" ]; then
+		jq -r --slurpfile judge "$jfile" '
+			.answers | to_entries[] | .key as $q | .value as $a
+			| ($judge[0].thresholds[$q] // {}) as $t
+			| if $a.type == "boolean" then
+			    [$q, "boolean",
+			     (if $a.probability >= ($t.yes // 0.85) then "yes"
+			      elif $a.probability <= ($t.no // 0.15) then "no" else "abstain" end),
+			     $a.probability]
+			  elif $a.type == "choice" then [$q, "choice", $a.choice, ($a.probabilities[$a.choice] // "")]
+			  else [$q, "score", $a.score, ""] end
+			| @tsv' "$resp"
+	else
+		jq -c --arg id "$id" --arg judge "$name" --arg gate "$gate" --arg verdict "$verdict" '
+			{ id: $id, judge: $judge, answers: .answers }
+			+ (if $gate == "" then {} else { gate: { question: $gate, verdict: $verdict } } end)' "$resp"
+	fi
+
+	case "$verdict" in
+	"" | yes) exit 0 ;;
+	no) exit 1 ;;
+	*) exit 2 ;;
+	esac
+}
+
+# A standalone call resolves its vault with `vaultmem which`. A low-confidence
+# guess (the default-vault fallback) is NOT consent to send: treat as unresolved.
+resolve_vault() {
+	local bin id err
+	bin=$(vaultmem_bin) || return 1
+	[ -n "$bin" ] || return 1
+	mktmp || return 1
+	err="$TMPD/which.err"
+	id=$("$bin" which 2>"$err") || return 1
+	[ -s "$err" ] && return 1
+	[ -n "$id" ] || return 1
+	printf '%s\n' "$id"
+}
+
+# --- subcommand: list ------------------------------------------------------------
+
+cmd_list() {
+	[ $# -eq 0 ] || usage_err "list takes no arguments"
+	command -v jq >/dev/null 2>&1 || unavailable "jq is not installed"
+	local f name src desc seen=$'\n'
+	for f in "$USER_DIR"/*.json "$SHIPPED_DIR"/*.json; do
+		[ -f "$f" ] || continue
+		name=$(basename "$f" .json)
+		case "$seen" in
+		*$'\n'"$name"$'\n'*) continue ;;
+		esac
+		seen="$seen$name"$'\n'
+		src=shipped
+		[ "$(dirname "$f")" = "$USER_DIR" ] && src=user
+		desc=$(jq -r '.description // "" | tostring' "$f" 2>/dev/null) || desc="(does not parse)"
+		printf '%s\t%s\t%s\n' "$name" "$src" "$desc"
+	done | sort
+}
+
+# --- subcommand: log -------------------------------------------------------------
+
+cmd_log() {
+	local n=20
+	while [ $# -gt 0 ]; do
+		case "$1" in
+		-n)
+			[ $# -ge 2 ] || usage_err "-n needs a value"
+			n="$2"
+			shift 2
+			;;
+		*) usage_err "unknown argument: $1" ;;
+		esac
+	done
+	case "$n" in
+	"" | *[!0-9]*) usage_err "-n must be a non-negative integer" ;;
+	esac
+	# Oldest first: the rotated generation, then the live file, so a tail spans
+	# a rotation.
+	local f files=()
+	for f in "$LOG_FILE.1" "$LOG_FILE"; do
+		[ -f "$f" ] && files+=("$f")
+	done
+	[ "${#files[@]}" -gt 0 ] || return 0
+	cat "${files[@]}" | tail -n "$n"
+}
+
+# --- subcommand: doctor ----------------------------------------------------------
+
+DOC_FAIL=0
+doc_ok() { printf 'ok     %s\n' "$1"; }
+doc_note() { printf 'note   %s\n' "$1"; }
+doc_err() {
+	local msg="$1"
+	[ -n "$KEY" ] && msg="${msg//"$KEY"/[redacted]}"
+	printf 'ERROR  %s\n' "$msg"
+	DOC_FAIL=1
+}
+
+cmd_doctor() {
+	local live=false
+	while [ $# -gt 0 ]; do
+		case "$1" in
+		--live) live=true ;;
+		*) usage_err "unknown argument: $1" ;;
+		esac
+		shift
+	done
+
+	local tool
+	for tool in curl jq; do
+		if command -v "$tool" >/dev/null 2>&1; then doc_ok "$tool found"; else doc_err "$tool is not installed"; fi
+	done
+	command -v jq >/dev/null 2>&1 || exit 1
+
+	local enabled=false
+	if load_config; then
+		doc_ok "config read from \`$(vaultmem_bin) judge config\`"
+		doctor_config
+		enabled=$(cfg enabled false)
+	else
+		doc_err "config not available: \`vaultmem judge config\` failed (is VAULTMEM_BIN set?)"
+	fi
+
+	# A missing key only matters once the extension is switched on. A key file
+	# that is too open is an exposed secret either way.
+	if load_key; then
+		doc_ok "key present (from $KEY_SRC)"
+	else
+		case "$KEY_ERR" in
+		*"wider than 600"*) doc_err "$KEY_ERR" ;;
+		*) if [ "$enabled" = "true" ]; then doc_err "$KEY_ERR"; else doc_note "$KEY_ERR"; fi ;;
+		esac
+	fi
+
+	local f problems problem count=0
+	for f in "$SHIPPED_DIR"/*.json "$USER_DIR"/*.json; do
+		[ -f "$f" ] || continue
+		count=$((count + 1))
+		problems=$(judge_problems "$f")
+		if [ -z "$problems" ]; then
+			doc_ok "judge file $f"
+		else
+			while IFS= read -r problem; do doc_err "judge file $f: $problem"; done <<<"$problems"
+		fi
+	done
+	[ "$count" -gt 0 ] || doc_err "no judge files found in $SHIPPED_DIR"
+
+	if [ "$live" = "true" ]; then
+		if [ "$DOC_FAIL" -ne 0 ]; then
+			doc_err "--live skipped: fix the errors above first"
+		elif [ "$enabled" != "true" ]; then
+			doc_err "--live needs [ext.judge] enabled = true"
+		else
+			doctor_live
+		fi
+	fi
+	exit "$DOC_FAIL"
+}
+
+# Validates [ext.judge] key names and value shapes. Core lint checks TOML shape
+# only; key names are this extension's to own.
+doctor_config() {
+	local line key val known
+	while IFS= read -r line; do
+		case "$line" in
+		ext.judge.*=*) ;;
+		*) continue ;;
+		esac
+		key="${line%%=*}"
+		key="${key#ext.judge.}"
+		val="${line#*=}"
+		known=false
+		case " $KNOWN_KEYS " in
+		*" $key "*) known=true ;;
+		esac
+		if [ "$known" != "true" ]; then
+			doc_err "[ext.judge] unknown key: $key"
+			continue
+		fi
+		case "$key" in
+		enabled | zdr | log | rerank)
+			case "$val" in
+			true | false) ;;
+			*) doc_err "[ext.judge] $key must be true or false (got: $val)" ;;
+			esac
+			;;
+		timeout_ms)
+			case "$val" in
+			"" | *[!0-9]* | 0) doc_err "[ext.judge] timeout_ms must be a positive integer (got: $val)" ;;
+			esac
+			;;
+		base_url)
+			base_url_ok "$val" || doc_err "[ext.judge] base_url must be https, or http on a loopback host (got: $val)"
+			;;
+		model | key_file)
+			[ -n "$val" ] || doc_err "[ext.judge] $key must not be empty"
+			;;
+		hook_judges)
+			case "$val" in
+			*[!A-Za-z0-9._,-]*) doc_err "[ext.judge] hook_judges must be a comma list of judge names (got: $val)" ;;
+			esac
+			;;
+		esac
+	done <<<"$CFG"
+	[ "$DOC_FAIL" -eq 0 ] && doc_ok "[ext.judge] keys valid (enabled=$(cfg enabled false), zdr=$(cfg zdr true))"
+	local consenting
+	consenting=$(printf '%s\n' "$CFG" | awk -F= '/^vault\..*\.judge=true$/ { sub(/^vault\./, "", $1); sub(/\.judge$/, "", $1); printf "%s%s", s, $1; s = "," }')
+	doc_note "vaults with judge = true: ${consenting:-none}"
+}
+
+# One 1-question call with a fixed synthetic state. No vault content is sent,
+# so no vault consent is involved; `enabled` and a key are still required.
+doctor_live() {
+	local jfile zdr body resp released
+	jfile=$(judge_path smoke) || {
+		doc_err "--live: smoke judge file not found"
+		return
+	}
+	mktmp || {
+		doc_err "--live: cannot create a temp dir"
+		return
+	}
+	body="$TMPD/live-body.json"
+	resp="$TMPD/live-resp.json"
+	zdr=$(cfg zdr true)
+	[ "$zdr" = "false" ] || zdr=true
+	jq -n --arg state "$LIVE_STATE" --slurpfile judge "$jfile" \
+		--arg model "$(cfg model "typesafe-ai/jev")" --argjson zdr "$zdr" '
+		{ model: $model, state: $state, questions: $judge[0].questions }
+		+ (if $zdr then { providerOptions: { gateway: { zeroDataRetention: true } } } else {} end)
+		' >"$body"
+	gateway_post "$body" "$resp"
+	if [ "$CURL_RC" -ne 0 ]; then
+		doc_err "--live: transport failure (curl exit $CURL_RC)"
+	elif [ "$HTTP_CODE" -ge 200 ] && [ "$HTTP_CODE" -lt 300 ] && jq -e '.answers | type == "object"' "$resp" >/dev/null 2>&1; then
+		doc_ok "--live: HTTP $HTTP_CODE in ${LATENCY_MS}ms, model $(jq -r '.model // "?"' "$resp"), answers $(jq -c '.answers' "$resp")"
+	else
+		doc_err "--live: HTTP $HTTP_CODE $(jq -r '"\(.error.type // "bad_response"): \(.error.message // "unparseable body")"' "$resp" 2>/dev/null || printf 'bad_response: unparseable body')"
+	fi
+	# The gateway reports no versioned model id per call; the models listing is
+	# the only version signal. Needs no auth, so the key is not sent.
+	released=$(curl --silent --max-time 5 "$(cfg base_url "https://ai-gateway.vercel.sh")/v1/models" 2>/dev/null |
+		jq -r --arg m "$(cfg model "typesafe-ai/jev")" '.data[]? | select(.id == $m) | .released // empty' 2>/dev/null)
+	[ -n "$released" ] && doc_note "--live: model released (epoch) $released"
+}
+
+# --- dispatch --------------------------------------------------------------------
+
+[ $# -gt 0 ] || usage_err "missing judge name or subcommand"
+case "$1" in
+-h | --help)
+	sed -n '2,24p' "$0" | sed 's/^# \{0,1\}//'
+	exit 0
+	;;
+list)
+	shift
+	cmd_list "$@"
+	;;
+doctor)
+	shift
+	cmd_doctor "$@"
+	;;
+log)
+	shift
+	cmd_log "$@"
+	;;
+feedback | calibration | bench) usage_err "$1 is not implemented yet (a later phase)" ;;
+-*) usage_err "unknown option: $1" ;;
+*) cmd_judge "$@" ;;
+esac

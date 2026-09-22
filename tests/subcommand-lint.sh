@@ -52,7 +52,8 @@ is_known() {
 #   init    human one-time vault scaffolding, run before any agent uses the tool
 #   nudge   Stop-hook surface, invoked by the harness and never by an agent
 #   verify  PostToolUse-hook surface, invoked by the harness and never by an agent
-ALLOWED="|init|nudge|verify|"
+#   judge   optional extension shim; the skills that teach it are generated upstream and sync in later
+ALLOWED="|init|nudge|verify|judge|"
 
 if [ ! -d "$SKILLS" ]; then
 	printf 'subcommand-lint: no skills/ directory — nothing to check (ok).\n'

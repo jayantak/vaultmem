@@ -1,0 +1,19 @@
+{
+  "version": 1,
+  "description": "Smoke test: one boolean question. Used by the tests and by `doctor --live`.",
+  "max_state_bytes": 4000,
+  "truncate": "head",
+  "questions": {
+    "failed": {
+      "type": "boolean",
+      "instructions": "The text reports that something failed.",
+      "criteria": {
+        "true": "The text says a build, test, command, or task failed.",
+        "false": "The text reports success, or does not mention an outcome."
+      }
+    }
+  },
+  "thresholds": {
+    "failed": { "yes": 0.85, "no": 0.15 }
+  }
+}

@@ -22,9 +22,9 @@ jobs:
             https://github.com/mvdan/sh/releases/download/v3.10.0/shfmt_v3.10.0_linux_amd64
           sudo chmod +x /usr/local/bin/shfmt
       - name: shellcheck
-        run: shellcheck vaultmem install.sh tests/subcommand-lint.sh tests/bash32-lint.sh
+        run: shellcheck vaultmem install.sh tests/subcommand-lint.sh tests/bash32-lint.sh ext/judge/vaultmem-judge
       - name: shfmt --diff
-        run: shfmt --diff vaultmem install.sh tests/subcommand-lint.sh tests/bash32-lint.sh
+        run: shfmt --diff vaultmem install.sh tests/subcommand-lint.sh tests/bash32-lint.sh ext/judge/vaultmem-judge
       # shellcheck has no bash-version target (only a dialect), so it cannot see
       # bash-4-only constructs. This names them explicitly; the bash-3.2 bats job
       # below is the broader net.
@@ -40,33 +40,58 @@ jobs:
         os: [ubuntu-latest, macos-latest]
     steps:
       - uses: actions/checkout@v4
-      - name: Install ripgrep + bats (Linux)
+      # jq is for the judge extension and its tests only; core needs neither
+      # jq nor curl.
+      - name: Install ripgrep + bats + jq (Linux)
         if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y ripgrep bats
-      - name: Install ripgrep + bats (macOS)
+        run: sudo apt-get update && sudo apt-get install -y ripgrep bats jq
+      - name: Install ripgrep + bats + jq (macOS)
         if: runner.os == 'macOS'
-        run: brew install ripgrep bats-core
+        run: brew install ripgrep bats-core jq
       - name: Run tests
         run: bats tests/vaultmem.bats
+      - name: Run judge extension tests
+        run: bats tests/judge.bats
 
   bash32:
     name: bats under macOS system bash 3.2
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Install ripgrep + bats
-        run: brew install ripgrep bats-core
+      - name: Install ripgrep + bats + jq
+        run: brew install ripgrep bats-core jq
       # The matrix job above runs whatever bash bats picks, which on macOS is
       # Homebrew's bash 5 (pulled in by bats-core) — so it does NOT exercise the
       # 3.2 floor. /bin/bash is the shell real users and the SessionStart hooks
       # get. A bash-4 construct that only breaks a specific code path (rather
       # than erroring at load time) is invisible to every other job.
-      - name: Confirm /bin/bash really is 3.2
-        run: /bin/bash --version | head -1 | grep -q 'version 3\.2' || exit 1
+      #
+      # `BASH=/bin/bash bats …` does NOT do this: bash resets $BASH at startup,
+      # so bats and every `#!/usr/bin/env bash` under it kept running Homebrew
+      # bash 5 and this job passed vacuously. What selects the shell is PATH: a
+      # `bash` that is /bin/bash goes first, for every later step.
+      - name: Put /bin/bash first on PATH as `bash`
+        run: |
+          mkdir -p "$RUNNER_TEMP/bash32"
+          ln -sf /bin/bash "$RUNNER_TEMP/bash32/bash"
+          echo "$RUNNER_TEMP/bash32" >>"$GITHUB_PATH"
+      # Fails the job if the PATH trick ever stops working (a runner image that
+      # ships a newer /bin/bash, a step that reorders PATH), instead of letting
+      # the suites below pass on the wrong shell.
+      - name: Assert `bash` on PATH is 3.2
+        run: |
+          command -v bash
+          bash --version | head -1
+          bash --version | head -1 | grep -q 'version 3\.2\.' || exit 1
+          env bash -c 'case "$BASH_VERSION" in 3.2.*) ;; *) echo "env bash is $BASH_VERSION" >&2; exit 1 ;; esac'
       - name: Run tests under bash 3.2
+        run: bats tests/vaultmem.bats </dev/null
+      # VAULTMEM_TEST_BASH also makes the suite invoke the extension with
+      # /bin/bash explicitly, independent of PATH.
+      - name: Run judge extension tests under bash 3.2
         env:
-          BASH: /bin/bash
-        run: bats tests/vaultmem.bats
+          VAULTMEM_TEST_BASH: /bin/bash
+        run: bats tests/judge.bats </dev/null
       - name: Run the shipped lints under bash 3.2
         run: |
           /bin/bash ./tests/subcommand-lint.sh

@@ -1,0 +1,15 @@
+{
+  "version": 1,
+  "description": "Test judge: one boolean, one choice, one score. Tail-biased, tiny state budget.",
+  "max_state_bytes": 10,
+  "truncate": "tail",
+  "questions": {
+    "failed": { "type": "boolean", "instructions": "The text reports a failure.", "criteria": { "true": "It failed.", "false": "It did not fail." } },
+    "outcome": { "type": "choice", "instructions": "Pick the outcome.", "criteria": { "passed": "It passed.", "failed": "It failed.", "skipped": "It was skipped." } },
+    "severity": { "type": "score", "instructions": "How severe is it?", "criteria": ["low: cosmetic", "mid: degraded", "high: broken"] }
+  },
+  "thresholds": {
+    "failed": { "yes": 0.9, "no": 0.1 },
+    "outcome": { "min_confidence": 0.6 }
+  }
+}

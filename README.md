@@ -317,6 +317,24 @@ overrides: `VAULTMEM_COLD_DAYS` beats `cold_days`, `VAULTMEM_BLOAT_LINES` beats
 `VAULTMEM_STALE_ACTIVE_DAYS` (default 7, stale-active sessions) and
 `VAULTMEM_TASK_STALE_DAYS` (default 14, stale backlog).
 
+## Judge extension (optional)
+
+`vaultmem judge` asks a remote evaluation model typed questions about vault
+content: yes/no, one-of-N, and rubric scores. It is an extension, not part of
+the script: `./vaultmem` opens no socket and gains no dependency, and all HTTP
+lives in `ext/judge/` (which needs `curl` and `jq`). It is off until you set
+`[ext.judge] enabled = true`, and a vault's content leaves the machine only when
+that vault sets `judge = true`. Absent, disabled, or offline, every command
+behaves as it does without it.
+
+```bash
+./install.sh --ext judge     # link ext/judge/ into ${XDG_DATA_HOME:-~/.local/share}/vaultmem/ext/
+vaultmem judge config        # what core parsed: [ext.judge] keys + per-vault consent
+```
+
+Setup, the egress rules, judge files, and exit codes:
+**[docs/judge.md](docs/judge.md)**. Config keys: [docs/config.md](docs/config.md).
+
 ## Agent skills
 
 vaultmem bundles four agent skills in `skills/`, split by the **job the agent is
