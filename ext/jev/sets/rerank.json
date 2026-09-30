@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "description": "Used by `judge rerank` (search --rerank, bench): how well each search candidate answers the query. `relevance` is the template for the per-candidate score questions.",
+  "description": "Used by `jev rerank` (search --rerank, bench): how well each search candidate answers the query. `relevance` is the template for the per-candidate score questions.",
   "max_state_bytes": 32000,
   "truncate": "head",
   "questions": {

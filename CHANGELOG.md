@@ -6,6 +6,40 @@ This project is 0.x — see [Semantic Versioning §4](https://semver.org/spec/v2
 for what that implies about stability: the CLI surface and config schema can
 still change between 0.MINOR releases.
 
+## [Unreleased]
+
+### Changed
+- **BREAKING:** every `judge` surface is renamed to `jev`, and features are named
+  by what they do rather than by the machinery behind them. The old names still
+  work for one major release, each printing one deprecation line to stderr that
+  names its replacement; hook paths stay silent on stdout. `vaultmem doctor`
+  reports a deprecated config key as a `WARN` without changing its exit code.
+
+| Before | After | Migration |
+|---|---|---|
+| `groom --judge` | `groom --triage` | flag alias, one major |
+| `doctor --judge` | `doctor --drift` | flag alias, one major |
+| `nudge --judge` | `nudge` | the flag is gone; consent is `nudge` in `[ext.jev] hooks`. The flag is accepted and ignored for one major |
+| `vaultmem judge <sub>` | `vaultmem jev <sub>` | subcommand alias, one major |
+| `vaultmem judge <name>` | `vaultmem jev ask <name>` | the bare-name form is accepted for one major |
+| `vaultmem judge config` | `vaultmem jev config` | frozen contract, renamed keys |
+| `[ext.judge]` | `[ext.jev]` | both read; `[ext.jev]` wins per key |
+| `[vault.<id>] judge` | `[vault.<id>] jev` | both read; `jev` wins |
+| `hook_judges` | `hooks` | both read; `hooks` wins |
+| `jev calibration --judge` | `jev calibration --set` | flag alias, one major |
+| `ext/judge/vaultmem-judge` | `ext/jev/vaultmem-jev` | `./install.sh --ext jev` |
+| `ext/judge/judges/*.json` | `ext/jev/sets/*.json` | shipped, no action |
+| `~/.config/vaultmem/judges/` | `~/.config/vaultmem/jev/` | **not migrated** — move your override files by hand |
+| `~/.local/state/vaultmem/judge.jsonl` | `~/.local/state/vaultmem/jev.jsonl` | **not migrated** — the old log is left in place. `log`, `feedback`, and `calibration` read only the new path; a row's set name moved from `judge` to `set`, and both are still read |
+| `VAULTMEM_JUDGE_LOG_MAX_BYTES` | `VAULTMEM_JEV_LOG_MAX_BYTES` | no alias |
+| `docs/judge.md` | `docs/jev.md` | — |
+| `docs/design/judge-extension.md` | `docs/design/jev-extension.md` | — |
+
+### Added
+- `docs/jev.md` § Contract — the Jev wire protocol, verdict rules, and
+  question-set file shape as the canonical reference for another tool
+  implementing Jev independently.
+
 ## [0.3.0] - 2026-07-24
 
 ### Changed

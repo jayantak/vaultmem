@@ -4,9 +4,9 @@
   "questions": {
     "moc": {
       "type": "choice",
-      "instructions": "Choose the Map of Content whose domain best matches the subject of the summary. Judge by the topic the summary describes.",
+      "instructions": "Choose the Map of Content whose domain best matches the subject of the summary. Decide by the topic the summary describes.",
       "criteria": {
-        "MOC - Agent Memory": "Vault-as-memory tooling, hooks, and the judge.",
+        "MOC - Agent Memory": "Vault-as-memory tooling, hooks, and Jev.",
         "MOC - Home Lab": "Servers, networking, and the NAS."
       }
     }

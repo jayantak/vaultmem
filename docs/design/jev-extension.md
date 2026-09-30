@@ -1,11 +1,11 @@
-# Design: the `judge` extension (typed decisions via Vercel AI Gateway)
+# Design: the `jev` extension (typed decisions via Vercel AI Gateway)
 
 Status: **shipped. All phases landed; see section 13.**
 Audience: an agent picking this up cold in this repo. Read `AGENTS.md` first.
 
 ## 1. Summary
 
-Add an optional extension, `judge`, that lets vaultmem ask an evaluation model
+Add an optional extension, `jev`, that lets vaultmem ask an evaluation model
 (TypeSafe's Jev, reached through Vercel AI Gateway) typed questions about vault
 content: yes/no probabilities, one-of-N choices, and rubric scores. Core
 commands consult it at defined points (`groom`, `nudge`, search, `doctor`,
@@ -24,12 +24,12 @@ Naming: this repo already uses "plugin" for the Claude Code plugin
   network code and no new dependency.
 - This **amends the roadmap non-item** "embeddings / vector / hybrid / rerank /
   LLM query expansion". The amendment is narrow: a stateless, opt-in, remote
-  judge with no local models, no daemon, no index, no build step. Embeddings,
+  evaluation with no local models, no daemon, no index, no build step. Embeddings,
   vector stores, and any maintained index stay rejected.
 
 ## 3. Ethos contract (hard constraints)
 
-1. `./vaultmem` never opens a socket. All HTTP lives in `ext/judge/vaultmem-judge`.
+1. `./vaultmem` never opens a socket. All HTTP lives in `ext/jev/vaultmem-jev`.
 2. Core dependencies are unchanged. The extension may require `curl` and `jq`.
 3. bash 3.2 floor applies to the extension. Add it to `tests/bash32-lint.sh`,
    `shellcheck`, and `shfmt --diff` in CI.
@@ -171,7 +171,7 @@ question 4, since answered: the owner sets `zdr = false`). The model entry in
   `routing.canonicalSlug: "typesafe-ai/jev"`. No versioned id appears anywhere
   in the response.
 - So model drift is invisible per call. `release_date` from the models listing
-  is the only version signal: `judge doctor --live` and `bench` record it, and
+  is the only version signal: `jev doctor --live` and `bench` record it, and
   the bench (section 10) is the drift detector.
 
 **Errors.** Envelope as corrected above. `param` is `null`, an object, or
@@ -205,23 +205,23 @@ Not checked: calibration, rate limits, and latency with state near
 
 ```
 vaultmem (core, unchanged deps)
-  ├─ `judge` subcommand ── thin exec shim ──► ext/judge/vaultmem-judge
-  └─ _judge <name>  (internal helper used by groom, nudge, search, doctor)
+  ├─ `jev` subcommand ── thin exec shim ──► ext/jev/vaultmem-jev
+  └─ _jev <name>  (internal helper used by groom, nudge, search, doctor)
         returns 3 "unavailable" instantly when the extension is absent/disabled
 
-ext/judge/vaultmem-judge   (bash 3.2, curl + jq)
-  ├─ builds request from a judge file + state on stdin
+ext/jev/vaultmem-jev   (bash 3.2, curl + jq)
+  ├─ builds request from a set file + state on stdin
   ├─ enforces egress policy BEFORE any network call
   ├─ calls the gateway with a hard timeout
   ├─ normalizes the response, applies thresholds, sets the exit code
   └─ appends to the decision log
-ext/judge/judges/*.json    shipped judge definitions (user overrides win)
+ext/jev/sets/*.json    shipped set definitions (user overrides win)
 ```
 
 ### 5.1 Core changes (keep them small)
 
-- Dispatch: add `judge) _ext_exec judge "${ARGS[@]:1}" ;;`. Every new
-  subcommand steals a word from the default search fall-through. `judge` is the
+- Dispatch: add `jev) _ext_exec jev "${ARGS[@]:1}" ;;`. Every new
+  subcommand steals a word from the default search fall-through. `jev` is the
   only word this design takes. Do **not** add git-style "any `vaultmem-<x>` on
   PATH becomes a subcommand": with search as the default case that is ambiguous.
 - `_ext_exec <name> [args]`: resolve the executable in order:
@@ -229,39 +229,39 @@ ext/judge/judges/*.json    shipped judge definitions (user overrides win)
   `${XDG_DATA_HOME:-~/.local/share}/vaultmem/ext/<name>/vaultmem-<name>`, then
   `<dir of $0 after symlink resolution>/ext/<name>/vaultmem-<name>`. No PATH
   lookup. Not found: print one line to stderr, exit 3.
-- `_judge <judge-name>`: internal. Reads state on stdin. Returns 3 without
-  forking when `[ext.judge] enabled` is not `true`. Otherwise runs the
+- `_jev <set-name>`: internal. Reads state on stdin. Returns 3 without
+  forking when `[ext.jev] enabled` is not `true`. Otherwise runs the
   extension with `--vault <id>`. Callers treat any non-0/1/2 as "no opinion".
 - Environment passed to the extension: `VAULTMEM_BIN` (absolute path to the
   running script), `VAULTMEM_CONFIG`. The extension reads vault data only by
   calling `"$VAULTMEM_BIN"` (`--format json`, `cat --section`, `bookmark`,
   `vaults`). It never parses the registry itself.
 - Config (section 6): `_parse_config` / `_lint_config` accept `[ext.<name>]`
-  headers and one new `[vault.<id>]` key, `judge`. Update `docs/config.md` and
+  headers and one new `[vault.<id>]` key, `jev`. Update `docs/config.md` and
   the `doctor hard-errors on …` bats tests in the same change.
-- A read-only `vaultmem judge config` is served **by the shim in core**, which
-  prints the parsed `[ext.judge]` keys plus each vault's `judge` flag as
+- A read-only `vaultmem jev config` is served **by the shim in core**, which
+  prints the parsed `[ext.jev]` keys plus each vault's `jev` flag as
   `key=value` lines. This is how the extension gets config without a second
   TOML parser. Exact format, one per line, values unquoted, defaults filled in:
-  `ext.judge.<key>=<value>` then `vault.<id>.judge=true|false` for every
+  `ext.jev.<key>=<value>` then `vault.<id>.jev=true|false` for every
   registry vault. This format is the core/extension contract; extension tests
   stub `VAULTMEM_BIN` with a script that prints it, so they never depend on
   core's implementation.
-- Usage block: add the `judge` lines and **bump both `sed -n '4,Np'` ranges**;
+- Usage block: add the `jev` lines and **bump both `sed -n '4,Np'` ranges**;
   keep the "usage output ends with the final usage comment line" test pointed
   at the real last line.
-- `install.sh --ext judge`: copy or symlink `ext/judge/` into the XDG data dir.
+- `install.sh --ext jev`: copy or symlink `ext/jev/` into the XDG data dir.
 
 ### 5.2 Extension CLI
 
 ```
-vaultmem judge <name> [--vault <id>] [--gate <question>] [--format json|tsv]   # state on stdin
-vaultmem judge list                  # judges available (shipped + user)
-vaultmem judge doctor [--live]       # key present, config valid, judges parse; --live = one 1-question call
-vaultmem judge bench [--fixture F]   # section 10
-vaultmem judge log [-n N]            # tail the decision log
-vaultmem judge feedback <id> right|wrong
-vaultmem judge calibration           # accuracy per confidence bucket, from feedback rows
+vaultmem jev <name> [--vault <id>] [--gate <question>] [--format json|tsv]   # state on stdin
+vaultmem jev list                  # sets available (shipped + user)
+vaultmem jev doctor [--live]       # key present, config valid, sets parse; --live = one 1-question call
+vaultmem jev bench [--fixture F]   # section 10
+vaultmem jev log [-n N]            # tail the decision log
+vaultmem jev feedback <id> right|wrong
+vaultmem jev calibration           # accuracy per confidence bucket, from feedback rows
 ```
 
 Exit codes (the contract core and hooks rely on):
@@ -277,21 +277,21 @@ Exit codes (the contract core and hooks rely on):
 Without `--gate`, stdout is the normalized answers JSON and the code is 0 or 3.
 
 Every non-2xx maps to 3. The extension reads `.error.type` and `.error.message`
-(section 4) for the log and for `judge doctor --live`, which must print them:
+(section 4) for the log and for `jev doctor --live`, which must print them:
 `authentication_error` (401), `customer_verification_required` (403, no card on
 file), `permission_denied` (403, ZDR on a Hobby plan), and `model_not_found`
 (404) are setup faults the owner has to fix, and a silent exit 3 hides them. A
-400 `invalid_request_error` means a bad judge file, not a bad key.
+400 `invalid_request_error` means a bad set file, not a bad key.
 
 Normalized answers keep the gateway fields, including `confidence` on `choice`
 and `score`. `min_confidence` compares against the top choice's probability, as
 the table says, not against `confidence`; the two were equal in the verified
 call but nothing documents that they always are.
 
-### 5.3 Judge files
+### 5.3 Question-set files
 
-`ext/judge/judges/<name>.json`, overridden by
-`${XDG_CONFIG_HOME:-~/.config}/vaultmem/judges/<name>.json`:
+`ext/jev/sets/<name>.json`, overridden by
+`${XDG_CONFIG_HOME:-~/.config}/vaultmem/jev/<name>.json`:
 
 ```json
 {
@@ -304,7 +304,7 @@ call but nothing documents that they always are.
 ```
 
 The extension truncates state to `max_state_bytes` (tail-biased for transcripts,
-head-biased for notes; the judge file says which via `"truncate": "head"|"tail"`)
+head-biased for notes; the set file says which via `"truncate": "head"|"tail"`)
 and records `truncated: true` in the log. Writing rules for questions: one
 atomic question each, positive phrasing, no double negatives, explicit
 `criteria`, no arithmetic or date reasoning, keep state small and relevant.
@@ -312,7 +312,7 @@ atomic question each, positive phrasing, no double negatives, explicit
 ## 6. Configuration
 
 ```toml
-[ext.judge]
+[ext.jev]
 enabled = true                      # default false. Master switch.
 model = "typesafe-ai/jev"
 base_url = "https://ai-gateway.vercel.sh"
@@ -321,25 +321,25 @@ timeout_ms = 1500                   # curl --max-time, whole request
 key_file = "~/.config/vaultmem/ai-gateway.key"   # used when AI_GATEWAY_API_KEY is unset
 log = true
 rerank = false                      # search reranks by default only when true
-hook_judges = "nudge"               # comma list: judges allowed to run inside hooks. Default empty: an
+hooks = "nudge"               # comma list: sets allowed to run inside hooks. Default empty: an
                                     # example value, so nothing runs in a hook until named.
 
 [vault.personal]
-judge = true                        # default false. Egress consent, per vault.
+jev = true                        # default false. Egress consent, per vault.
 
 [vault.work]
-judge = false
+jev = false
 ```
 
 - `zdr` is global, not per vault. The shipped default is `true` and the
   extension never downgrades it. An owner on a plan without ZDR (verified:
-  Hobby gets 403) sets `zdr = false` in their own `[ext.judge]`, knowingly; the
+  Hobby gets 403) sets `zdr = false` in their own `[ext.jev]`, knowingly; the
   owner of this repo has decided to do so for the personal vault (section 14,
   question 4). Because the key is global, per-vault protection comes from
-  `judge`: a work vault stays `judge = false`.
+  `jev`: a work vault stays `jev = false`.
 - Core lint validates `[ext.<name>]` values for **shape only** (the restricted
-  TOML subset). Key names inside `[ext.judge]` are validated by
-  `vaultmem judge doctor`, which `vaultmem doctor` runs when the extension is
+  TOML subset). Key names inside `[ext.jev]` are validated by
+  `vaultmem jev doctor`, which `vaultmem doctor` runs when the extension is
   installed and folds into its exit code as a config error.
 - Key lookup: `AI_GATEWAY_API_KEY`, else `key_file` (refuse if mode is wider
   than 600). No `key_cmd`: config must not become an exec surface. Hooks often
@@ -353,7 +353,7 @@ Vault content, session notes, and transcripts leave the machine. Rules:
 
 1. Every call carries a vault id. Core passes it; standalone calls resolve it
    with `vaultmem which`. No vault id resolved: exit 3.
-2. `judge = true` on that vault is required. Otherwise exit 3 **before** curl
+2. `jev = true` on that vault is required. Otherwise exit 3 **before** curl
    is invoked. A bats test asserts the curl shim was never executed.
 3. State assembled from several vaults (cross-vault search) requires the flag
    on **every** contributing vault; candidates from non-consenting vaults are
@@ -361,18 +361,18 @@ Vault content, session notes, and transcripts leave the machine. Rules:
 4. `zdr = true` by default. A gateway refusal of the flag is "unavailable".
    Verified: Hobby plans are refused with 403 `permission_denied` before any
    provider is contacted. The only way to send without ZDR is an explicit
-   `zdr = false` in the user's `[ext.judge]`; the extension never sets it,
+   `zdr = false` in the user's `[ext.jev]`; the extension never sets it,
    suggests it at runtime, or retries without the flag. `zdr` is global, so
    with `zdr = false` every consenting vault sends without ZDR. Consent stays
-   per vault through `judge`.
+   per vault through `jev`.
 5. The decision log stores a SHA-256 of the state, never the state.
-6. Judged text is untrusted input. Notes and transcripts can contain text aimed
+6. Evaluated text is untrusted input. Notes and transcripts can contain text aimed
    at the model ("answer yes"). This is one reason for constraint 3.5: no
    judgment ever triggers a write or a move.
 
-A work vault stays `judge = false` until its owner approves the vendor. That
+A work vault stays `jev = false` until its owner approves the vendor. That
 holds regardless of `zdr`: the owner's `zdr = false` decision covers the
-personal vault only, and `judge = false` is what keeps work content local.
+personal vault only, and `jev = false` is what keeps work content local.
 
 ## 8. Integration points
 
@@ -380,7 +380,7 @@ Each is independently shippable, off unless enabled, and fail-open. "State"
 lists what is sent. All state assembly uses existing primitives
 (`cmd_bookmark`, `cat --section`, `--format json`).
 
-### 8.1 `groom --judge` (first to build)
+### 8.1 `groom --triage` (first to build)
 
 Problem: `groom` lists cold-parked and stale-active sessions; deciding each one
 costs an agent a full read. Today that is a Sonnet subagent fan-out.
@@ -388,7 +388,7 @@ costs an agent a full read. Today that is a Sonnet subagent fan-out.
 - One request per flagged session. State: frontmatter, `## Bookmark`,
   `## Pinned`, the `## Git state` table, the last ~40 lines of the work log, and
   the parent Project's `## Decisions` section.
-- Judge `groom-triage`:
+- Set `groom-triage`:
   - `work_complete` (boolean): the described work is finished.
   - `has_next_step` (boolean): the note names a concrete next action.
   - `blocked_external` (boolean): progress waits on a person, review, or deploy.
@@ -397,10 +397,10 @@ costs an agent a full read. Today that is a Sonnet subagent fan-out.
   - `recommendation` (choice): `archive` | `park` | `keep-active` | `needs-human`.
 - Output: one extra column on the existing groom report
   (`→ archive 0.91 · undistilled`). Low confidence prints `→ ?`. `--format json`
-  carries the full answers. Nothing moves. `groom --judge --dry-run` is the same
-  report, since the judged path never writes.
+  carries the full answers. Nothing moves. `groom --triage --dry-run` is the same
+  report, since the evaluated path never writes.
 
-### 8.2 `nudge --judge` (Stop hook)
+### 8.2 `nudge` (Stop hook)
 
 Today: "notes changed but no `_index.md` updated". That misses the common case
 where durable knowledge appeared and nothing was written at all.
@@ -409,13 +409,13 @@ where durable knowledge appeared and nothing was written at all.
   **Verify the Stop-hook stdin schema for Claude Code and Codex before
   building**; update `docs/hooks.md` with what was confirmed. If the harness
   gives only a transcript path, read the tail of that file.
-- Judge `capture-worthy`: `durable` (boolean: a decision, root cause, incident,
+- Set `capture-worthy`: `durable` (boolean: a decision, root cause, incident,
   or reusable pattern emerged), `kind` (choice: decision | root-cause | incident
   | pattern | milestone | none).
-- Behavior: the existing heuristic runs first and is unchanged. The judge adds a
+- Behavior: the existing heuristic runs first and is unchanged. Jev adds a
   second line only when `durable` is a confident yes and no note was touched.
 - Must honor `timeout_ms` and stay silent on exit 3. Runs only if `nudge` is in
-  `hook_judges`.
+  `hooks`.
 
 ### 8.3 Search rerank: `--rerank`, `--min-score S`
 
@@ -434,21 +434,21 @@ where durable knowledge appeared and nothing was written at all.
   (section 10) shows a real gain. At ~130 notes the calling agent already
   reranks cheaply; this feature may never earn its default.
 
-### 8.4 Capture routing: `judge route`, `judge dupes`
+### 8.4 Capture routing: `jev route`, `jev dupes`
 
 Consumers are the `vault-capture` skill and scripts.
 
-- `vaultmem judge route` (summary text on stdin): `vault` (choice over
+- `vaultmem jev route` (summary text on stdin): `vault` (choice over
   consenting vaults; criteria text from each vault's `label` plus a new optional
   `[vault.<id>] description` key), `category` (choice over the SCHEMA.md folder
   vocabulary), `moc` (choice over `vaultmem mocs`). Emits JSON. Routing by
   `which` stays the default; this is for captures with no repo context.
-- `vaultmem judge dupes` (summary on stdin): run the normal search for
+- `vaultmem jev dupes` (summary on stdin): run the normal search for
   candidates, then one boolean per top-5 candidate: "this note already covers
   the summary". Emits paths with probabilities, so the skill updates a note
   instead of creating a duplicate.
 
-### 8.5 `doctor --judge`: semantic index drift
+### 8.5 `doctor --drift`: semantic index drift
 
 Today `STALE` is a string heuristic. Add `DRIFT`: the Agent-Index row no longer
 describes the note.
@@ -460,13 +460,13 @@ describes the note.
   change `doctor`'s exit code** (a probabilistic lint must not break CI or
   hooks). Not run by base `doctor` or `groom`.
 
-### 8.6 Recall reflex gate: `judge prompt`
+### 8.6 Recall reflex gate: `jev prompt`
 
 For a `UserPromptSubmit`-style hook. State: the prompt text. Boolean
 `asks_why`: the prompt asks about a past decision, a root cause, or why
 something is built the way it is. Confident yes prints the recall directive;
 anything else prints nothing. Every prompt leaves the machine, so it needs its
-own entry in `hook_judges` and the consenting-vault rule (vault = `which $PWD`).
+own entry in `hooks` and the consenting-vault rule (vault = `which $PWD`).
 
 ### 8.7 Considered, not building
 
@@ -477,32 +477,32 @@ own entry in `hook_judges` and the consenting-vault rule (vault = `which $PWD`).
 
 ## 9. Decision log
 
-`${XDG_STATE_HOME:-~/.local/state}/vaultmem/judge.jsonl`, one object per call:
+`${XDG_STATE_HOME:-~/.local/state}/vaultmem/jev.jsonl`, one object per call:
 
 ```json
-{"id":"20260921T101500Z-4f2a","ts":"...","judge":"groom-triage","vault":"personal",
+{"id":"20260921T101500Z-4f2a","ts":"...","set":"groom-triage","vault":"personal",
  "subject":"Sessions/foo/_index.md","model":"typesafe-ai/jev","state_sha256":"...",
  "truncated":false,"answers":{...},"input_tokens":1840,"cost":"0.0000773",
  "latency_ms":212,"http":200,"feedback":null}
 ```
 
-Rotation: before each append, if `judge.jsonl` is 5 MiB or larger, move it to
-`judge.jsonl.1`, replacing any older `.1`, then append to a fresh live file. One
+Rotation: before each append, if `jev.jsonl` is 5 MiB or larger, move it to
+`jev.jsonl.1`, replacing any older `.1`, then append to a fresh live file. One
 generation, so the log is bounded at about 10 MiB. The limit is a constant in
-the extension, not a config key; `VAULTMEM_JUDGE_LOG_MAX_BYTES` overrides it
+the extension, not a config key; `VAULTMEM_JEV_LOG_MAX_BYTES` overrides it
 for tests only. `log`, `feedback`, and `calibration` read `.1` first, then the
 live file, so ids and feedback rows that straddle a rotation still resolve.
 A row that has rotated out of `.1` is gone, along with any feedback on it.
 
 `feedback right|wrong` appends a feedback row keyed by id (each file stays
-append-only). `calibration` buckets judged probabilities against feedback. This
+append-only). `calibration` buckets stated probabilities against feedback. This
 is the only evidence that vendor calibration holds for this data, so wire
-`groom --judge` to print each row's id.
+`groom --triage` to print each row's id.
 
 ## 10. Bench
 
 The roadmap already says any search-quality debate gets decided by a fixture,
-not by feel. `vaultmem judge bench` makes that real:
+not by feel. `vaultmem jev bench` makes that real:
 
 - Fixture: a TSV of `query<TAB>relevant-note[,relevant-note…]` kept **outside
   the repo** (it names private notes); `tests/fixtures/` holds a synthetic one
@@ -519,30 +519,30 @@ not by feel. `vaultmem judge bench` makes that real:
 - Must-have cases:
   - extension not installed / `enabled = false`: every integrated command's
     output is byte-identical to the no-extension output.
-  - `judge = false` vault: exit 3 and the curl shim was **not** invoked.
+  - `jev = false` vault: exit 3 and the curl shim was **not** invoked.
   - mixed-consent search: non-consenting vault's content absent from the
     recorded request body.
   - timeout, HTTP 4xx/5xx (canned bodies from section 4: 400, 401, 403, 404),
     malformed JSON, ZDR refusal: exit 3, caller output unchanged, nothing on
     stdout from hooks.
   - threshold mapping to exit 0 / 1 / 2.
-  - request bodies match golden files per judge.
+  - request bodies match golden files per set.
   - the key never appears in argv, stdout, stderr, or the log.
-  - log rotation, with `VAULTMEM_JUDGE_LOG_MAX_BYTES` set small: the live file
+  - log rotation, with `VAULTMEM_JEV_LOG_MAX_BYTES` set small: the live file
     moves to `.1`, an older `.1` is replaced, and `log` / `feedback` /
     `calibration` still see rows on both sides.
   - `BASH=/bin/bash bats …` passes; `bash32-lint.sh` covers `ext/`.
-- A live smoke test (`judge doctor --live`) runs only when a key is present and
+- A live smoke test (`jev doctor --live`) runs only when a key is present and
   never in CI.
 
 ## 12. Docs and skills
 
-- New `docs/judge.md` (user reference). Update `docs/config.md`,
+- New `docs/jev.md` (user reference). Update `docs/config.md`,
   `docs/hooks.md`, `README.md`, `AGENTS.md` (map + gotchas), `SCHEMA.md` only if
   the `description` vault key lands.
 - `skills/*/SKILL.md` are generated from a private upstream. Skill changes that
-  mention `vaultmem judge …` land upstream and sync in. `subcommand-lint.sh`
-  fails if a skill references `judge` before the dispatch entry exists, so the
+  mention `vaultmem jev …` land upstream and sync in. `subcommand-lint.sh`
+  fails if a skill references `jev` before the dispatch entry exists, so the
   core shim merges first.
 - Conventional commits; release-please owns the version and changelog.
 
@@ -551,11 +551,11 @@ not by feel. `vaultmem judge bench` makes that real:
 | Phase | Scope | Done when |
 |---|---|---|
 | 0 | Resolve section 4 unknowns with a throwaway curl. Record findings here. **Done 2026-09-21.** | ZDR behavior and model pinning are known facts |
-| 1 | Core shim, config keys + lint, `_ext_exec`, `_judge`, extension skeleton, egress gate, exit codes, log, `doctor`, tests with curl shim, `install.sh --ext`. **Done 2026-09-22.** | `vaultmem judge <name>` works end to end against the shim; all CI jobs green |
-| 2 | `groom --judge` + `groom-triage` judge, `feedback`, `calibration`. **Done 2026-09-22.** | owner runs it on a consenting vault for two weeks and reviews calibration |
-| 3 | `nudge --judge`, `judge route`, `judge dupes`. **Done 2026-09-22.** | hook stays silent and under `timeout_ms` in every failure mode |
+| 1 | Core shim, config keys + lint, `_ext_exec`, `_jev`, extension skeleton, egress gate, exit codes, log, `doctor`, tests with curl shim, `install.sh --ext`. **Done 2026-09-22.** | `vaultmem jev <name>` works end to end against the shim; all CI jobs green |
+| 2 | `groom --triage` + `groom-triage` set, `feedback`, `calibration`. **Done 2026-09-22.** | owner runs it on a consenting vault for two weeks and reviews calibration |
+| 3 | `nudge`, `jev route`, `jev dupes`. **Done 2026-09-22.** | hook stays silent and under `timeout_ms` in every failure mode |
 | 4 | `bench`, then search `--rerank`. **Done 2026-09-22.** | bench numbers exist; default stays off unless they justify it |
-| 5 | `doctor --judge`, `judge prompt`. **Done 2026-09-22.** | same fail-open tests as above |
+| 5 | `doctor --drift`, `jev prompt`. **Done 2026-09-22.** | same fail-open tests as above |
 
 One PR per phase. Phase 1 must not change any existing command's output.
 
@@ -564,10 +564,10 @@ One PR per phase. Phase 1 must not change any existing command's output.
 1. Answered 2026-09-21: **accepted.** `[vault.<id>] description` is an optional
    string key for routing criteria. It lands in Phase 3, which owns the
    `_parse_config` / `_lint_config` change, `docs/config.md`, `SCHEMA.md`, and
-   the `doctor hard-errors` tests. `vaultmem judge config` gains a
+   the `doctor hard-errors` tests. `vaultmem jev config` gains a
    `vault.<id>.description=` line per vault, so both Phase 3 briefs state that
    contract.
-2. Answered 2026-09-21: **`hook_judges` defaults to empty.** Nothing runs inside
+2. Answered 2026-09-21: **`hooks` defaults to empty.** Nothing runs inside
    a hook until the owner names it. The `"nudge"` in section 6 is an example
    value, not the default.
 3. Answered 2026-09-21: the decision log rotates. One generation at 5 MiB, a
@@ -575,8 +575,8 @@ One PR per phase. Phase 1 must not change any existing command's output.
 4. Answered 2026-09-21: the owner accepts `zdr = false` for the personal vault
    and stays on Hobby (verified: ZDR needs Pro or Enterprise; Hobby gets 403).
    The shipped default stays `zdr = true` and is never auto-downgraded; the
-   owner sets `zdr = false` in their own `[ext.judge]`. `zdr` is global, not
-   per vault, and a work vault stays `judge = false` (sections 6 and 7). The
+   owner sets `zdr = false` in their own `[ext.jev]`. `zdr` is global, not
+   per vault, and a work vault stays `jev = false` (sections 6 and 7). The
    model lists `"no_training":"all"`, which covers training but not retention.
 5. Answered: the gateway needs a card on file even for free credits (403
    `customer_verification_required`). The owner added one on 2026-09-21.

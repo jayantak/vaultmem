@@ -7,7 +7,7 @@
 # Or from a clone:
 #   ./install.sh
 #   ./install.sh --skills ~/.claude/skills   # also symlink the bundled skills/
-#   ./install.sh --ext judge                 # also symlink the optional judge extension
+#   ./install.sh --ext jev                   # also symlink the optional Jev extension
 #
 # It copies the `vaultmem` script next to this file into the bin dir, checks that
 # ripgrep is present, and prints the SessionStart hook snippet. It does not touch

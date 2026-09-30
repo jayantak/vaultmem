@@ -1,12 +1,12 @@
 #!/usr/bin/env bats
 
-# Tests for the judge extension (ext/judge/vaultmem-judge).
-# Run: bats tests/judge.bats
+# Tests for the Jev extension (ext/jev/vaultmem-jev).
+# Run: bats tests/jev.bats
 #
 # Isolation: no network, no real vault, no real config. VAULTMEM_BIN is a stub
-# that prints the `judge config` contract, and a fake `curl` sits first on PATH,
+# that prints the `jev config` contract, and a fake `curl` sits first on PATH,
 # records its argv + stdin + request body, and replays a canned response from
-# tests/fixtures/judge/.
+# tests/fixtures/jev/.
 #
 # bash 3.2: bash resets $BASH at startup, so `BASH=/bin/bash bats …` alone does
 # not change the shell the extension runs under. Set VAULTMEM_TEST_BASH=/bin/bash
@@ -17,26 +17,26 @@ STATE_TEXT="The build failed with exit code 1."
 
 setup() {
   ROOT="$(cd "$BATS_TEST_DIRNAME/.." && pwd)"
-  JUDGE="$ROOT/ext/judge/vaultmem-judge"
-  FIX="$ROOT/tests/fixtures/judge"
-  JUDGE_SH="${VAULTMEM_TEST_BASH:-bash}"
+  JEV="$ROOT/ext/jev/vaultmem-jev"
+  FIX="$ROOT/tests/fixtures/jev"
+  JEV_SH="${VAULTMEM_TEST_BASH:-bash}"
 
   export HOME="$BATS_TEST_TMPDIR/home"
   export XDG_CONFIG_HOME="$BATS_TEST_TMPDIR/xdg-config"
   export XDG_STATE_HOME="$BATS_TEST_TMPDIR/xdg-state"
-  mkdir -p "$HOME" "$XDG_CONFIG_HOME/vaultmem/judges" "$BATS_TEST_TMPDIR/bin"
-  LOG="$XDG_STATE_HOME/vaultmem/judge.jsonl"
+  mkdir -p "$HOME" "$XDG_CONFIG_HOME/vaultmem/jev" "$BATS_TEST_TMPDIR/bin"
+  LOG="$XDG_STATE_HOME/vaultmem/jev.jsonl"
   STDERR="$BATS_TEST_TMPDIR/stderr"
-  unset VAULTMEM_JUDGE_LOG_MAX_BYTES
+  unset VAULTMEM_JEV_LOG_MAX_BYTES
 
   export AI_GATEWAY_API_KEY="$KEY_VALUE"
 
-  # Stub core: `judge config` prints the contract; `which` prints a vault id.
+  # Stub core: `jev config` prints the contract; `which` prints a vault id.
   # For route and dupes it also answers `vaults`, `--vault <id> mocs`,
   # `--vault <id> resolve <name>`, `--vault <id> --format json -n 5 <query>`,
   # and `cat <path> --lines N` from a fixture vault tree under $STUB_VAULTS.
   # With $STUB_SEARCH_DIR set (bench), search answers per query from that dir.
-  export STUB_CONFIG="$BATS_TEST_TMPDIR/judge-config"
+  export STUB_CONFIG="$BATS_TEST_TMPDIR/jev-config"
   export STUB_WHICH_ID="personal" STUB_WHICH_ERR=""
   export STUB_VAULTS="$BATS_TEST_TMPDIR/vaults"
   export STUB_SEARCH_JSON="$BATS_TEST_TMPDIR/search.json" STUB_REC="$BATS_TEST_TMPDIR/stub-rec"
@@ -45,7 +45,7 @@ setup() {
   cat >"$VAULTMEM_BIN" <<'EOF'
 #!/usr/bin/env bash
 case "$1" in
-judge) [ "${2:-}" = config ] && cat "$STUB_CONFIG" || exit 64 ;;
+jev) [ "${2:-}" = config ] && cat "$STUB_CONFIG" || exit 64 ;;
 which)
   printf '%s\n' "$STUB_WHICH_ID"
   [ -z "$STUB_WHICH_ERR" ] || printf '%s\n' "$STUB_WHICH_ERR" >&2
@@ -135,7 +135,7 @@ EOF
 # write_config [key=value …]: the core contract, with per-test overrides.
 write_config() {
   local enabled=true zdr=true log=true timeout_ms=1500 personal=true work=false side=false nodesc=false
-  local base_url="https://ai-gateway.vercel.sh" key_file="$HOME/.config/vaultmem/ai-gateway.key" extra="" hook_judges=""
+  local base_url="https://ai-gateway.vercel.sh" key_file="$HOME/.config/vaultmem/ai-gateway.key" extra="" hooks=""
   local kv
   for kv in "$@"; do
     case "$kv" in
@@ -144,19 +144,19 @@ write_config() {
     esac
   done
   {
-    printf 'ext.judge.enabled=%s\n' "$enabled"
-    printf 'ext.judge.model=typesafe-ai/jev\n'
-    printf 'ext.judge.base_url=%s\n' "$base_url"
-    printf 'ext.judge.zdr=%s\n' "$zdr"
-    printf 'ext.judge.timeout_ms=%s\n' "$timeout_ms"
-    printf 'ext.judge.key_file=%s\n' "$key_file"
-    printf 'ext.judge.log=%s\n' "$log"
-    printf 'ext.judge.rerank=false\n'
-    printf 'ext.judge.hook_judges=%s\n' "$hook_judges"
+    printf 'ext.jev.enabled=%s\n' "$enabled"
+    printf 'ext.jev.model=typesafe-ai/jev\n'
+    printf 'ext.jev.base_url=%s\n' "$base_url"
+    printf 'ext.jev.zdr=%s\n' "$zdr"
+    printf 'ext.jev.timeout_ms=%s\n' "$timeout_ms"
+    printf 'ext.jev.key_file=%s\n' "$key_file"
+    printf 'ext.jev.log=%s\n' "$log"
+    printf 'ext.jev.rerank=false\n'
+    printf 'ext.jev.hooks=%s\n' "$hooks"
     [ -z "$extra" ] || printf '%s\n' "$extra"
-    printf 'vault.personal.judge=%s\n' "$personal"
-    printf 'vault.work.judge=%s\n' "$work"
-    printf 'vault.side.judge=%s\n' "$side"
+    printf 'vault.personal.jev=%s\n' "$personal"
+    printf 'vault.work.jev=%s\n' "$work"
+    printf 'vault.side.jev=%s\n' "$side"
     # Contract 1 (Phase 3): label and description per vault, after every other
     # line. nodesc=true drops the description lines, as an older core would.
     printf 'vault.personal.label=Personal\n'
@@ -168,80 +168,121 @@ write_config() {
   } >"$STUB_CONFIG"
 }
 
-# judge_in <state> <args…>: state on stdin; stdout only in $output, stderr in $STDERR.
-judge_in() {
+# jev_in <state> <args…>: state on stdin; stdout only in $output, stderr in $STDERR.
+jev_in() {
   local state="$1"
   shift
-  printf '%s' "$state" | "$JUDGE_SH" "$JUDGE" "$@" 2>"$STDERR"
+  printf '%s' "$state" | "$JEV_SH" "$JEV" "$@" 2>"$STDERR"
 }
 
-judge_cmd() { "$JUDGE_SH" "$JUDGE" "$@" 2>"$STDERR" </dev/null; }
+jev_cmd() { "$JEV_SH" "$JEV" "$@" 2>"$STDERR" </dev/null; }
 
 curl_not_invoked() { [ ! -e "$CURL_REC/calls" ]; }
 
-use_outcome_judge() { cp "$FIX/outcome-judge.json" "$XDG_CONFIG_HOME/vaultmem/judges/outcome.json"; }
+use_outcome_set() { cp "$FIX/outcome-jev.json" "$XDG_CONFIG_HOME/vaultmem/jev/outcome.json"; }
+
+# --- ask, and the deprecation aliases -------------------------------------------
+
+@test "ask <name> is equivalent to the bare name" {
+  run jev_in "$STATE_TEXT" ask smoke --vault personal --gate failed
+  [ "$status" -eq 0 ]
+  [ "$(printf '%s' "$output" | jq -r '.set')" = "smoke" ]
+}
+
+@test "ask with no set name is a usage error and never invokes curl" {
+  run jev_cmd ask
+  [ "$status" -eq 64 ]
+  curl_not_invoked
+}
+
+@test "calibration --judge is accepted, naming --set on stderr" {
+  mkdir -p "$(dirname "$LOG")"
+  printf '%s\n' \
+    '{"id":"d1","set":"smoke","answers":{"failed":{"type":"boolean","probability":0.95}}}' \
+    '{"id":"d1","feedback":"right","source":"manual"}' >"$LOG"
+  run jev_cmd calibration --judge smoke
+  [ "$status" -eq 0 ]
+  grep -q -- '--judge is deprecated; use --set' "$STDERR"
+}
+
+@test "calibration reads a pre-jev log row that carries judge instead of set" {
+  mkdir -p "$(dirname "$LOG")"
+  printf '%s\n' \
+    '{"id":"d1","judge":"smoke","answers":{"failed":{"type":"boolean","probability":0.95}}}' \
+    '{"id":"d1","feedback":"right","source":"manual"}' >"$LOG"
+  run jev_cmd calibration --set smoke
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"0.9-1.0"* ]]
+}
+
+@test "feedback accepts an id from a pre-jev decision row" {
+  mkdir -p "$(dirname "$LOG")"
+  printf '%s\n' '{"id":"d9","judge":"smoke","answers":{"failed":{"type":"boolean","probability":0.95}}}' >"$LOG"
+  run jev_cmd feedback d9 right
+  [ "$status" -eq 0 ]
+}
 
 # --- thresholds → exit codes ----------------------------------------------------
 
 @test "gate: confident yes exits 0" {
-  run judge_in "$STATE_TEXT" smoke --vault personal --gate failed
+  run jev_in "$STATE_TEXT" smoke --vault personal --gate failed
   [ "$status" -eq 0 ]
   [ "$(printf '%s' "$output" | jq -r '.gate.verdict')" = "yes" ]
   [ "$(printf '%s' "$output" | jq -r '.answers.failed.probability')" = "0.99" ]
 }
 
 @test "gate: confident no exits 1" {
-  FAKE_CURL_RESPONSE="$FIX/boolean-no.json" run judge_in "$STATE_TEXT" smoke --vault personal --gate failed
+  FAKE_CURL_RESPONSE="$FIX/boolean-no.json" run jev_in "$STATE_TEXT" smoke --vault personal --gate failed
   [ "$status" -eq 1 ]
   [ "$(printf '%s' "$output" | jq -r '.gate.verdict')" = "no" ]
 }
 
 @test "gate: between thresholds abstains with exit 2" {
-  FAKE_CURL_RESPONSE="$FIX/boolean-abstain.json" run judge_in "$STATE_TEXT" smoke --vault personal --gate failed
+  FAKE_CURL_RESPONSE="$FIX/boolean-abstain.json" run jev_in "$STATE_TEXT" smoke --vault personal --gate failed
   [ "$status" -eq 2 ]
   [ "$(printf '%s' "$output" | jq -r '.gate.verdict')" = "abstain" ]
 }
 
-@test "gate: thresholds come from the judge file, not a constant" {
-  # outcome-judge sets yes=0.9; a 0.87 answer would pass the 0.85 default.
-  use_outcome_judge
+@test "gate: thresholds come from the set file, not a constant" {
+  # outcome-jev sets yes=0.9; a 0.87 answer would pass the 0.85 default.
+  use_outcome_set
   jq '.answers.failed.probability = 0.87' "$FIX/boolean-yes.json" >"$BATS_TEST_TMPDIR/resp.json"
-  FAKE_CURL_RESPONSE="$BATS_TEST_TMPDIR/resp.json" run judge_in "$STATE_TEXT" outcome --vault personal --gate failed
+  FAKE_CURL_RESPONSE="$BATS_TEST_TMPDIR/resp.json" run jev_in "$STATE_TEXT" outcome --vault personal --gate failed
   [ "$status" -eq 2 ]
 }
 
 @test "gate on a choice: top probability below min_confidence exits 2" {
-  use_outcome_judge
-  FAKE_CURL_RESPONSE="$FIX/choice-low.json" run judge_in "$STATE_TEXT" outcome --vault personal --gate outcome
+  use_outcome_set
+  FAKE_CURL_RESPONSE="$FIX/choice-low.json" run jev_in "$STATE_TEXT" outcome --vault personal --gate outcome
   [ "$status" -eq 2 ]
 }
 
 @test "gate on a choice: confident top choice exits 0" {
-  use_outcome_judge
+  use_outcome_set
   jq '{model, answers: {outcome: .answers.outcome}}' "$FIX/mixed.json" >"$BATS_TEST_TMPDIR/resp.json"
-  FAKE_CURL_RESPONSE="$BATS_TEST_TMPDIR/resp.json" run judge_in "$STATE_TEXT" outcome --vault personal --gate outcome
+  FAKE_CURL_RESPONSE="$BATS_TEST_TMPDIR/resp.json" run jev_in "$STATE_TEXT" outcome --vault personal --gate outcome
   [ "$status" -eq 0 ]
   [ "$(printf '%s' "$output" | jq -r '.answers.outcome.choice')" = "failed" ]
 }
 
 @test "without --gate: exit 0 and the answers JSON keeps gateway fields" {
-  use_outcome_judge
-  FAKE_CURL_RESPONSE="$FIX/mixed.json" run judge_in "$STATE_TEXT" outcome --vault personal
+  use_outcome_set
+  FAKE_CURL_RESPONSE="$FIX/mixed.json" run jev_in "$STATE_TEXT" outcome --vault personal
   [ "$status" -eq 0 ]
   [ "$(printf '%s' "$output" | jq -r '.answers.severity.confidence')" = "0.99" ]
-  [ "$(printf '%s' "$output" | jq -r '.judge')" = "outcome" ]
+  [ "$(printf '%s' "$output" | jq -r '.set')" = "outcome" ]
   [ "$(printf '%s' "$output" | jq 'has("gate")')" = "false" ]
   printf '%s' "$output" | jq -e '.id | test("^[0-9]{8}T[0-9]{6}Z-[0-9a-f]{4}$")'
 }
 
 @test "without --gate: a low probability is still exit 0" {
-  FAKE_CURL_RESPONSE="$FIX/boolean-no.json" run judge_in "$STATE_TEXT" smoke --vault personal
+  FAKE_CURL_RESPONSE="$FIX/boolean-no.json" run jev_in "$STATE_TEXT" smoke --vault personal
   [ "$status" -eq 0 ]
 }
 
 @test "--format tsv prints one row per question" {
-  use_outcome_judge
-  FAKE_CURL_RESPONSE="$FIX/mixed.json" run judge_in "$STATE_TEXT" outcome --vault personal --format tsv
+  use_outcome_set
+  FAKE_CURL_RESPONSE="$FIX/mixed.json" run jev_in "$STATE_TEXT" outcome --vault personal --format tsv
   [ "$status" -eq 0 ]
   [ "${#lines[@]}" -eq 3 ]
   printf '%s\n' "$output" | grep -q "^failed	boolean	yes	0.99$"
@@ -253,21 +294,21 @@ use_outcome_judge() { cp "$FIX/outcome-judge.json" "$XDG_CONFIG_HOME/vaultmem/ju
 
 @test "egress: enabled=false exits 3 and curl is never invoked" {
   write_config enabled=false
-  run judge_in "$STATE_TEXT" smoke --vault personal --gate failed
+  run jev_in "$STATE_TEXT" smoke --vault personal --gate failed
   [ "$status" -eq 3 ]
   [ -z "$output" ]
   curl_not_invoked
 }
 
-@test "egress: a judge=false vault exits 3 and curl is never invoked" {
-  run judge_in "$STATE_TEXT" smoke --vault work --gate failed
+@test "egress: a jev=false vault exits 3 and curl is never invoked" {
+  run jev_in "$STATE_TEXT" smoke --vault work --gate failed
   [ "$status" -eq 3 ]
   [ -z "$output" ]
   curl_not_invoked
 }
 
 @test "egress: a vault missing from the config exits 3 and curl is never invoked" {
-  run judge_in "$STATE_TEXT" smoke --vault nosuch --gate failed
+  run jev_in "$STATE_TEXT" smoke --vault nosuch --gate failed
   [ "$status" -eq 3 ]
   curl_not_invoked
 }
@@ -275,40 +316,40 @@ use_outcome_judge() { cp "$FIX/outcome-judge.json" "$XDG_CONFIG_HOME/vaultmem/ju
 @test "egress: no vault id resolved exits 3 and curl is never invoked" {
   # `which` fell back to the default vault: a low-confidence guess is not consent.
   STUB_WHICH_ERR="vaultmem: low-confidence guess (no match signal) → personal" \
-    run judge_in "$STATE_TEXT" smoke --gate failed
+    run jev_in "$STATE_TEXT" smoke --gate failed
   [ "$status" -eq 3 ]
   [ -z "$output" ]
   curl_not_invoked
 }
 
 @test "egress: without --vault a confident \`which\` to a consenting vault proceeds" {
-  run judge_in "$STATE_TEXT" smoke --gate failed
+  run jev_in "$STATE_TEXT" smoke --gate failed
   [ "$status" -eq 0 ]
   [ "$(tail -n 1 "$LOG" | jq -r '.vault')" = "personal" ]
 }
 
 @test "egress: without --vault a confident \`which\` to a non-consenting vault exits 3" {
-  STUB_WHICH_ID=work run judge_in "$STATE_TEXT" smoke --gate failed
+  STUB_WHICH_ID=work run jev_in "$STATE_TEXT" smoke --gate failed
   [ "$status" -eq 3 ]
   curl_not_invoked
 }
 
 @test "egress: config unavailable exits 3 and curl is never invoked" {
-  VAULTMEM_BIN="$BATS_TEST_TMPDIR/bin/does-not-exist" run judge_in "$STATE_TEXT" smoke --vault personal
+  VAULTMEM_BIN="$BATS_TEST_TMPDIR/bin/does-not-exist" run jev_in "$STATE_TEXT" smoke --vault personal
   [ "$status" -eq 3 ]
   curl_not_invoked
 }
 
 @test "egress: a plain-http base_url exits 3 and curl is never invoked" {
   write_config base_url=http://gateway.example.com
-  run judge_in "$STATE_TEXT" smoke --vault personal
+  run jev_in "$STATE_TEXT" smoke --vault personal
   [ "$status" -eq 3 ]
   curl_not_invoked
 }
 
-@test "an invalid judge file exits 3 and curl is never invoked" {
-  printf '{"version":1,"questions":{"q":{"type":"noul"}}}' >"$XDG_CONFIG_HOME/vaultmem/judges/bad.json"
-  run judge_in "$STATE_TEXT" bad --vault personal
+@test "an invalid set file exits 3 and curl is never invoked" {
+  printf '{"version":1,"questions":{"q":{"type":"noul"}}}' >"$XDG_CONFIG_HOME/vaultmem/jev/bad.json"
+  run jev_in "$STATE_TEXT" bad --vault personal
   [ "$status" -eq 3 ]
   [ -z "$output" ]
   curl_not_invoked
@@ -318,7 +359,7 @@ use_outcome_judge() { cp "$FIX/outcome-judge.json" "$XDG_CONFIG_HOME/vaultmem/ju
 
 @test "timeout exits 3 with empty stdout, and --max-time comes from timeout_ms" {
   write_config timeout_ms=2500
-  FAKE_CURL_EXIT=28 run judge_in "$STATE_TEXT" smoke --vault personal --gate failed
+  FAKE_CURL_EXIT=28 run jev_in "$STATE_TEXT" smoke --vault personal --gate failed
   [ "$status" -eq 3 ]
   [ -z "$output" ]
   grep -A1 -x -- '--max-time' "$CURL_REC/argv" | grep -qx '2.500'
@@ -326,14 +367,14 @@ use_outcome_judge() { cp "$FIX/outcome-judge.json" "$XDG_CONFIG_HOME/vaultmem/ju
 }
 
 @test "HTTP 400 exits 3 with empty stdout" {
-  FAKE_CURL_RESPONSE="$FIX/error-400.json" FAKE_CURL_HTTP=400 run judge_in "$STATE_TEXT" smoke --vault personal --gate failed
+  FAKE_CURL_RESPONSE="$FIX/error-400.json" FAKE_CURL_HTTP=400 run jev_in "$STATE_TEXT" smoke --vault personal --gate failed
   [ "$status" -eq 3 ]
   [ -z "$output" ]
   grep -q 'invalid_request_error' "$STDERR"
 }
 
 @test "HTTP 401 exits 3 with empty stdout and names the error type" {
-  FAKE_CURL_RESPONSE="$FIX/error-401.json" FAKE_CURL_HTTP=401 run judge_in "$STATE_TEXT" smoke --vault personal --gate failed
+  FAKE_CURL_RESPONSE="$FIX/error-401.json" FAKE_CURL_HTTP=401 run jev_in "$STATE_TEXT" smoke --vault personal --gate failed
   [ "$status" -eq 3 ]
   [ -z "$output" ]
   grep -q 'authentication_error' "$STDERR"
@@ -341,46 +382,46 @@ use_outcome_judge() { cp "$FIX/outcome-judge.json" "$XDG_CONFIG_HOME/vaultmem/ju
 }
 
 @test "HTTP 404 exits 3 with empty stdout" {
-  FAKE_CURL_RESPONSE="$FIX/error-404.json" FAKE_CURL_HTTP=404 run judge_in "$STATE_TEXT" smoke --vault personal
+  FAKE_CURL_RESPONSE="$FIX/error-404.json" FAKE_CURL_HTTP=404 run jev_in "$STATE_TEXT" smoke --vault personal
   [ "$status" -eq 3 ]
   [ -z "$output" ]
   grep -q 'model_not_found' "$STDERR"
 }
 
 @test "HTTP 500 exits 3 with empty stdout" {
-  FAKE_CURL_RESPONSE="$FIX/error-500.json" FAKE_CURL_HTTP=500 run judge_in "$STATE_TEXT" smoke --vault personal --gate failed
+  FAKE_CURL_RESPONSE="$FIX/error-500.json" FAKE_CURL_HTTP=500 run jev_in "$STATE_TEXT" smoke --vault personal --gate failed
   [ "$status" -eq 3 ]
   [ -z "$output" ]
 }
 
 @test "HTTP 502 with a non-JSON error body exits 3 with empty stdout" {
-  FAKE_CURL_RESPONSE="$FIX/malformed.txt" FAKE_CURL_HTTP=502 run judge_in "$STATE_TEXT" smoke --vault personal --gate failed
+  FAKE_CURL_RESPONSE="$FIX/malformed.txt" FAKE_CURL_HTTP=502 run jev_in "$STATE_TEXT" smoke --vault personal --gate failed
   [ "$status" -eq 3 ]
   [ -z "$output" ]
 }
 
 @test "malformed JSON on a 200 exits 3 with empty stdout" {
-  FAKE_CURL_RESPONSE="$FIX/malformed.txt" run judge_in "$STATE_TEXT" smoke --vault personal --gate failed
+  FAKE_CURL_RESPONSE="$FIX/malformed.txt" run jev_in "$STATE_TEXT" smoke --vault personal --gate failed
   [ "$status" -eq 3 ]
   [ -z "$output" ]
   [ "$(tail -n 1 "$LOG" | jq -r '.error.type')" = "bad_response" ]
 }
 
 @test "a 200 with no usable answers exits 3 with empty stdout" {
-  FAKE_CURL_RESPONSE="$FIX/empty-answers.json" run judge_in "$STATE_TEXT" smoke --vault personal
+  FAKE_CURL_RESPONSE="$FIX/empty-answers.json" run jev_in "$STATE_TEXT" smoke --vault personal
   [ "$status" -eq 3 ]
   [ -z "$output" ]
 }
 
 @test "a 200 missing the gated question exits 3" {
-  use_outcome_judge
-  FAKE_CURL_RESPONSE="$FIX/boolean-yes.json" run judge_in "$STATE_TEXT" outcome --vault personal --gate outcome
+  use_outcome_set
+  FAKE_CURL_RESPONSE="$FIX/boolean-yes.json" run jev_in "$STATE_TEXT" outcome --vault personal --gate outcome
   [ "$status" -eq 3 ]
   [ -z "$output" ]
 }
 
 @test "ZDR refusal exits 3, empty stdout, and is never retried without the flag" {
-  FAKE_CURL_RESPONSE="$FIX/error-403-zdr.json" FAKE_CURL_HTTP=403 run judge_in "$STATE_TEXT" smoke --vault personal --gate failed
+  FAKE_CURL_RESPONSE="$FIX/error-403-zdr.json" FAKE_CURL_HTTP=403 run jev_in "$STATE_TEXT" smoke --vault personal --gate failed
   [ "$status" -eq 3 ]
   [ -z "$output" ]
   [ "$(wc -l <"$CURL_REC/calls" | tr -d ' ')" -eq 1 ]
@@ -393,14 +434,14 @@ use_outcome_judge() { cp "$FIX/outcome-judge.json" "$XDG_CONFIG_HOME/vaultmem/ju
 # --- request body -------------------------------------------------------------------
 
 @test "request body matches the golden file under zdr=true" {
-  run judge_in "$STATE_TEXT" smoke --vault personal
+  run jev_in "$STATE_TEXT" smoke --vault personal
   [ "$status" -eq 0 ]
   diff <(jq -S . "$CURL_REC/body") <(jq -S . "$FIX/smoke-body-zdr.json")
 }
 
 @test "request body matches the golden file under zdr=false: no zeroDataRetention" {
   write_config zdr=false
-  run judge_in "$STATE_TEXT" smoke --vault personal
+  run jev_in "$STATE_TEXT" smoke --vault personal
   [ "$status" -eq 0 ]
   diff <(jq -S . "$CURL_REC/body") <(jq -S . "$FIX/smoke-body-nozdr.json")
   ! grep -q 'zeroDataRetention' "$CURL_REC/body" || false
@@ -408,7 +449,7 @@ use_outcome_judge() { cp "$FIX/outcome-judge.json" "$XDG_CONFIG_HOME/vaultmem/ju
 
 @test "request goes to POST {base_url}/v1/evaluate" {
   write_config base_url=https://gw.example.test/
-  run judge_in "$STATE_TEXT" smoke --vault personal
+  run jev_in "$STATE_TEXT" smoke --vault personal
   [ "$status" -eq 0 ]
   grep -qx 'https://gw.example.test/v1/evaluate' "$CURL_REC/argv"
   grep -A1 -x -- '--request' "$CURL_REC/argv" | grep -qx 'POST'
@@ -417,38 +458,38 @@ use_outcome_judge() { cp "$FIX/outcome-judge.json" "$XDG_CONFIG_HOME/vaultmem/ju
 @test "state with quotes, backslashes, and newlines survives as one JSON string" {
   local tricky
   tricky=$(printf 'say "yes"\\n\nline2 \\ end\t{"a":1}')
-  run judge_in "$tricky" smoke --vault personal
+  run jev_in "$tricky" smoke --vault personal
   [ "$status" -eq 0 ]
   [ "$(jq -r '.state' "$CURL_REC/body")" = "$tricky" ]
 }
 
 @test "--gate still sends every question, so a gated caller can read the others" {
-  use_outcome_judge
-  FAKE_CURL_RESPONSE="$FIX/mixed.json" run judge_in "$STATE_TEXT" outcome --vault personal --gate failed
+  use_outcome_set
+  FAKE_CURL_RESPONSE="$FIX/mixed.json" run jev_in "$STATE_TEXT" outcome --vault personal --gate failed
   [ "$status" -eq 0 ]
   [ "$(jq -c '.questions | keys' "$CURL_REC/body")" = '["failed","outcome","severity"]' ]
   [ "$(printf '%s' "$output" | jq -r '.answers.outcome.choice')" = "failed" ]
 }
 
 @test "state is truncated to max_state_bytes, tail-biased, and logged as truncated" {
-  use_outcome_judge
-  FAKE_CURL_RESPONSE="$FIX/mixed.json" run judge_in "0123456789ABCDEFGHIJ" outcome --vault personal
+  use_outcome_set
+  FAKE_CURL_RESPONSE="$FIX/mixed.json" run jev_in "0123456789ABCDEFGHIJ" outcome --vault personal
   [ "$status" -eq 0 ]
   [ "$(jq -r '.state' "$CURL_REC/body")" = "ABCDEFGHIJ" ]
   [ "$(tail -n 1 "$LOG" | jq -r '.truncated')" = "true" ]
 }
 
 @test "head-biased truncation keeps the start of the state" {
-  jq '.truncate = "head"' "$FIX/outcome-judge.json" >"$XDG_CONFIG_HOME/vaultmem/judges/outcome.json"
-  FAKE_CURL_RESPONSE="$FIX/mixed.json" run judge_in "0123456789ABCDEFGHIJ" outcome --vault personal
+  jq '.truncate = "head"' "$FIX/outcome-jev.json" >"$XDG_CONFIG_HOME/vaultmem/jev/outcome.json"
+  FAKE_CURL_RESPONSE="$FIX/mixed.json" run jev_in "0123456789ABCDEFGHIJ" outcome --vault personal
   [ "$status" -eq 0 ]
   [ "$(jq -r '.state' "$CURL_REC/body")" = "0123456789" ]
 }
 
-@test "a user judge file overrides the shipped one of the same name" {
-  jq '.questions.failed.instructions = "USER OVERRIDE"' "$ROOT/ext/judge/judges/smoke.json" \
-    >"$XDG_CONFIG_HOME/vaultmem/judges/smoke.json"
-  run judge_in "$STATE_TEXT" smoke --vault personal
+@test "a user set file overrides the shipped one of the same name" {
+  jq '.questions.failed.instructions = "USER OVERRIDE"' "$ROOT/ext/jev/sets/smoke.json" \
+    >"$XDG_CONFIG_HOME/vaultmem/jev/smoke.json"
+  run jev_in "$STATE_TEXT" smoke --vault personal
   [ "$status" -eq 0 ]
   [ "$(jq -r '.questions.failed.instructions' "$CURL_REC/body")" = "USER OVERRIDE" ]
 }
@@ -456,7 +497,7 @@ use_outcome_judge() { cp "$FIX/outcome-judge.json" "$XDG_CONFIG_HOME/vaultmem/ju
 # --- the key ------------------------------------------------------------------------
 
 @test "key from the environment never reaches argv, stdout, stderr, or the log" {
-  run judge_in "$STATE_TEXT" smoke --vault personal --gate failed
+  run jev_in "$STATE_TEXT" smoke --vault personal --gate failed
   [ "$status" -eq 0 ]
   ! grep -q "$KEY_VALUE" "$CURL_REC/argv" || false
   ! grep -q -- 'Authorization' "$CURL_REC/argv" || false
@@ -471,7 +512,7 @@ use_outcome_judge() { cp "$FIX/outcome-judge.json" "$XDG_CONFIG_HOME/vaultmem/ju
 
 @test "key stays secret on the failure path, even if the gateway echoes it" {
   jq --arg k "$KEY_VALUE" '.error.message = "bad key " + $k' "$FIX/error-401.json" >"$BATS_TEST_TMPDIR/resp.json"
-  FAKE_CURL_RESPONSE="$BATS_TEST_TMPDIR/resp.json" FAKE_CURL_HTTP=401 run judge_in "$STATE_TEXT" smoke --vault personal
+  FAKE_CURL_RESPONSE="$BATS_TEST_TMPDIR/resp.json" FAKE_CURL_HTTP=401 run jev_in "$STATE_TEXT" smoke --vault personal
   [ "$status" -eq 3 ]
   ! grep -q "$KEY_VALUE" "$CURL_REC/argv" || false
   [ -z "$output" ]
@@ -485,7 +526,7 @@ use_outcome_judge() { cp "$FIX/outcome-judge.json" "$XDG_CONFIG_HOME/vaultmem/ju
   mkdir -p "$HOME/.config/vaultmem"
   printf '%s\n' "$KEY_VALUE" >"$HOME/.config/vaultmem/ai-gateway.key"
   chmod 600 "$HOME/.config/vaultmem/ai-gateway.key"
-  run judge_in "$STATE_TEXT" smoke --vault personal --gate failed
+  run jev_in "$STATE_TEXT" smoke --vault personal --gate failed
   [ "$status" -eq 0 ]
   grep -q "Authorization: Bearer $KEY_VALUE" "$CURL_REC/stdin"
   ! grep -q "$KEY_VALUE" "$CURL_REC/argv" || false
@@ -498,7 +539,7 @@ use_outcome_judge() { cp "$FIX/outcome-judge.json" "$XDG_CONFIG_HOME/vaultmem/ju
   mkdir -p "$HOME/k"
   printf '%s\n' "$KEY_VALUE" >"$HOME/k/gw.key"
   chmod 600 "$HOME/k/gw.key"
-  run judge_in "$STATE_TEXT" smoke --vault personal
+  run jev_in "$STATE_TEXT" smoke --vault personal
   [ "$status" -eq 0 ]
 }
 
@@ -507,7 +548,7 @@ use_outcome_judge() { cp "$FIX/outcome-judge.json" "$XDG_CONFIG_HOME/vaultmem/ju
   mkdir -p "$HOME/.config/vaultmem"
   printf '%s\n' "$KEY_VALUE" >"$HOME/.config/vaultmem/ai-gateway.key"
   chmod 640 "$HOME/.config/vaultmem/ai-gateway.key"
-  run judge_in "$STATE_TEXT" smoke --vault personal
+  run jev_in "$STATE_TEXT" smoke --vault personal
   [ "$status" -eq 3 ]
   [ -z "$output" ]
   curl_not_invoked
@@ -516,7 +557,7 @@ use_outcome_judge() { cp "$FIX/outcome-judge.json" "$XDG_CONFIG_HOME/vaultmem/ju
 
 @test "no key at all exits 3 and curl is never invoked" {
   unset AI_GATEWAY_API_KEY
-  run judge_in "$STATE_TEXT" smoke --vault personal
+  run jev_in "$STATE_TEXT" smoke --vault personal
   [ "$status" -eq 3 ]
   curl_not_invoked
 }
@@ -524,15 +565,15 @@ use_outcome_judge() { cp "$FIX/outcome-judge.json" "$XDG_CONFIG_HOME/vaultmem/ju
 # --- decision log -------------------------------------------------------------------
 
 @test "log row matches the design shape and holds no state text" {
-  run judge_in "$STATE_TEXT" smoke --vault personal --subject "Sessions/foo/_index.md"
+  run jev_in "$STATE_TEXT" smoke --vault personal --subject "Sessions/foo/_index.md"
   [ "$status" -eq 0 ]
   [ "$(wc -l <"$LOG" | tr -d ' ')" -eq 1 ]
-  [ "$(jq -c 'keys' "$LOG")" = '["answers","cost","feedback","http","id","input_tokens","judge","latency_ms","market_cost","model","state_sha256","subject","truncated","ts","vault"]' ]
+  [ "$(jq -c 'keys' "$LOG")" = '["answers","cost","feedback","http","id","input_tokens","latency_ms","market_cost","model","set","state_sha256","subject","truncated","ts","vault"]' ]
   local want
   want=$(printf '%s' "$STATE_TEXT" | shasum -a 256 2>/dev/null | awk '{print $1}')
   [ -n "$want" ] || want=$(printf '%s' "$STATE_TEXT" | sha256sum | awk '{print $1}')
   [ "$(jq -r '.state_sha256' "$LOG")" = "$want" ]
-  [ "$(jq -r '[.judge, .vault, .subject, .model, .truncated, .http, .input_tokens, .cost, .market_cost, .latency_ms, .feedback] | @tsv' "$LOG")" = \
+  [ "$(jq -r '[.set, .vault, .subject, .model, .truncated, .http, .input_tokens, .cost, .market_cost, .latency_ms, .feedback] | @tsv' "$LOG")" = \
     "smoke	personal	Sessions/foo/_index.md	typesafe-ai/jev	false	200	304	0	0.000012768	212	" ]
   [ "$(jq -r '.answers.failed.probability' "$LOG")" = "0.99" ]
   jq -e '.ts | test("^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9:]{8}Z$")' "$LOG"
@@ -543,13 +584,13 @@ use_outcome_judge() { cp "$FIX/outcome-judge.json" "$XDG_CONFIG_HOME/vaultmem/ju
 
 @test "log=false writes nothing" {
   write_config log=false
-  run judge_in "$STATE_TEXT" smoke --vault personal
+  run jev_in "$STATE_TEXT" smoke --vault personal
   [ "$status" -eq 0 ]
   [ ! -e "$LOG" ]
 }
 
 @test "an egress-denied call writes no log row" {
-  run judge_in "$STATE_TEXT" smoke --vault work
+  run jev_in "$STATE_TEXT" smoke --vault work
   [ "$status" -eq 3 ]
   [ ! -e "$LOG" ]
 }
@@ -558,24 +599,24 @@ use_outcome_judge() { cp "$FIX/outcome-judge.json" "$XDG_CONFIG_HOME/vaultmem/ju
   mkdir -p "$(dirname "$LOG")"
   printf '{"id":"ancient"}\n' >"$LOG.1"
   printf '{"id":"old-1"}\n{"id":"old-2"}\n' >"$LOG"
-  VAULTMEM_JUDGE_LOG_MAX_BYTES=10 run judge_in "$STATE_TEXT" smoke --vault personal
+  VAULTMEM_JEV_LOG_MAX_BYTES=10 run jev_in "$STATE_TEXT" smoke --vault personal
   [ "$status" -eq 0 ]
   [ "$(jq -r '.id' "$LOG.1" | tr '\n' ' ')" = "old-1 old-2 " ]
   [ "$(wc -l <"$LOG" | tr -d ' ')" -eq 1 ]
-  [ "$(jq -r '.judge' "$LOG")" = "smoke" ]
+  [ "$(jq -r '.set' "$LOG")" = "smoke" ]
   ! grep -q ancient "$LOG" "$LOG.1" || false
 
-  run judge_cmd log -n 2
+  run jev_cmd log -n 2
   [ "$status" -eq 0 ]
   [ "${#lines[@]}" -eq 2 ]
   [ "$(printf '%s\n' "${lines[0]}" | jq -r '.id')" = "old-2" ]
-  [ "$(printf '%s\n' "${lines[1]}" | jq -r '.judge')" = "smoke" ]
+  [ "$(printf '%s\n' "${lines[1]}" | jq -r '.set')" = "smoke" ]
 }
 
 @test "rotation: below the limit nothing moves" {
   mkdir -p "$(dirname "$LOG")"
   printf '{"id":"old-1"}\n' >"$LOG"
-  VAULTMEM_JUDGE_LOG_MAX_BYTES=100000 run judge_in "$STATE_TEXT" smoke --vault personal
+  VAULTMEM_JEV_LOG_MAX_BYTES=100000 run jev_in "$STATE_TEXT" smoke --vault personal
   [ "$status" -eq 0 ]
   [ ! -e "$LOG.1" ]
   [ "$(wc -l <"$LOG" | tr -d ' ')" -eq 2 ]
@@ -586,7 +627,7 @@ use_outcome_judge() { cp "$FIX/outcome-judge.json" "$XDG_CONFIG_HOME/vaultmem/ju
   mkdir -p "$(dirname "$LOG")"
   printf '{"id":"old-1"}\n' >"$LOG"
   chmod 555 "$(dirname "$LOG")"
-  VAULTMEM_JUDGE_LOG_MAX_BYTES=10 run judge_in "$STATE_TEXT" smoke --vault personal --gate failed
+  VAULTMEM_JEV_LOG_MAX_BYTES=10 run jev_in "$STATE_TEXT" smoke --vault personal --gate failed
   chmod 755 "$(dirname "$LOG")"
   [ "$status" -eq 0 ]
   [ "$(cat "$LOG")" = '{"id":"old-1"}' ]
@@ -594,78 +635,78 @@ use_outcome_judge() { cp "$FIX/outcome-judge.json" "$XDG_CONFIG_HOME/vaultmem/ju
 }
 
 @test "log: -n limits rows, no log file prints nothing" {
-  run judge_cmd log
+  run jev_cmd log
   [ "$status" -eq 0 ]
   [ -z "$output" ]
   mkdir -p "$(dirname "$LOG")"
   printf '{"id":"a"}\n{"id":"b"}\n{"id":"c"}\n' >"$LOG"
-  run judge_cmd log -n 1
+  run jev_cmd log -n 1
   [ "$output" = '{"id":"c"}' ]
-  run judge_cmd log
+  run jev_cmd log
   [ "${#lines[@]}" -eq 3 ]
-  run judge_cmd log -n x
+  run jev_cmd log -n x
   [ "$status" -eq 64 ]
 }
 
 # --- usage errors --------------------------------------------------------------------
 
 @test "usage errors exit 64 and never invoke curl" {
-  run judge_cmd
+  run jev_cmd
   [ "$status" -eq 64 ]
-  run judge_in "$STATE_TEXT" smoke --vault personal --format xml
+  run jev_in "$STATE_TEXT" smoke --vault personal --format xml
   [ "$status" -eq 64 ]
-  run judge_in "$STATE_TEXT" smoke --bogus
+  run jev_in "$STATE_TEXT" smoke --bogus
   [ "$status" -eq 64 ]
-  run judge_in "$STATE_TEXT" smoke --vault
+  run jev_in "$STATE_TEXT" smoke --vault
   [ "$status" -eq 64 ]
-  run judge_in "$STATE_TEXT" nosuchjudge --vault personal
+  run jev_in "$STATE_TEXT" nosuchset --vault personal
   [ "$status" -eq 64 ]
-  run judge_in "$STATE_TEXT" ../smoke --vault personal
+  run jev_in "$STATE_TEXT" ../smoke --vault personal
   [ "$status" -eq 64 ]
-  run judge_in "$STATE_TEXT" smoke --vault personal --gate nosuchquestion
+  run jev_in "$STATE_TEXT" smoke --vault personal --gate nosuchquestion
   [ "$status" -eq 64 ]
   curl_not_invoked
 }
 
 @test "--gate on a score question is a usage error" {
-  use_outcome_judge
-  run judge_in "$STATE_TEXT" outcome --vault personal --gate severity
+  use_outcome_set
+  run jev_in "$STATE_TEXT" outcome --vault personal --gate severity
   [ "$status" -eq 64 ]
   curl_not_invoked
 }
 
 @test "bench with no fixture at the default path is a usage error" {
-  run judge_cmd bench --vault personal
+  run jev_cmd bench --vault personal
   [ "$status" -eq 64 ]
   grep -q 'no fixture at .*/vaultmem/bench.tsv' "$STDERR"
   curl_not_invoked
 }
 
 @test "feedback and calibration usage errors exit 64" {
-  run judge_cmd feedback
+  run jev_cmd feedback
   [ "$status" -eq 64 ]
-  run judge_cmd feedback only-an-id
+  run jev_cmd feedback only-an-id
   [ "$status" -eq 64 ]
-  run judge_cmd feedback an-id maybe
+  run jev_cmd feedback an-id maybe
   [ "$status" -eq 64 ]
-  run judge_cmd calibration --format xml
+  run jev_cmd calibration --format xml
   [ "$status" -eq 64 ]
-  run judge_cmd calibration --bogus
+  run jev_cmd calibration --bogus
   [ "$status" -eq 64 ]
-  run judge_cmd calibration --judge
+  run jev_cmd calibration --set
   [ "$status" -eq 64 ]
   curl_not_invoked
 }
 
 # --- list ---------------------------------------------------------------------------
 
-@test "list shows shipped judges, and a user file wins over a shipped one" {
-  run judge_cmd list
+@test "list shows shipped sets, and a user file wins over a shipped one" {
+  run jev_cmd list
   [ "$status" -eq 0 ]
   printf '%s\n' "$output" | grep -q "^smoke	shipped	"
-  use_outcome_judge
-  cp "$ROOT/ext/judge/judges/smoke.json" "$XDG_CONFIG_HOME/vaultmem/judges/smoke.json"
-  run judge_cmd list
+  use_outcome_set
+  cp "$ROOT/ext/jev/sets/smoke.json" "$XDG_CONFIG_HOME/vaultmem/jev/smoke.json"
+  run jev_cmd list
   printf '%s\n' "$output" | grep -q "^smoke	user	"
   printf '%s\n' "$output" | grep -q "^outcome	user	"
   [ "$(printf '%s\n' "$output" | grep -c '^smoke	')" -eq 1 ]
@@ -674,25 +715,25 @@ use_outcome_judge() { cp "$FIX/outcome-judge.json" "$XDG_CONFIG_HOME/vaultmem/ju
 # --- doctor -------------------------------------------------------------------------
 
 @test "doctor: a healthy setup exits 0 and never prints the key" {
-  run judge_cmd doctor
+  run jev_cmd doctor
   [ "$status" -eq 0 ]
   [[ "$output" == *"key present"* ]]
-  [[ "$output" == *"judges/smoke.json"* ]]
+  [[ "$output" == *"sets/smoke.json"* ]]
   [[ "$output" != *"$KEY_VALUE"* ]]
   ! grep -q "$KEY_VALUE" "$STDERR" || false
   curl_not_invoked
 }
 
-@test "doctor: an unknown [ext.judge] key is an error" {
-  write_config extra=ext.judge.key_cmd=/bin/evil
-  run judge_cmd doctor
+@test "doctor: an unknown [ext.jev] key is an error" {
+  write_config extra=ext.jev.key_cmd=/bin/evil
+  run jev_cmd doctor
   [ "$status" -eq 1 ]
   [[ "$output" == *"unknown key: key_cmd"* ]]
 }
 
 @test "doctor: bad value shapes are errors" {
   write_config enabled=yes timeout_ms=fast base_url=http://gateway.example.com
-  run judge_cmd doctor
+  run jev_cmd doctor
   [ "$status" -eq 1 ]
   [[ "$output" == *"enabled must be true or false"* ]]
   [[ "$output" == *"timeout_ms must be a positive integer"* ]]
@@ -704,7 +745,7 @@ use_outcome_judge() { cp "$FIX/outcome-judge.json" "$XDG_CONFIG_HOME/vaultmem/ju
   mkdir -p "$HOME/.config/vaultmem"
   printf '%s\n' "$KEY_VALUE" >"$HOME/.config/vaultmem/ai-gateway.key"
   chmod 644 "$HOME/.config/vaultmem/ai-gateway.key"
-  run judge_cmd doctor
+  run jev_cmd doctor
   [ "$status" -eq 1 ]
   [[ "$output" == *"wider than 600"* ]]
   [[ "$output" != *"$KEY_VALUE"* ]]
@@ -712,19 +753,19 @@ use_outcome_judge() { cp "$FIX/outcome-judge.json" "$XDG_CONFIG_HOME/vaultmem/ju
 
 @test "doctor: a missing key is an error when enabled, a note when disabled" {
   unset AI_GATEWAY_API_KEY
-  run judge_cmd doctor
+  run jev_cmd doctor
   [ "$status" -eq 1 ]
   write_config enabled=false
-  run judge_cmd doctor
+  run jev_cmd doctor
   [ "$status" -eq 0 ]
   [[ "$output" == *"note"*"no key"* ]]
 }
 
-@test "doctor: a judge file that does not parse, or has a bad type, is an error" {
-  printf '{not json' >"$XDG_CONFIG_HOME/vaultmem/judges/broken.json"
+@test "doctor: a set file that does not parse, or has a bad type, is an error" {
+  printf '{not json' >"$XDG_CONFIG_HOME/vaultmem/jev/broken.json"
   printf '{"version":1,"questions":{"q":{"type":"noul"}},"thresholds":{"zz":{"yes":2}}}' \
-    >"$XDG_CONFIG_HOME/vaultmem/judges/badtype.json"
-  run judge_cmd doctor
+    >"$XDG_CONFIG_HOME/vaultmem/jev/badtype.json"
+  run jev_cmd doctor
   [ "$status" -eq 1 ]
   [[ "$output" == *"broken.json: not valid JSON"* ]]
   [[ "$output" == *"badtype.json: question q: type must be boolean, choice, or score"* ]]
@@ -732,13 +773,13 @@ use_outcome_judge() { cp "$FIX/outcome-judge.json" "$XDG_CONFIG_HOME/vaultmem/ju
 }
 
 @test "doctor: config unavailable is an error" {
-  VAULTMEM_BIN="$BATS_TEST_TMPDIR/bin/does-not-exist" run judge_cmd doctor
+  VAULTMEM_BIN="$BATS_TEST_TMPDIR/bin/does-not-exist" run jev_cmd doctor
   [ "$status" -eq 1 ]
   [[ "$output" == *"config not available"* ]]
 }
 
 @test "doctor --live: prints the gateway error type and message, never the key" {
-  FAKE_CURL_RESPONSE="$FIX/error-401.json" FAKE_CURL_HTTP=401 run judge_cmd doctor --live
+  FAKE_CURL_RESPONSE="$FIX/error-401.json" FAKE_CURL_HTTP=401 run jev_cmd doctor --live
   [ "$status" -eq 1 ]
   [[ "$output" == *"authentication_error: Authentication failed"* ]]
   [[ "$output" != *"$KEY_VALUE"* ]]
@@ -746,31 +787,31 @@ use_outcome_judge() { cp "$FIX/outcome-judge.json" "$XDG_CONFIG_HOME/vaultmem/ju
 
 @test "doctor --live: refuses when the extension is disabled" {
   write_config enabled=false
-  run judge_cmd doctor --live
+  run jev_cmd doctor --live
   [ "$status" -eq 1 ]
   curl_not_invoked
 }
 
-# --- the groom-triage judge -----------------------------------------------------------
+# --- the groom-triage set -----------------------------------------------------------
 
-# The state a real `groom --judge` call sends: frontmatter, bookmark, pinned,
+# The state a real `groom --triage` call sends: frontmatter, bookmark, pinned,
 # git state, work-log tail, and the parent Project's decisions. Ages and counts
 # arrive as plain text; the model never computes them.
 groom_state() { cat "$FIX/groom-triage-state.txt"; }
 
 @test "groom-triage: the request body matches the golden file" {
   FAKE_CURL_RESPONSE="$FIX/groom-triage-response.json" \
-    run judge_in "$(groom_state)" groom-triage --vault personal --subject "Sessions/ad707-athlete-prepare/_index.md"
+    run jev_in "$(groom_state)" groom-triage --vault personal --subject "Sessions/ad707-athlete-prepare/_index.md"
   [ "$status" -eq 0 ]
   diff <(jq -S . "$CURL_REC/body") <(jq -S . "$FIX/groom-triage-body.json")
   # The state fits the budget, so nothing was cut.
   [ "$(tail -n 1 "$LOG" | jq -r '.truncated')" = "false" ]
 }
 
-@test "groom-triage: the judge file ships with the four booleans and the choice" {
-  run judge_cmd list
+@test "groom-triage: the set file ships with the four booleans and the choice" {
+  run jev_cmd list
   printf '%s\n' "$output" | grep -q "^groom-triage	shipped	"
-  local j="$ROOT/ext/judge/judges/groom-triage.json"
+  local j="$ROOT/ext/jev/sets/groom-triage.json"
   [ "$(jq -r '[.questions | to_entries[] | select(.value.type == "boolean") | .key] | sort | join(",")' "$j")" = \
     "blocked_external,has_next_step,undistilled,work_complete" ]
   [ "$(jq -r '.questions.recommendation.type' "$j")" = "choice" ]
@@ -789,7 +830,7 @@ groom_state() { cat "$FIX/groom-triage-state.txt"; }
 
 @test "groom-triage: a canned response maps to the documented answer fields" {
   FAKE_CURL_RESPONSE="$FIX/groom-triage-response.json" \
-    run judge_in "$(groom_state)" groom-triage --vault personal
+    run jev_in "$(groom_state)" groom-triage --vault personal
   [ "$status" -eq 0 ]
   # The four booleans core reads by probability.
   [ "$(printf '%s' "$output" | jq -r '.answers.work_complete.probability')" = "0.04" ]
@@ -799,19 +840,19 @@ groom_state() { cat "$FIX/groom-triage-state.txt"; }
   # The choice core reads by .choice and .probabilities.<choice>.
   [ "$(printf '%s' "$output" | jq -r '.answers.recommendation.choice')" = "park" ]
   [ "$(printf '%s' "$output" | jq -r '.answers.recommendation.probabilities.park')" = "0.81" ]
-  [ "$(printf '%s' "$output" | jq -r '.judge')" = "groom-triage" ]
-  # The id on stdout keys `judge feedback` later.
+  [ "$(printf '%s' "$output" | jq -r '.set')" = "groom-triage" ]
+  # The id on stdout keys `jev feedback` later.
   [ "$(printf '%s' "$output" | jq -r '.id')" = "$(jq -r '.id' "$LOG")" ]
 }
 
 @test "groom-triage: gating the recommendation maps confidence to exit codes" {
   FAKE_CURL_RESPONSE="$FIX/groom-triage-response.json" \
-    run judge_in "$(groom_state)" groom-triage --vault personal --gate recommendation
+    run jev_in "$(groom_state)" groom-triage --vault personal --gate recommendation
   [ "$status" -eq 0 ]
   [ "$(printf '%s' "$output" | jq -r '.gate.verdict')" = "yes" ]
   # Below min_confidence = 0.6 the caller gets "no opinion".
   FAKE_CURL_RESPONSE="$FIX/groom-triage-response-lowconf.json" \
-    run judge_in "$(groom_state)" groom-triage --vault personal --gate recommendation
+    run jev_in "$(groom_state)" groom-triage --vault personal --gate recommendation
   [ "$status" -eq 2 ]
   [ "$(printf '%s' "$output" | jq -r '.gate.verdict')" = "abstain" ]
 }
@@ -820,7 +861,7 @@ groom_state() { cat "$FIX/groom-triage-state.txt"; }
   local big
   big="$(groom_state)$(printf 'x%.0s' $(seq 1 24000))TAIL-MARKER"
   FAKE_CURL_RESPONSE="$FIX/groom-triage-response.json" \
-    run judge_in "$big" groom-triage --vault personal
+    run jev_in "$big" groom-triage --vault personal
   [ "$status" -eq 0 ]
   [ "$(jq -r '.state | length' "$CURL_REC/body")" -eq 24000 ]
   # tail-biased: the end survives, the head is gone.
@@ -839,15 +880,15 @@ seed_log() {
   printf '%s\n' "$@" >"$target"
 }
 
-DEC_A='{"id":"dec-a","ts":"2026-09-20T10:00:00Z","judge":"groom-triage","vault":"personal","answers":{"recommendation":{"type":"choice","choice":"archive","probabilities":{"archive":0.91,"park":0.09}}},"feedback":null}'
-DEC_B='{"id":"dec-b","ts":"2026-09-20T11:00:00Z","judge":"groom-triage","vault":"personal","answers":{"recommendation":{"type":"choice","choice":"park","probabilities":{"park":0.72,"archive":0.28}}},"feedback":null}'
-DEC_C='{"id":"dec-c","ts":"2026-09-20T12:00:00Z","judge":"smoke","vault":"personal","answers":{"failed":{"type":"boolean","probability":0.88}},"feedback":null}'
+DEC_A='{"id":"dec-a","ts":"2026-09-20T10:00:00Z","set":"groom-triage","vault":"personal","answers":{"recommendation":{"type":"choice","choice":"archive","probabilities":{"archive":0.91,"park":0.09}}},"feedback":null}'
+DEC_B='{"id":"dec-b","ts":"2026-09-20T11:00:00Z","set":"groom-triage","vault":"personal","answers":{"recommendation":{"type":"choice","choice":"park","probabilities":{"park":0.72,"archive":0.28}}},"feedback":null}'
+DEC_C='{"id":"dec-c","ts":"2026-09-20T12:00:00Z","set":"smoke","vault":"personal","answers":{"failed":{"type":"boolean","probability":0.88}},"feedback":null}'
 
 @test "feedback: appends a row and never rewrites the existing ones" {
   seed_log "$LOG" "$DEC_A" "$DEC_B"
   local before
   before=$(cat "$LOG")
-  run judge_cmd feedback dec-a right
+  run jev_cmd feedback dec-a right
   [ "$status" -eq 0 ]
   [ -z "$output" ]
   # The original rows are byte-identical; the new row is appended after them.
@@ -855,14 +896,14 @@ DEC_C='{"id":"dec-c","ts":"2026-09-20T12:00:00Z","judge":"smoke","vault":"person
   [ "$(wc -l <"$LOG" | tr -d ' ')" -eq 3 ]
   [ "$(tail -n 1 "$LOG" | jq -r '[.id, .feedback] | @tsv')" = "dec-a	right" ]
   tail -n 1 "$LOG" | jq -e '.ts | test("^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9:]{8}Z$")'
-  # A feedback row carries no judge field, so it is never itself a decision.
-  [ "$(tail -n 1 "$LOG" | jq -r 'has("judge")')" = "false" ]
+  # A feedback row carries no set field, so it is never itself a decision.
+  [ "$(tail -n 1 "$LOG" | jq -r 'has("set")')" = "false" ]
   curl_not_invoked
 }
 
 @test "feedback: an unknown id exits 64 with one stderr line and appends nothing" {
   seed_log "$LOG" "$DEC_A"
-  run judge_cmd feedback nosuch-id right
+  run jev_cmd feedback nosuch-id right
   [ "$status" -eq 64 ]
   [ -z "$output" ]
   [ "$(wc -l <"$STDERR" | tr -d ' ')" -eq 1 ]
@@ -871,12 +912,12 @@ DEC_C='{"id":"dec-c","ts":"2026-09-20T12:00:00Z","judge":"smoke","vault":"person
   curl_not_invoked
 }
 
-@test "feedback: an id only in judge.jsonl.1 is found, and .1 is not rewritten" {
+@test "feedback: an id only in jev.jsonl.1 is found, and .1 is not rewritten" {
   seed_log "$LOG.1" "$DEC_A"
   seed_log "$LOG" "$DEC_B"
   local rotated_before
   rotated_before=$(cat "$LOG.1")
-  run judge_cmd feedback dec-a wrong
+  run jev_cmd feedback dec-a wrong
   [ "$status" -eq 0 ]
   # The rotated file is untouched; the feedback row lands in the live file.
   [ "$(cat "$LOG.1")" = "$rotated_before" ]
@@ -886,33 +927,33 @@ DEC_C='{"id":"dec-c","ts":"2026-09-20T12:00:00Z","judge":"smoke","vault":"person
 
 @test "feedback: feedback on a row that already has feedback appends again" {
   seed_log "$LOG" "$DEC_A"
-  run judge_cmd feedback dec-a wrong
+  run jev_cmd feedback dec-a wrong
   [ "$status" -eq 0 ]
-  run judge_cmd feedback dec-a right
+  run jev_cmd feedback dec-a right
   [ "$status" -eq 0 ]
   [ "$(wc -l <"$LOG" | tr -d ' ')" -eq 3 ]
-  [ "$(jq -r 'select(has("judge") | not) | .feedback' "$LOG" | tr '\n' ' ')" = "wrong right " ]
+  [ "$(jq -r 'select(has("set") | not) | .feedback' "$LOG" | tr '\n' ' ')" = "wrong right " ]
   # The latest wins at read time: one row, counted right.
-  run judge_cmd calibration
+  run jev_cmd calibration
   printf '%s\n' "$output" | grep -q "^0.9-1.0	1	1	1$"
 }
 
 @test "feedback: a feedback row is not itself a feedbackable decision" {
   seed_log "$LOG" "$DEC_A"
-  run judge_cmd feedback dec-a right
+  run jev_cmd feedback dec-a right
   [ "$status" -eq 0 ]
   # dec-a now has a feedback row; feedback on it still resolves to the decision.
-  run judge_cmd feedback dec-a wrong
+  run jev_cmd feedback dec-a wrong
   [ "$status" -eq 0 ]
   # An id that exists only as a feedback row is still unknown.
-  run judge_cmd feedback nosuch right
+  run jev_cmd feedback nosuch right
   [ "$status" -eq 64 ]
 }
 
 @test "feedback: works with enabled=false and never invokes curl" {
   write_config enabled=false
   seed_log "$LOG" "$DEC_A"
-  run judge_cmd feedback dec-a right
+  run jev_cmd feedback dec-a right
   [ "$status" -eq 0 ]
   [ "$(tail -n 1 "$LOG" | jq -r '.feedback')" = "right" ]
   curl_not_invoked
@@ -920,7 +961,7 @@ DEC_C='{"id":"dec-c","ts":"2026-09-20T12:00:00Z","judge":"smoke","vault":"person
 
 @test "feedback: needs no config at all (the log is local data)" {
   seed_log "$LOG" "$DEC_A"
-  VAULTMEM_BIN="$BATS_TEST_TMPDIR/bin/does-not-exist" run judge_cmd feedback dec-a right
+  VAULTMEM_BIN="$BATS_TEST_TMPDIR/bin/does-not-exist" run jev_cmd feedback dec-a right
   [ "$status" -eq 0 ]
   [ "$(tail -n 1 "$LOG" | jq -r '.feedback')" = "right" ]
   curl_not_invoked
@@ -928,36 +969,36 @@ DEC_C='{"id":"dec-c","ts":"2026-09-20T12:00:00Z","judge":"smoke","vault":"person
 
 @test "feedback: a rotation during the append is survived without failing" {
   seed_log "$LOG" "$DEC_A"
-  VAULTMEM_JUDGE_LOG_MAX_BYTES=10 run judge_cmd feedback dec-a right
+  VAULTMEM_JEV_LOG_MAX_BYTES=10 run jev_cmd feedback dec-a right
   [ "$status" -eq 0 ]
   # The decision row rotated out; the feedback row is alone in the live file.
   [ "$(jq -r '.id' "$LOG.1")" = "dec-a" ]
   [ "$(tail -n 1 "$LOG" | jq -r '[.id, .feedback] | @tsv')" = "dec-a	right" ]
   # Both sides still join: the pair survives the rotation boundary.
-  run judge_cmd calibration
+  run jev_cmd calibration
   [ "$status" -eq 0 ]
   printf '%s\n' "$output" | grep -q "^0.9-1.0	1	1	1$"
 }
 
 # --- calibration --------------------------------------------------------------------------
 
-@test "calibration: buckets a synthetic log by judged probability" {
+@test "calibration: buckets a synthetic log by stated probability" {
   # One row per bucket, plus a second 0.9-1.0 row marked wrong so accuracy != 1.
   seed_log "$LOG" \
-    '{"id":"p55","judge":"groom-triage","answers":{"recommendation":{"type":"choice","choice":"park","probabilities":{"park":0.55}}}}' \
-    '{"id":"p65","judge":"groom-triage","answers":{"recommendation":{"type":"choice","choice":"park","probabilities":{"park":0.65}}}}' \
-    '{"id":"p75","judge":"groom-triage","answers":{"recommendation":{"type":"choice","choice":"park","probabilities":{"park":0.75}}}}' \
-    '{"id":"p85","judge":"groom-triage","answers":{"recommendation":{"type":"choice","choice":"park","probabilities":{"park":0.85}}}}' \
-    '{"id":"p95","judge":"groom-triage","answers":{"recommendation":{"type":"choice","choice":"park","probabilities":{"park":0.95}}}}' \
-    '{"id":"p97","judge":"groom-triage","answers":{"recommendation":{"type":"choice","choice":"park","probabilities":{"park":0.97}}}}'
+    '{"id":"p55","set":"groom-triage","answers":{"recommendation":{"type":"choice","choice":"park","probabilities":{"park":0.55}}}}' \
+    '{"id":"p65","set":"groom-triage","answers":{"recommendation":{"type":"choice","choice":"park","probabilities":{"park":0.65}}}}' \
+    '{"id":"p75","set":"groom-triage","answers":{"recommendation":{"type":"choice","choice":"park","probabilities":{"park":0.75}}}}' \
+    '{"id":"p85","set":"groom-triage","answers":{"recommendation":{"type":"choice","choice":"park","probabilities":{"park":0.85}}}}' \
+    '{"id":"p95","set":"groom-triage","answers":{"recommendation":{"type":"choice","choice":"park","probabilities":{"park":0.95}}}}' \
+    '{"id":"p97","set":"groom-triage","answers":{"recommendation":{"type":"choice","choice":"park","probabilities":{"park":0.97}}}}'
   for id in p55 p65 p75 p85 p95; do
-    run judge_cmd feedback "$id" right
+    run jev_cmd feedback "$id" right
     [ "$status" -eq 0 ]
   done
-  run judge_cmd feedback p97 wrong
+  run jev_cmd feedback p97 wrong
   [ "$status" -eq 0 ]
 
-  run judge_cmd calibration
+  run jev_cmd calibration
   [ "$status" -eq 0 ]
   [ "${lines[0]}" = "bucket	n	right	accuracy" ]
   [ "${lines[1]}" = "0.5-0.6	1	1	1" ]
@@ -971,29 +1012,29 @@ DEC_C='{"id":"dec-c","ts":"2026-09-20T12:00:00Z","judge":"smoke","vault":"person
 
 @test "calibration: a decision with no feedback is not counted" {
   seed_log "$LOG" "$DEC_A" "$DEC_B"
-  run judge_cmd feedback dec-a right
-  run judge_cmd calibration
+  run jev_cmd feedback dec-a right
+  run jev_cmd calibration
   [ "$status" -eq 0 ]
   # Only dec-a (0.91) appears. dec-b (0.72) has no feedback.
   [ "${#lines[@]}" -eq 2 ]
   [ "${lines[1]}" = "0.9-1.0	1	1	1" ]
 }
 
-@test "calibration: --judge filters to one judge" {
+@test "calibration: --set filters to one set" {
   seed_log "$LOG" "$DEC_A" "$DEC_C"
-  run judge_cmd feedback dec-a right
-  run judge_cmd feedback dec-c right
-  run judge_cmd calibration
+  run jev_cmd feedback dec-a right
+  run jev_cmd feedback dec-c right
+  run jev_cmd calibration
   [ "${#lines[@]}" -eq 3 ]
-  run judge_cmd calibration --judge groom-triage
+  run jev_cmd calibration --set groom-triage
   [ "$status" -eq 0 ]
   [ "${#lines[@]}" -eq 2 ]
   [ "${lines[1]}" = "0.9-1.0	1	1	1" ]
-  run judge_cmd calibration --judge smoke
+  run jev_cmd calibration --set smoke
   [ "${#lines[@]}" -eq 2 ]
-  # dec-c is a boolean judge: its probability is the one that gets bucketed.
+  # dec-c is a boolean set: its probability is the one that gets bucketed.
   [ "${lines[1]}" = "0.8-0.9	1	1	1" ]
-  run judge_cmd calibration --judge nosuchjudge
+  run jev_cmd calibration --set nosuchset
   [ "$status" -eq 0 ]
   [[ "$output" == *"no feedback rows yet"* ]]
 }
@@ -1001,11 +1042,11 @@ DEC_C='{"id":"dec-c","ts":"2026-09-20T12:00:00Z","judge":"smoke","vault":"person
 @test "calibration: joins feedback to decisions across a rotation boundary" {
   seed_log "$LOG.1" "$DEC_A"
   seed_log "$LOG" "$DEC_B"
-  run judge_cmd feedback dec-a right
+  run jev_cmd feedback dec-a right
   [ "$status" -eq 0 ]
-  run judge_cmd feedback dec-b wrong
+  run jev_cmd feedback dec-b wrong
   [ "$status" -eq 0 ]
-  run judge_cmd calibration
+  run jev_cmd calibration
   [ "$status" -eq 0 ]
   # dec-a is in .1 at 0.91, dec-b is live at 0.72. Both join.
   [ "${lines[1]}" = "0.7-0.8	1	0	0" ]
@@ -1013,12 +1054,12 @@ DEC_C='{"id":"dec-c","ts":"2026-09-20T12:00:00Z","judge":"smoke","vault":"person
 }
 
 @test "calibration: no feedback rows prints one line and exits 0" {
-  run judge_cmd calibration
+  run jev_cmd calibration
   [ "$status" -eq 0 ]
   [ "${#lines[@]}" -eq 1 ]
   [[ "$output" == *"no feedback rows yet"* ]]
   seed_log "$LOG" "$DEC_A"
-  run judge_cmd calibration
+  run jev_cmd calibration
   [ "$status" -eq 0 ]
   [ "${#lines[@]}" -eq 1 ]
   [[ "$output" == *"no feedback rows yet"* ]]
@@ -1027,19 +1068,19 @@ DEC_C='{"id":"dec-c","ts":"2026-09-20T12:00:00Z","judge":"smoke","vault":"person
 
 @test "calibration: a probability below 0.5 falls in no bucket" {
   seed_log "$LOG" \
-    '{"id":"low","judge":"groom-triage","answers":{"recommendation":{"type":"choice","choice":"park","probabilities":{"park":0.35}}}}'
-  run judge_cmd feedback low right
+    '{"id":"low","set":"groom-triage","answers":{"recommendation":{"type":"choice","choice":"park","probabilities":{"park":0.35}}}}'
+  run jev_cmd feedback low right
   [ "$status" -eq 0 ]
-  run judge_cmd calibration
+  run jev_cmd calibration
   [ "$status" -eq 0 ]
   [[ "$output" == *"no feedback rows yet"* ]]
 }
 
 @test "calibration: --format json emits one object per bucket" {
   seed_log "$LOG" "$DEC_A" "$DEC_B"
-  run judge_cmd feedback dec-a right
-  run judge_cmd feedback dec-b wrong
-  run judge_cmd calibration --format json
+  run jev_cmd feedback dec-a right
+  run jev_cmd feedback dec-b wrong
+  run jev_cmd calibration --format json
   [ "$status" -eq 0 ]
   [ "$(printf '%s' "$output" | jq -c 'map(.bucket)')" = '["0.7-0.8","0.9-1.0"]' ]
   [ "$(printf '%s' "$output" | jq -r '.[] | select(.bucket == "0.9-1.0") | [.n, .right, .accuracy] | @tsv')" = "1	1	1" ]
@@ -1048,12 +1089,12 @@ DEC_C='{"id":"dec-c","ts":"2026-09-20T12:00:00Z","judge":"smoke","vault":"person
 
 @test "calibration: works with enabled=false and with no config at all" {
   seed_log "$LOG" "$DEC_A"
-  run judge_cmd feedback dec-a right
+  run jev_cmd feedback dec-a right
   write_config enabled=false
-  run judge_cmd calibration
+  run jev_cmd calibration
   [ "$status" -eq 0 ]
   [ "${lines[1]}" = "0.9-1.0	1	1	1" ]
-  VAULTMEM_BIN="$BATS_TEST_TMPDIR/bin/does-not-exist" run judge_cmd calibration
+  VAULTMEM_BIN="$BATS_TEST_TMPDIR/bin/does-not-exist" run jev_cmd calibration
   [ "$status" -eq 0 ]
   [ "${lines[1]}" = "0.9-1.0	1	1	1" ]
   curl_not_invoked
@@ -1074,12 +1115,12 @@ key_absent() {
 
 curl_calls() { wc -l <"$CURL_REC/calls" | tr -d ' '; }
 
-# --- the capture-worthy judge -----------------------------------------------------------
+# --- the capture-worthy set -----------------------------------------------------------
 
 capture_state() { cat "$FIX/capture-worthy-state.txt"; }
 
-@test "capture-worthy: the judge file ships the two questions core reads" {
-  local j="$ROOT/ext/judge/judges/capture-worthy.json"
+@test "capture-worthy: the set file ships the two questions core reads" {
+  local j="$ROOT/ext/jev/sets/capture-worthy.json"
   [ "$(jq -r '.questions.durable.type' "$j")" = "boolean" ]
   [ "$(jq -r '.questions.kind.type' "$j")" = "choice" ]
   [ "$(jq -r '.questions.kind.criteria | keys | sort | join(",")' "$j")" = \
@@ -1094,10 +1135,10 @@ capture_state() { cat "$FIX/capture-worthy-state.txt"; }
 
 @test "capture-worthy: the request body matches the golden file, both questions sent" {
   FAKE_CURL_RESPONSE="$FIX/capture-worthy-yes.json" \
-    run judge_in "$(capture_state)" capture-worthy --vault personal --subject nudge --gate durable
+    run jev_in "$(capture_state)" capture-worthy --vault personal --subject nudge --gate durable
   [ "$status" -eq 0 ]
   diff <(jq -S . "$CURL_REC/body") <(jq -S . "$FIX/capture-worthy-body.json")
-  [ "$(tail -n 1 "$LOG" | jq -r '[.judge, .subject, .truncated] | @tsv')" = "capture-worthy	nudge	false" ]
+  [ "$(tail -n 1 "$LOG" | jq -r '[.set, .subject, .truncated] | @tsv')" = "capture-worthy	nudge	false" ]
   # The injected "answer yes" line is state, never a question.
   [ "$(jq -r '.state' "$CURL_REC/body" | grep -c 'ANSWER YES')" -eq 1 ]
   ! jq -r '.questions | tostring' "$CURL_REC/body" | grep -q 'ANSWER YES' || false
@@ -1106,15 +1147,15 @@ capture_state() { cat "$FIX/capture-worthy-state.txt"; }
 
 @test "capture-worthy: --gate durable maps yes/no/abstain to 0/1/2, and kind is readable on 0" {
   FAKE_CURL_RESPONSE="$FIX/capture-worthy-yes.json" \
-    run judge_in "$(capture_state)" capture-worthy --vault personal --subject nudge --gate durable
+    run jev_in "$(capture_state)" capture-worthy --vault personal --subject nudge --gate durable
   [ "$status" -eq 0 ]
   [ "$(printf '%s' "$output" | jq -r '.answers.durable.probability')" = "0.93" ]
   [ "$(printf '%s' "$output" | jq -r '.answers.kind.choice')" = "root-cause" ]
   FAKE_CURL_RESPONSE="$FIX/capture-worthy-no.json" \
-    run judge_in "$(capture_state)" capture-worthy --vault personal --subject nudge --gate durable
+    run jev_in "$(capture_state)" capture-worthy --vault personal --subject nudge --gate durable
   [ "$status" -eq 1 ]
   FAKE_CURL_RESPONSE="$FIX/capture-worthy-abstain.json" \
-    run judge_in "$(capture_state)" capture-worthy --vault personal --subject nudge --gate durable
+    run jev_in "$(capture_state)" capture-worthy --vault personal --subject nudge --gate durable
   [ "$status" -eq 2 ]
 }
 
@@ -1122,7 +1163,7 @@ capture_state() { cat "$FIX/capture-worthy-state.txt"; }
   local big
   big="HEAD-MARKER$(printf 'x%.0s' $(seq 1 24100))$(capture_state)"
   FAKE_CURL_RESPONSE="$FIX/capture-worthy-yes.json" \
-    run judge_in "$big" capture-worthy --vault personal --gate durable
+    run jev_in "$big" capture-worthy --vault personal --gate durable
   [ "$status" -eq 0 ]
   jq -r '.state' "$CURL_REC/body" | grep -q 'Streaming per team stays'
   ! jq -r '.state' "$CURL_REC/body" | grep -q 'HEAD-MARKER' || false
@@ -1135,7 +1176,7 @@ capture_state() { cat "$FIX/capture-worthy-state.txt"; }
 make_vaults() {
   local p="$STUB_VAULTS/personal" w="$STUB_VAULTS/work" sd="$STUB_VAULTS/side"
   mkdir -p "$p/MOCs" "$p/Debug" "$p/Notes" "$w/MOCs" "$sd/MOCs"
-  printf -- '---\ntype: moc\n---\n# Agent Memory\n\n> Vault-as-memory tooling, hooks, and the judge.\n' >"$p/MOCs/MOC - Agent Memory.md"
+  printf -- '---\ntype: moc\n---\n# Agent Memory\n\n> Vault-as-memory tooling, hooks, and Jev.\n' >"$p/MOCs/MOC - Agent Memory.md"
   printf -- '# Home Lab\n\n> Servers, networking, and the NAS.\n' >"$p/MOCs/MOC - Home Lab.md"
   printf -- '# Side Hustle\n' >"$sd/MOCs/MOC - Side Hustle.md"
   printf -- '# AcmeCorp Secret Roadmap\n\n> AcmeCorp internal.\n' >"$w/MOCs/MOC - AcmeCorp Secret Roadmap.md"
@@ -1160,14 +1201,14 @@ summary() { cat "$FIX/capture-summary.txt"; }
 
 @test "route: one consenting vault is one request, no vault question, documented JSON" {
   make_vaults
-  FAKE_CURL_RESPONSE="$FIX/route-one-response.json" run judge_in "$(summary)" route --subject capture
+  FAKE_CURL_RESPONSE="$FIX/route-one-response.json" run jev_in "$(summary)" route --subject capture
   [ "$status" -eq 0 ]
   [ "$(curl_calls)" -eq 1 ]
   diff <(jq -S . "$CURL_REC/body") <(jq -S . "$FIX/route-one-body.json")
   [ "$(printf '%s' "$output" | jq -c 'del(.id)')" = \
     '{"vault":"personal","category":"root","moc":"MOC - Agent Memory","probabilities":{"vault":1,"category":0.88,"moc":0.79}}' ]
   [ "$(printf '%s' "$output" | jq -r '.id')" = "$(jq -r '.id' "$LOG")" ]
-  [ "$(jq -r '[.judge, .vault, .subject] | @tsv' "$LOG")" = "route	personal	capture" ]
+  [ "$(jq -r '[.set, .vault, .subject] | @tsv' "$LOG")" = "route	personal	capture" ]
   key_absent
 }
 
@@ -1175,7 +1216,7 @@ summary() { cat "$FIX/capture-summary.txt"; }
   make_vaults
   write_config side=true
   FAKE_CURL_RESPONSE_1="$FIX/route-two-response-1.json" FAKE_CURL_RESPONSE_2="$FIX/route-two-response-2.json" \
-    run judge_in "$(summary)" route
+    run jev_in "$(summary)" route
   [ "$status" -eq 0 ]
   [ "$(curl_calls)" -eq 2 ]
   diff <(jq -S . "$CURL_REC/body.1") <(jq -S . "$FIX/route-two-body-1.json")
@@ -1191,7 +1232,7 @@ summary() { cat "$FIX/capture-summary.txt"; }
 @test "route: no consenting vault exits 3 and curl is never invoked" {
   make_vaults
   write_config personal=false
-  run judge_in "$(summary)" route
+  run jev_in "$(summary)" route
   [ "$status" -eq 3 ]
   [ -z "$output" ]
   curl_not_invoked
@@ -1201,7 +1242,7 @@ summary() { cat "$FIX/capture-summary.txt"; }
 @test "route: enabled=false exits 3 and curl is never invoked" {
   make_vaults
   write_config enabled=false side=true
-  run judge_in "$(summary)" route
+  run jev_in "$(summary)" route
   [ "$status" -eq 3 ]
   curl_not_invoked
 }
@@ -1213,7 +1254,7 @@ summary() { cat "$FIX/capture-summary.txt"; }
   # primary the non-consenting vault to prove those names are filtered out.
   export STUB_PRIMARY=work
   FAKE_CURL_RESPONSE_1="$FIX/route-two-response-1.json" FAKE_CURL_RESPONSE_2="$FIX/route-two-response-2.json" \
-    run judge_in "$(summary)" route
+    run jev_in "$(summary)" route
   [ "$status" -eq 0 ]
   ls "$CURL_REC"/body.* >/dev/null
   ! grep -l 'AcmeCorp' "$CURL_REC"/body* || false
@@ -1226,7 +1267,7 @@ summary() { cat "$FIX/capture-summary.txt"; }
   rm -r "$CURL_REC"
   write_config
   jq 'del(.answers.moc)' "$FIX/route-one-response.json" >"$BATS_TEST_TMPDIR/resp.json"
-  FAKE_CURL_RESPONSE="$BATS_TEST_TMPDIR/resp.json" run judge_in "$(summary)" route
+  FAKE_CURL_RESPONSE="$BATS_TEST_TMPDIR/resp.json" run jev_in "$(summary)" route
   [ "$status" -eq 0 ]
   ! grep -q 'AcmeCorp' "$CURL_REC/body" || false
   [ "$(jq -c '.questions | keys' "$CURL_REC/body")" = '["category"]' ]
@@ -1235,7 +1276,7 @@ summary() { cat "$FIX/capture-summary.txt"; }
 @test "route: a top vault below min_confidence exits 2 and sends nothing more" {
   make_vaults
   write_config side=true
-  FAKE_CURL_RESPONSE="$FIX/route-lowconf.json" run judge_in "$(summary)" route
+  FAKE_CURL_RESPONSE="$FIX/route-lowconf.json" run jev_in "$(summary)" route
   [ "$status" -eq 2 ]
   [ "$(curl_calls)" -eq 1 ]
   [ "$(printf '%s' "$output" | jq -c '[.vault, .moc, .probabilities.vault]')" = '["personal",null,0.52]' ]
@@ -1246,7 +1287,7 @@ summary() { cat "$FIX/capture-summary.txt"; }
   write_config side=true
   jq '.answers.vault.choice = "work" | .answers.vault.probabilities = {"work": 0.99}' \
     "$FIX/route-two-response-1.json" >"$BATS_TEST_TMPDIR/resp.json"
-  FAKE_CURL_RESPONSE="$BATS_TEST_TMPDIR/resp.json" run judge_in "$(summary)" route
+  FAKE_CURL_RESPONSE="$BATS_TEST_TMPDIR/resp.json" run jev_in "$(summary)" route
   [ "$status" -eq 3 ]
   [ -z "$output" ]
   [ "$(curl_calls)" -eq 1 ]
@@ -1256,7 +1297,7 @@ summary() { cat "$FIX/capture-summary.txt"; }
   make_vaults
   write_config side=true nodesc=true
   FAKE_CURL_RESPONSE_1="$FIX/route-two-response-1.json" FAKE_CURL_RESPONSE_2="$FIX/route-two-response-2.json" \
-    run judge_in "$(summary)" route
+    run jev_in "$(summary)" route
   [ "$status" -eq 0 ]
   [ "$(jq -c '.questions.vault.criteria' "$CURL_REC/body.1")" = '{"personal":"Personal","side":"Side Projects"}' ]
 }
@@ -1265,7 +1306,7 @@ summary() { cat "$FIX/capture-summary.txt"; }
   make_vaults
   rm -r "$STUB_VAULTS/personal/MOCs"
   jq 'del(.answers.moc)' "$FIX/route-one-response.json" >"$BATS_TEST_TMPDIR/resp.json"
-  FAKE_CURL_RESPONSE="$BATS_TEST_TMPDIR/resp.json" run judge_in "$(summary)" route
+  FAKE_CURL_RESPONSE="$BATS_TEST_TMPDIR/resp.json" run jev_in "$(summary)" route
   [ "$status" -eq 0 ]
   [ "$(jq -c '.questions | keys' "$CURL_REC/body")" = '["category"]' ]
   [ "$(printf '%s' "$output" | jq -c '[.moc, .probabilities.moc]')" = '[null,null]' ]
@@ -1277,11 +1318,11 @@ summary() { cat "$FIX/capture-summary.txt"; }
   jq --arg k "$KEY_VALUE" '.error.message = "bad key " + $k' "$FIX/error-401.json" >"$BATS_TEST_TMPDIR/err.json"
   # The second request gets an error body on a 200: a bad response.
   FAKE_CURL_RESPONSE_1="$FIX/route-two-response-1.json" FAKE_CURL_RESPONSE_2="$BATS_TEST_TMPDIR/err.json" \
-    run judge_in "$(summary)" route
+    run jev_in "$(summary)" route
   [ "$status" -eq 3 ]
   [ -z "$output" ]
   # The first request gets a 401 that echoes the key.
-  FAKE_CURL_RESPONSE="$BATS_TEST_TMPDIR/err.json" FAKE_CURL_HTTP=401 run judge_in "$(summary)" route
+  FAKE_CURL_RESPONSE="$BATS_TEST_TMPDIR/err.json" FAKE_CURL_HTTP=401 run jev_in "$(summary)" route
   [ "$status" -eq 3 ]
   [ -z "$output" ]
   key_absent
@@ -1289,13 +1330,13 @@ summary() { cat "$FIX/capture-summary.txt"; }
 
 # --- dupes ----------------------------------------------------------------------------
 
-@test "dupes: candidates are judged one boolean each and come back sorted" {
+@test "dupes: candidates are scored one boolean each and come back sorted" {
   make_vaults
   local p="$STUB_VAULTS/personal"
   # Duplicates and a path outside the vault root must not become candidates.
   search_hits "$p/Debug/Athlete rebuild OOM.md" "$p/Notes/Streaming patterns.md" \
     "$STUB_VAULTS/work/AcmeCorp incident.md" "$p/Notes/rebuild log.md"
-  FAKE_CURL_RESPONSE="$FIX/dupes-response.json" run judge_in "$(summary)" dupes --vault personal --subject capture
+  FAKE_CURL_RESPONSE="$FIX/dupes-response.json" run jev_in "$(summary)" dupes --vault personal --subject capture
   [ "$status" -eq 0 ]
   [ "$(curl_calls)" -eq 1 ]
   [ "$(cat "$STUB_REC.search")" = "personal --format json -n 5 Nightly athlete rebuild OOM stream per team" ]
@@ -1303,19 +1344,19 @@ summary() { cat "$FIX/capture-summary.txt"; }
   [ "$(printf '%s' "$output" | jq -r '.[] | "\(.probability) \(.path)"')" = \
     "$(printf '0.94 %s\n0.21 %s\n0.07 %s' "$p/Notes/Streaming patterns.md" "$p/Debug/Athlete rebuild OOM.md" "$p/Notes/rebuild log.md")" ]
   ! grep -q 'AcmeCorp' "$CURL_REC/body" || false
-  [ "$(jq -r '[.judge, .vault, .subject] | @tsv' "$LOG")" = "dupes	personal	capture" ]
+  [ "$(jq -r '[.set, .vault, .subject] | @tsv' "$LOG")" = "dupes	personal	capture" ]
   key_absent
 }
 
 @test "dupes: zero candidates prints [] and never invokes curl" {
   make_vaults
-  run judge_in "$(summary)" dupes --vault personal
+  run jev_in "$(summary)" dupes --vault personal
   [ "$status" -eq 0 ]
   [ "$output" = "[]" ]
   curl_not_invoked
   # Hits only in another vault are still zero candidates.
   search_hits "$STUB_VAULTS/work/AcmeCorp incident.md"
-  run judge_in "$(summary)" dupes --vault personal
+  run jev_in "$(summary)" dupes --vault personal
   [ "$status" -eq 0 ]
   [ "$output" = "[]" ]
   curl_not_invoked
@@ -1324,7 +1365,7 @@ summary() { cat "$FIX/capture-summary.txt"; }
 @test "dupes: a non-consenting vault exits 3 before search or curl" {
   make_vaults
   search_hits "$STUB_VAULTS/work/AcmeCorp incident.md"
-  run judge_in "$(summary)" dupes --vault work
+  run jev_in "$(summary)" dupes --vault work
   [ "$status" -eq 3 ]
   [ -z "$output" ]
   curl_not_invoked
@@ -1335,11 +1376,11 @@ summary() { cat "$FIX/capture-summary.txt"; }
   make_vaults
   search_hits "$STUB_VAULTS/personal/Notes/Streaming patterns.md"
   jq '{model, answers: {c1: .answers.c2}}' "$FIX/dupes-response.json" >"$BATS_TEST_TMPDIR/resp.json"
-  FAKE_CURL_RESPONSE="$BATS_TEST_TMPDIR/resp.json" run judge_in "$(summary)" dupes
+  FAKE_CURL_RESPONSE="$BATS_TEST_TMPDIR/resp.json" run jev_in "$(summary)" dupes
   [ "$status" -eq 0 ]
   [ "$(printf '%s' "$output" | jq -c 'map(.probability)')" = '[0.94]' ]
   rm -r "$CURL_REC"
-  STUB_WHICH_ERR="vaultmem: low-confidence guess (no match signal) → personal" run judge_in "$(summary)" dupes
+  STUB_WHICH_ERR="vaultmem: low-confidence guess (no match signal) → personal" run jev_in "$(summary)" dupes
   [ "$status" -eq 3 ]
   curl_not_invoked
 }
@@ -1347,11 +1388,11 @@ summary() { cat "$FIX/capture-summary.txt"; }
 @test "dupes: every candidate keeps a share of the state budget" {
   make_vaults
   local p="$STUB_VAULTS/personal"
-  jq '.max_state_bytes = 2000' "$ROOT/ext/judge/judges/dupes.json" >"$XDG_CONFIG_HOME/vaultmem/judges/dupes.json"
+  jq '.max_state_bytes = 2000' "$ROOT/ext/jev/sets/dupes.json" >"$XDG_CONFIG_HOME/vaultmem/jev/dupes.json"
   printf '# Huge\n%s\n' "$(printf 'y%.0s' $(seq 1 3000))" >"$p/Notes/Huge.md"
   search_hits "$p/Notes/Huge.md" "$p/Notes/Streaming patterns.md"
   jq '{model, answers: {c1: .answers.c1, c2: .answers.c2}}' "$FIX/dupes-response.json" >"$BATS_TEST_TMPDIR/resp.json"
-  FAKE_CURL_RESPONSE="$BATS_TEST_TMPDIR/resp.json" run judge_in "$(summary)" dupes --vault personal
+  FAKE_CURL_RESPONSE="$BATS_TEST_TMPDIR/resp.json" run jev_in "$(summary)" dupes --vault personal
   [ "$status" -eq 0 ]
   [ "$(jq -r '.state | utf8bytelength' "$CURL_REC/body")" -le 2000 ]
   jq -r '.state' "$CURL_REC/body" | grep -q 'Candidate c2'
@@ -1360,13 +1401,13 @@ summary() { cat "$FIX/capture-summary.txt"; }
 }
 
 @test "route and dupes usage errors exit 64 and never invoke curl" {
-  run judge_in "x" route --bogus
+  run jev_in "x" route --bogus
   [ "$status" -eq 64 ]
-  run judge_in "x" route --subject
+  run jev_in "x" route --subject
   [ "$status" -eq 64 ]
-  run judge_in "x" dupes --vault
+  run jev_in "x" dupes --vault
   [ "$status" -eq 64 ]
-  run judge_in "x" dupes personal
+  run jev_in "x" dupes personal
   [ "$status" -eq 64 ]
   curl_not_invoked
 }
@@ -1376,7 +1417,7 @@ summary() { cat "$FIX/capture-summary.txt"; }
 rerank_in() {
   local input="$1"
   shift
-  "$JUDGE_SH" "$JUDGE" rerank "$@" <"$input" 2>"$STDERR"
+  "$JEV_SH" "$JEV" rerank "$@" <"$input" 2>"$STDERR"
 }
 
 @test "rerank: the request body matches the golden file; a non-consenting candidate is absent" {
@@ -1394,7 +1435,7 @@ rerank_in() {
   ! grep -q '/vaults/' "$CURL_REC/body" || false
   [ "$(printf '%s' "$output" | jq -c '.scores')" = '{"c01":2.87,"c03":0.4,"c04":1.95}' ]
   [ "$(printf '%s' "$output" | jq -r '.id')" = "$(jq -r '.id' "$LOG")" ]
-  [ "$(jq -r '[.judge, .vault, .truncated] | @tsv' "$LOG")" = "rerank	personal,side	false" ]
+  [ "$(jq -r '[.set, .vault, .truncated] | @tsv' "$LOG")" = "rerank	personal,side	false" ]
   key_absent
 }
 
@@ -1484,7 +1525,7 @@ big_candidates() {
     c03: {type: "score", score: 3}}}' >"$resp"
 
   # Room for everything but the matched lines: they are dropped, heads survive.
-  jq '.max_state_bytes = 1000' "$ROOT/ext/judge/judges/rerank.json" >"$XDG_CONFIG_HOME/vaultmem/judges/rerank.json"
+  jq '.max_state_bytes = 1000' "$ROOT/ext/jev/sets/rerank.json" >"$XDG_CONFIG_HOME/vaultmem/jev/rerank.json"
   FAKE_CURL_RESPONSE="$resp" run rerank_in "$BATS_TEST_TMPDIR/in.json" --vault personal
   [ "$status" -eq 0 ]
   ! jq -r '.state' "$CURL_REC/body" | grep -q 'MATCH' || false
@@ -1492,7 +1533,7 @@ big_candidates() {
   [ "$(tail -n 1 "$LOG" | jq -r '.truncated')" = "true" ]
 
   # Tighter: heads are cut too, but every candidate keeps its block.
-  jq '.max_state_bytes = 400' "$ROOT/ext/judge/judges/rerank.json" >"$XDG_CONFIG_HOME/vaultmem/judges/rerank.json"
+  jq '.max_state_bytes = 400' "$ROOT/ext/jev/sets/rerank.json" >"$XDG_CONFIG_HOME/vaultmem/jev/rerank.json"
   FAKE_CURL_RESPONSE="$resp" run rerank_in "$BATS_TEST_TMPDIR/in.json" --vault personal
   [ "$status" -eq 0 ]
   [ "$(jq -r '.state | utf8bytelength' "$CURL_REC/body")" -le 400 ]
@@ -1503,7 +1544,7 @@ big_candidates() {
   [ "$(tail -n 1 "$LOG" | jq -r '.truncated')" = "true" ]
 
   # Under budget: nothing is cut and truncated stays false.
-  rm "$XDG_CONFIG_HOME/vaultmem/judges/rerank.json"
+  rm "$XDG_CONFIG_HOME/vaultmem/jev/rerank.json"
   FAKE_CURL_RESPONSE="$resp" run rerank_in "$BATS_TEST_TMPDIR/in.json" --vault personal
   [ "$status" -eq 0 ]
   [ "$(jq -r '.state' "$CURL_REC/body" | grep -c 'MATCH')" -eq 6 ]
@@ -1565,7 +1606,7 @@ make_bench() {
 #     0.000016 + 0.000024 + 0.00001 + 0.000022 = 0.00012; cost "0" each.
 @test "bench: precision@5, recall@10, MRR, tokens, cost, and model on the synthetic fixture" {
   make_bench
-  run judge_cmd bench --fixture "$FIX/bench.tsv" --vault personal
+  run jev_cmd bench --fixture "$FIX/bench.tsv" --vault personal
   [ "$status" -eq 0 ]
   [ "$(curl_calls)" -eq 5 ]
   diff <(printf '%s\n' "$output") - <<'TSV'
@@ -1580,13 +1621,13 @@ nightly	3	1	0.2000	1.0000	0.5000	0.2000	1.0000	0.3333	550	0.00000000	0.00002200
 TSV
   # Baseline came from search with -n, deduped; one rerank row per query.
   grep -q '^personal --format json -n 20 rebuild$' "$STUB_REC.search"
-  [ "$(jq -s 'map(select(.judge == "rerank")) | length' "$LOG")" -eq 5 ]
+  [ "$(jq -s 'map(select(.set == "rerank")) | length' "$LOG")" -eq 5 ]
   key_absent
 }
 
 @test "bench: --format json carries the same numbers" {
   make_bench
-  run judge_cmd bench --fixture "$FIX/bench.tsv" --vault personal --format json
+  run jev_cmd bench --fixture "$FIX/bench.tsv" --vault personal --format json
   [ "$status" -eq 0 ]
   [ "$(printf '%s' "$output" | jq -c '[.model, .vault, .n, .overall.queries, .overall.input_tokens, .overall.market_cost]')" = \
     '["typesafe-ai/jev","personal",20,5,3000,0.00012]' ]
@@ -1599,7 +1640,7 @@ TSV
 
 @test "bench: candidates carry title, frontmatter description, and first lines; paths are not sent" {
   make_bench
-  run judge_cmd bench --fixture "$FIX/bench.tsv" --vault personal
+  run jev_cmd bench --fixture "$FIX/bench.tsv" --vault personal
   [ "$status" -eq 0 ]
   local s
   s=$(jq -r '.state' "$CURL_REC/body.1")
@@ -1615,7 +1656,7 @@ TSV
 @test "bench: the default fixture is XDG_CONFIG_HOME/vaultmem/bench.tsv; -n reaches search" {
   make_bench
   cp "$FIX/bench.tsv" "$XDG_CONFIG_HOME/vaultmem/bench.tsv"
-  run judge_cmd bench --vault personal -n 10
+  run jev_cmd bench --vault personal -n 10
   [ "$status" -eq 0 ]
   grep -q '^personal --format json -n 10 nightly$' "$STUB_REC.search"
   [ "$(printf '%s\n' "$output" | tail -n 1 | cut -f 1)" = "(all)" ]
@@ -1624,7 +1665,7 @@ TSV
 @test "bench: a query with no hits scores zero and sends nothing for it" {
   make_bench
   printf 'no such thing\tNotes/Grocery list.md\nsearch ranking\tArchitecture/Search ranking.md\n' >"$BATS_TEST_TMPDIR/b.tsv"
-  FAKE_CURL_RESPONSE_1="$FIX/bench-response-2.json" run judge_cmd bench --fixture "$BATS_TEST_TMPDIR/b.tsv" --vault personal
+  FAKE_CURL_RESPONSE_1="$FIX/bench-response-2.json" run jev_cmd bench --fixture "$BATS_TEST_TMPDIR/b.tsv" --vault personal
   [ "$status" -eq 0 ]
   [ "$(curl_calls)" -eq 1 ]
   [ "$(printf '%s\n' "$output" | sed -n 3p)" = "no such thing	0	1	0.0000	0.0000	0.0000	0.0000	0.0000	0.0000	0	0.00000000	0.00000000" ]
@@ -1633,12 +1674,12 @@ TSV
 @test "bench: unavailable exits 3 with nothing on stdout" {
   make_bench
   write_config enabled=false
-  run judge_cmd bench --fixture "$FIX/bench.tsv" --vault personal
+  run jev_cmd bench --fixture "$FIX/bench.tsv" --vault personal
   [ "$status" -eq 3 ]
   [ -z "$output" ]
   curl_not_invoked
   write_config
-  run judge_cmd bench --fixture "$FIX/bench.tsv" --vault work
+  run jev_cmd bench --fixture "$FIX/bench.tsv" --vault work
   [ "$status" -eq 3 ]
   [ -z "$output" ]
   curl_not_invoked
@@ -1646,7 +1687,7 @@ TSV
   # A gateway failure part-way through: rows already scored are not printed.
   jq --arg k "$KEY_VALUE" '.error.message = "bad key " + $k' "$FIX/error-401.json" >"$BATS_TEST_TMPDIR/err.json"
   FAKE_CURL_RESPONSE_2="$BATS_TEST_TMPDIR/err.json" FAKE_CURL_HTTP=401 \
-    run judge_cmd bench --fixture "$FIX/bench.tsv" --vault personal
+    run jev_cmd bench --fixture "$FIX/bench.tsv" --vault personal
   [ "$status" -eq 3 ]
   [ -z "$output" ]
   key_absent
@@ -1654,20 +1695,20 @@ TSV
 
 @test "bench usage errors exit 64 and never invoke curl" {
   make_bench
-  run judge_cmd bench --fixture "$BATS_TEST_TMPDIR/missing.tsv" --vault personal
+  run jev_cmd bench --fixture "$BATS_TEST_TMPDIR/missing.tsv" --vault personal
   [ "$status" -eq 64 ]
-  run judge_cmd bench --fixture "$FIX/bench.tsv" --vault personal -n 21
+  run jev_cmd bench --fixture "$FIX/bench.tsv" --vault personal -n 21
   [ "$status" -eq 64 ]
-  run judge_cmd bench --fixture "$FIX/bench.tsv" --vault personal -n 0
+  run jev_cmd bench --fixture "$FIX/bench.tsv" --vault personal -n 0
   [ "$status" -eq 64 ]
-  run judge_cmd bench --fixture "$FIX/bench.tsv" --vault personal --format xml
+  run jev_cmd bench --fixture "$FIX/bench.tsv" --vault personal --format xml
   [ "$status" -eq 64 ]
   printf 'a query with no paths\n' >"$BATS_TEST_TMPDIR/bad.tsv"
-  run judge_cmd bench --fixture "$BATS_TEST_TMPDIR/bad.tsv" --vault personal
+  run jev_cmd bench --fixture "$BATS_TEST_TMPDIR/bad.tsv" --vault personal
   [ "$status" -eq 64 ]
   [ -z "$output" ]
   printf '# only a comment\n' >"$BATS_TEST_TMPDIR/empty.tsv"
-  run judge_cmd bench --fixture "$BATS_TEST_TMPDIR/empty.tsv" --vault personal
+  run jev_cmd bench --fixture "$BATS_TEST_TMPDIR/empty.tsv" --vault personal
   [ "$status" -eq 64 ]
   curl_not_invoked
 }
@@ -1677,11 +1718,11 @@ TSV
 drift_in() {
   local input="$1"
   shift
-  "$JUDGE_SH" "$JUDGE" index-drift "$@" <"$input" 2>"$STDERR"
+  "$JEV_SH" "$JEV" index-drift "$@" <"$input" 2>"$STDERR"
 }
 
-@test "index-drift: the judge file ships the accurate template with 0.85/0.15" {
-  local j="$ROOT/ext/judge/judges/index-drift.json"
+@test "index-drift: the set file ships the accurate template with 0.85/0.15" {
+  local j="$ROOT/ext/jev/sets/index-drift.json"
   [ "$(jq -r '.questions.accurate.type' "$j")" = "boolean" ]
   [ "$(jq -c '.thresholds.accurate' "$j")" = '{"yes":0.85,"no":0.15}' ]
   jq -r '.questions.accurate.instructions' "$j" | grep -q '{row}'
@@ -1703,7 +1744,7 @@ drift_in() {
   [ "$(printf '%s' "$output" | jq -c '.answers')" = '{"r1":{"probability":0.97},"r2":{"probability":0.04},"r3":{"probability":0.5}}' ]
   [ "$(printf '%s' "$output" | jq -c 'keys')" = '["answers","id"]' ]
   [ "$(printf '%s' "$output" | jq -r '.id')" = "$(jq -r '.id' "$LOG")" ]
-  [ "$(jq -r '[.judge, .vault, .truncated] | @tsv' "$LOG")" = "index-drift	personal	false" ]
+  [ "$(jq -r '[.set, .vault, .truncated] | @tsv' "$LOG")" = "index-drift	personal	false" ]
 }
 
 @test "index-drift: more than 5 rows, zero rows, or malformed stdin exits 64 and never invokes curl" {
@@ -1755,7 +1796,7 @@ drift_in() {
 
 @test "index-drift: over max_state_bytes every row keeps its block" {
   jq '.rows |= map(.head = ("h" * 400 + " HEADEND"))' "$FIX/index-drift-input.json" >"$BATS_TEST_TMPDIR/big.json"
-  jq '.max_state_bytes = 600' "$ROOT/ext/judge/judges/index-drift.json" >"$XDG_CONFIG_HOME/vaultmem/judges/index-drift.json"
+  jq '.max_state_bytes = 600' "$ROOT/ext/jev/sets/index-drift.json" >"$XDG_CONFIG_HOME/vaultmem/jev/index-drift.json"
   FAKE_CURL_RESPONSE="$FIX/index-drift-response.json" run drift_in "$BATS_TEST_TMPDIR/big.json" --vault personal
   [ "$status" -eq 0 ]
   [ "$(jq -r '.state | utf8bytelength' "$CURL_REC/body")" -le 600 ]
@@ -1780,22 +1821,22 @@ drift_in() {
 PROMPT_LINE='vaultmem: this looks like a "why" question; run `vaultmem <query>` before re-deriving.'
 HOOK_JSON='{"session_id":"abc123","prompt_id":"p-1","transcript_path":"/home/u/t.jsonl","cwd":"/home/u/proj","permission_mode":"default","hook_event_name":"UserPromptSubmit","prompt":"Why did we pick ripgrep over grep?"}'
 
-prompt_in() { printf '%s' "$1" | "$JUDGE_SH" "$JUDGE" prompt 2>"$STDERR"; }
+prompt_in() { printf '%s' "$1" | "$JEV_SH" "$JEV" prompt 2>"$STDERR"; }
 
 @test "prompt: a confident yes prints exactly the one line and exits 0" {
-  write_config hook_judges=nudge,prompt
+  write_config hooks=nudge,prompt
   FAKE_CURL_RESPONSE="$FIX/prompt-yes.json" run prompt_in "$HOOK_JSON"
   [ "$status" -eq 0 ]
   [ "$output" = "$PROMPT_LINE" ]
   [ "${#lines[@]}" -eq 1 ]
   [ ! -s "$STDERR" ]
   diff <(jq -S . "$CURL_REC/body") <(jq -S . "$FIX/prompt-body.json")
-  [ "$(jq -r '[.judge, .vault, .subject] | @tsv' "$LOG")" = "prompt	personal	prompt" ]
+  [ "$(jq -r '[.set, .vault, .subject] | @tsv' "$LOG")" = "prompt	personal	prompt" ]
   key_absent
 }
 
 @test "prompt: JSON stdin sends only the prompt field; raw text is sent as is" {
-  write_config hook_judges=prompt
+  write_config hooks=prompt
   FAKE_CURL_RESPONSE="$FIX/prompt-yes.json" run prompt_in "$HOOK_JSON"
   [ "$status" -eq 0 ]
   [ "$(jq -r '.state' "$CURL_REC/body")" = "Why did we pick ripgrep over grep?" ]
@@ -1807,7 +1848,7 @@ prompt_in() { printf '%s' "$1" | "$JUDGE_SH" "$JUDGE" prompt 2>"$STDERR"; }
 }
 
 @test "prompt: a JSON object without a prompt field, or an empty prompt, sends nothing" {
-  write_config hook_judges=prompt
+  write_config hooks=prompt
   run prompt_in '{"session_id":"abc123","cwd":"/home/u/proj"}'
   [ "$status" -eq 0 ]
   [ -z "$output" ]
@@ -1822,7 +1863,7 @@ prompt_in() { printf '%s' "$1" | "$JUDGE_SH" "$JUDGE" prompt 2>"$STDERR"; }
 }
 
 @test "prompt: no, abstain, and every unavailable answer print nothing and exit 0" {
-  write_config hook_judges=prompt
+  write_config hooks=prompt
   local r
   for r in prompt-no prompt-abstain empty-answers; do
     FAKE_CURL_RESPONSE="$FIX/$r.json" run prompt_in "$HOOK_JSON"
@@ -1845,28 +1886,28 @@ prompt_in() { printf '%s' "$1" | "$JUDGE_SH" "$JUDGE" prompt 2>"$STDERR"; }
 }
 
 @test "prompt: timeout_ms reaches curl as --max-time" {
-  write_config hook_judges=prompt timeout_ms=800
+  write_config hooks=prompt timeout_ms=800
   FAKE_CURL_RESPONSE="$FIX/prompt-yes.json" run prompt_in "$HOOK_JSON"
   [ "$status" -eq 0 ]
   grep -A1 -x -- '--max-time' "$CURL_REC/argv" | tail -n 1 | grep -qx '0.800'
 }
 
 @test "prompt: gated off prints nothing, exits 0, and never invokes curl" {
-  # prompt absent from hook_judges (default empty, and a list naming only nudge).
+  # prompt absent from hooks (default empty, and a list naming only nudge).
   run prompt_in "$HOOK_JSON"
   [ "$status" -eq 0 ]
   [ -z "$output" ]
-  write_config hook_judges=nudge
+  write_config hooks=nudge
   run prompt_in "$HOOK_JSON"
   [ "$status" -eq 0 ]
   [ -z "$output" ]
   # enabled=false.
-  write_config hook_judges=prompt enabled=false
+  write_config hooks=prompt enabled=false
   run prompt_in "$HOOK_JSON"
   [ "$status" -eq 0 ]
   [ -z "$output" ]
   # The vault for $PWD does not consent.
-  write_config hook_judges=prompt
+  write_config hooks=prompt
   STUB_WHICH_ID=work run prompt_in "$HOOK_JSON"
   [ "$status" -eq 0 ]
   [ -z "$output" ]
@@ -1887,8 +1928,8 @@ prompt_in() { printf '%s' "$1" | "$JUDGE_SH" "$JUDGE" prompt 2>"$STDERR"; }
   VAULTMEM_VERBOSE=1 run prompt_in "$HOOK_JSON"
   [ "$status" -eq 0 ]
   [ -z "$output" ]
-  grep -q 'prompt is not in \[ext.judge\] hook_judges' "$STDERR"
-  write_config hook_judges=prompt
+  grep -q 'prompt is not in \[ext.jev\] hooks' "$STDERR"
+  write_config hooks=prompt
   FAKE_CURL_RESPONSE="$FIX/prompt-no.json" VAULTMEM_VERBOSE=1 run prompt_in "$HOOK_JSON"
   [ "$status" -eq 0 ]
   [ -z "$output" ]
@@ -1896,7 +1937,7 @@ prompt_in() { printf '%s' "$1" | "$JUDGE_SH" "$JUDGE" prompt 2>"$STDERR"; }
 }
 
 @test "prompt: a failed request leaves the key out of stdout, stderr, argv, body, and log" {
-  write_config hook_judges=prompt
+  write_config hooks=prompt
   jq --arg k "$KEY_VALUE" '.error.message = "bad key " + $k' "$FIX/error-401.json" >"$BATS_TEST_TMPDIR/err.json"
   FAKE_CURL_RESPONSE="$BATS_TEST_TMPDIR/err.json" FAKE_CURL_HTTP=401 VAULTMEM_VERBOSE=1 run prompt_in "$HOOK_JSON"
   [ "$status" -eq 0 ]
@@ -1906,7 +1947,7 @@ prompt_in() { printf '%s' "$1" | "$JUDGE_SH" "$JUDGE" prompt 2>"$STDERR"; }
 }
 
 @test "prompt: arguments are a usage error, exit 64" {
-  run judge_cmd prompt --vault personal
+  run jev_cmd prompt --vault personal
   [ "$status" -eq 64 ]
   curl_not_invoked
 }
@@ -1915,8 +1956,8 @@ prompt_in() { printf '%s' "$1" | "$JUDGE_SH" "$JUDGE" prompt 2>"$STDERR"; }
 
 @test "the extension runs under /bin/bash when that is bash 3.2" {
   /bin/bash --version 2>/dev/null | head -n 1 | grep -q 'version 3\.2' || skip "/bin/bash is not 3.2 here"
-  JUDGE_SH=/bin/bash
-  run judge_in "$STATE_TEXT" smoke --vault personal --gate failed
+  JEV_SH=/bin/bash
+  run jev_in "$STATE_TEXT" smoke --vault personal --gate failed
   [ "$status" -eq 0 ]
   [ ! -s "$STDERR" ]
   diff <(jq -S . "$CURL_REC/body") <(jq -S . "$FIX/smoke-body-zdr.json")

@@ -2848,12 +2848,12 @@ seed_git_state_session() { # $1=vault root $2=thread $3=git-state-block $4=statu
   [[ "$output" == *"--format wants cli|json"* ]]
 }
 
-# --- judge extension shim (core side) -------------------------------------------
+# --- Jev extension shim (core side) -------------------------------------------
 # Core never runs the real extension here: every test points the resolver at a
-# stub under $BATS_TEST_TMPDIR. `judge_isolate` also copies the script out of the
+# stub under $BATS_TEST_TMPDIR. `jev_isolate` also copies the script out of the
 # repo, so the third resolution step (<script dir>/ext/) cannot find a real
-# ext/judge/ in the tree.
-judge_isolate() {
+# ext/jev/ in the tree.
+jev_isolate() {
   export XDG_DATA_HOME="$BATS_TEST_TMPDIR/data"
   unset VAULTMEM_EXT_DIR
   mkdir -p "$BATS_TEST_TMPDIR/real"
@@ -2861,11 +2861,11 @@ judge_isolate() {
   JOM="$BATS_TEST_TMPDIR/real/vaultmem"
 }
 
-# Stub extension at <dir>/judge/vaultmem-judge. It records that it ran, its
+# Stub extension at <dir>/jev/vaultmem-jev. It records that it ran, its
 # args, its stdin (with STUB_STDIN=1), and the env core handed it, then exits with $3 (default 0).
-judge_stub() { # $1 = ext dir, $2 = tag, $3 = exit code
-  mkdir -p "$1/judge"
-  cat >"$1/judge/vaultmem-judge" <<EOF
+jev_stub() { # $1 = ext dir, $2 = tag, $3 = exit code
+  mkdir -p "$1/jev"
+  cat >"$1/jev/vaultmem-jev" <<EOF
 #!/usr/bin/env bash
 {
   printf 'tag=%s\n' "$2"
@@ -2878,12 +2878,12 @@ judge_stub() { # $1 = ext dir, $2 = tag, $3 = exit code
 } >"$BATS_TEST_TMPDIR/stub.ran"
 exit ${3:-0}
 EOF
-  chmod +x "$1/judge/vaultmem-judge"
+  chmod +x "$1/jev/vaultmem-jev"
 }
 
-judge_config_on() { # $1 = enabled value, $2 = jay's judge value
+jev_config_on() { # $1 = enabled value, $2 = jay's jev value
   cat >"$VAULTMEM_CONFIG" <<EOF
-[ext.judge]
+[ext.jev]
 enabled = $1
 
 [vault.flo]
@@ -2891,26 +2891,26 @@ path = "$OBS_FLO"
 
 [vault.jay]
 path = "$OBS_JAY"
-judge = $2
+jev = $2
 EOF
 }
 
-@test "judge config prints the frozen format with defaults filled in" {
-  judge_isolate
+@test "jev config prints the frozen format with defaults filled in" {
+  jev_isolate
   export HOME="$BATS_TEST_TMPDIR/home"
-  run "$JOM" judge config
+  run "$JOM" jev config
   [ "$status" -eq 0 ]
-  expected="ext.judge.enabled=false
-ext.judge.model=typesafe-ai/jev
-ext.judge.base_url=https://ai-gateway.vercel.sh
-ext.judge.zdr=true
-ext.judge.timeout_ms=1500
-ext.judge.key_file=$BATS_TEST_TMPDIR/home/.config/vaultmem/ai-gateway.key
-ext.judge.log=true
-ext.judge.rerank=false
-ext.judge.hook_judges=
-vault.flo.judge=false
-vault.jay.judge=false
+  expected="ext.jev.enabled=false
+ext.jev.model=typesafe-ai/jev
+ext.jev.base_url=https://ai-gateway.vercel.sh
+ext.jev.zdr=true
+ext.jev.timeout_ms=1500
+ext.jev.key_file=$BATS_TEST_TMPDIR/home/.config/vaultmem/ai-gateway.key
+ext.jev.log=true
+ext.jev.rerank=false
+ext.jev.hooks=
+vault.flo.jev=false
+vault.jay.jev=false
 vault.flo.label=Flo
 vault.flo.description=
 vault.jay.label=Personal
@@ -2918,42 +2918,42 @@ vault.jay.description="
   [ "$output" = "$expected" ]
 }
 
-@test "judge config reflects [ext.judge] keys and per-vault judge flags" {
-  judge_isolate
+@test "jev config reflects [ext.jev] keys and per-vault jev flags" {
+  jev_isolate
   export HOME="$BATS_TEST_TMPDIR/home"
   cat >"$VAULTMEM_CONFIG" <<EOF
-[ext.judge]
+[ext.jev]
 enabled = true
 zdr = false                 # owner's plan refuses ZDR
 timeout_ms = 900
 key_file = "~/keys/gw.key"
-hook_judges = "nudge,groom"
+hooks = "nudge,groom"
 future_key = "kept"
 
 [vault.flo]
 path = "$OBS_FLO"
-judge = false
+jev = false
 
 [vault.jay]
 label = "Personal"
 description = "Home lab, dotfiles, side projects; never FloSports work"
 path = "$OBS_JAY"
-judge = true
+jev = true
 EOF
-  run "$JOM" judge config
+  run "$JOM" jev config
   [ "$status" -eq 0 ]
-  expected="ext.judge.enabled=true
-ext.judge.model=typesafe-ai/jev
-ext.judge.base_url=https://ai-gateway.vercel.sh
-ext.judge.zdr=false
-ext.judge.timeout_ms=900
-ext.judge.key_file=$BATS_TEST_TMPDIR/home/keys/gw.key
-ext.judge.log=true
-ext.judge.rerank=false
-ext.judge.hook_judges=nudge,groom
-ext.judge.future_key=kept
-vault.flo.judge=false
-vault.jay.judge=true
+  expected="ext.jev.enabled=true
+ext.jev.model=typesafe-ai/jev
+ext.jev.base_url=https://ai-gateway.vercel.sh
+ext.jev.zdr=false
+ext.jev.timeout_ms=900
+ext.jev.key_file=$BATS_TEST_TMPDIR/home/keys/gw.key
+ext.jev.log=true
+ext.jev.rerank=false
+ext.jev.hooks=nudge,groom
+ext.jev.future_key=kept
+vault.flo.jev=false
+vault.jay.jev=true
 vault.flo.label=flo
 vault.flo.description=
 vault.jay.label=Personal
@@ -2964,42 +2964,42 @@ vault.jay.description=Home lab, dotfiles, side projects; never FloSports work"
   [[ "$output" != *"Config errors"* ]]
 }
 
-@test "judge config is answered by core: no config file, no vault, no extension" {
-  judge_isolate
+@test "jev config is answered by core: no config file, no vault, no extension" {
+  jev_isolate
   export VAULTMEM_CONFIG="$BATS_TEST_TMPDIR/absent.toml"
   export XDG_CONFIG_HOME="$BATS_TEST_TMPDIR/xdg"
   unset OBS_FLO OBS_JAY VAULTMEM_VAULT
-  run "$JOM" judge config
+  run "$JOM" jev config
   [ "$status" -eq 0 ]
-  [ "${lines[0]}" = "ext.judge.enabled=false" ]
-  [ "${lines[8]}" = "ext.judge.hook_judges=" ]
+  [ "${lines[0]}" = "ext.jev.enabled=false" ]
+  [ "${lines[8]}" = "ext.jev.hooks=" ]
   [ "${#lines[@]}" -eq 9 ]
   [[ "$output" != *"vault."* ]]
 }
 
-@test "judge config is never forwarded to an installed extension" {
-  judge_isolate
+@test "jev config is never forwarded to an installed extension" {
+  jev_isolate
   export VAULTMEM_EXT_DIR="$BATS_TEST_TMPDIR/extdir"
-  judge_stub "$VAULTMEM_EXT_DIR" envdir
-  run "$JOM" judge config
+  jev_stub "$VAULTMEM_EXT_DIR" envdir
+  run "$JOM" jev config
   [ "$status" -eq 0 ]
-  [ "${lines[0]}" = "ext.judge.enabled=false" ]
+  [ "${lines[0]}" = "ext.jev.enabled=false" ]
   [ ! -e "$BATS_TEST_TMPDIR/stub.ran" ]
 }
 
-@test "doctor hard-errors on a non-boolean vault judge value" {
+@test "doctor hard-errors on a non-boolean vault jev value" {
   cat >"$VAULTMEM_CONFIG" <<EOF
 [vault.jay]
 path = "$OBS_JAY"
-judge = "true"
+jev = "true"
 EOF
   run "$OM" doctor
   [ "$status" -ne 0 ]
-  [[ "$output" == *'"judge" in [vault.jay] must be true or false'* ]]
+  [[ "$output" == *'"jev" in [vault.jay] must be true or false'* ]]
   cat >"$VAULTMEM_CONFIG" <<EOF
 [vault.jay]
 path = "$OBS_JAY"
-judge = 1
+jev = 1
 EOF
   run "$OM" doctor
   [ "$status" -ne 0 ]
@@ -3011,12 +3011,12 @@ EOF
 [vault.jay]
 path = "$OBS_JAY"
 
-[ext.judge.sub]
+[ext.jev.sub]
 enabled = true
 EOF
   run "$OM" doctor
   [ "$status" -ne 0 ]
-  [[ "$output" == *"nested section [ext.judge.sub]"* ]]
+  [[ "$output" == *"nested section [ext.jev.sub]"* ]]
 }
 
 @test "doctor hard-errors on a bare [ext] section" {
@@ -3037,14 +3037,14 @@ EOF
 [vault.jay]
 path = "$OBS_JAY"
 
-[ext.judge]
+[ext.jev]
 model = typesafe-ai/jev
-hook_judges = ["nudge"]
+hooks = ["nudge"]
 EOF
   run "$OM" doctor
   [ "$status" -ne 0 ]
   [[ "$output" == *'unquoted string value for "model"'* ]]
-  [[ "$output" == *'arrays/inline-tables not supported ("hook_judges")'* ]]
+  [[ "$output" == *'arrays/inline-tables not supported ("hooks")'* ]]
 }
 
 @test "doctor does not validate key names inside an ext section" {
@@ -3052,7 +3052,7 @@ EOF
 [vault.jay]
 path = "$OBS_JAY"
 
-[ext.judge]
+[ext.jev]
 not_a_real_key = "fine"
 
 [ext.other-ext]
@@ -3064,63 +3064,63 @@ EOF
 }
 
 @test "an [ext.*] section registers no vault" {
-  judge_config_on true true
+  jev_config_on true true
   run "$OM" vaults
   [ "$status" -eq 0 ]
   [ "${#lines[@]}" -eq 2 ]
   [[ "$output" != *"ext"* ]]
 }
 
-@test "judge: not installed prints one stderr line and exits 3" {
-  judge_isolate
-  run "$JOM" judge list
+@test "jev: not installed prints one stderr line and exits 3" {
+  jev_isolate
+  run "$JOM" jev list
   [ "$status" -eq 3 ]
   [ "${#lines[@]}" -eq 1 ]
-  [[ "$output" == *'extension "judge" is not installed'* ]]
+  [[ "$output" == *'extension "jev" is not installed'* ]]
   # The line is on stderr; stdout stays empty.
-  run bash -c '"$0" judge list 2>/dev/null' "$JOM"
+  run bash -c '"$0" jev list 2>/dev/null' "$JOM"
   [ "$status" -eq 3 ]
   [ -z "$output" ]
 }
 
-@test "judge: never resolves the extension from PATH" {
-  judge_isolate
+@test "jev: never resolves the extension from PATH" {
+  jev_isolate
   mkdir -p "$BATS_TEST_TMPDIR/pathbin"
-  printf '#!/usr/bin/env bash\ntouch "%s/path.ran"\n' "$BATS_TEST_TMPDIR" >"$BATS_TEST_TMPDIR/pathbin/vaultmem-judge"
-  chmod +x "$BATS_TEST_TMPDIR/pathbin/vaultmem-judge"
-  PATH="$BATS_TEST_TMPDIR/pathbin:$PATH" run "$JOM" judge list
+  printf '#!/usr/bin/env bash\ntouch "%s/path.ran"\n' "$BATS_TEST_TMPDIR" >"$BATS_TEST_TMPDIR/pathbin/vaultmem-jev"
+  chmod +x "$BATS_TEST_TMPDIR/pathbin/vaultmem-jev"
+  PATH="$BATS_TEST_TMPDIR/pathbin:$PATH" run "$JOM" jev list
   [ "$status" -eq 3 ]
   [ ! -e "$BATS_TEST_TMPDIR/path.ran" ]
 }
 
-@test "judge: resolution order is VAULTMEM_EXT_DIR, then XDG data dir, then the script dir" {
-  judge_isolate
-  judge_stub "$BATS_TEST_TMPDIR/real/ext" scriptdir
-  run "$JOM" judge list
+@test "jev: resolution order is VAULTMEM_EXT_DIR, then XDG data dir, then the script dir" {
+  jev_isolate
+  jev_stub "$BATS_TEST_TMPDIR/real/ext" scriptdir
+  run "$JOM" jev list
   [ "$status" -eq 0 ]
   grep -qx 'tag=scriptdir' "$BATS_TEST_TMPDIR/stub.ran"
 
-  judge_stub "$XDG_DATA_HOME/vaultmem/ext" xdg
-  run "$JOM" judge list
+  jev_stub "$XDG_DATA_HOME/vaultmem/ext" xdg
+  run "$JOM" jev list
   grep -qx 'tag=xdg' "$BATS_TEST_TMPDIR/stub.ran"
 
   export VAULTMEM_EXT_DIR="$BATS_TEST_TMPDIR/extdir"
-  judge_stub "$VAULTMEM_EXT_DIR" envdir
-  run "$JOM" judge list
+  jev_stub "$VAULTMEM_EXT_DIR" envdir
+  run "$JOM" jev list
   grep -qx 'tag=envdir' "$BATS_TEST_TMPDIR/stub.ran"
 
   # A VAULTMEM_EXT_DIR without the extension falls through to the next step.
   export VAULTMEM_EXT_DIR="$BATS_TEST_TMPDIR/empty"
-  run "$JOM" judge list
+  run "$JOM" jev list
   grep -qx 'tag=xdg' "$BATS_TEST_TMPDIR/stub.ran"
 }
 
-@test "judge: the script-dir step resolves symlinks, and VAULTMEM_BIN is the real absolute path" {
-  judge_isolate
-  judge_stub "$BATS_TEST_TMPDIR/real/ext" scriptdir
+@test "jev: the script-dir step resolves symlinks, and VAULTMEM_BIN is the real absolute path" {
+  jev_isolate
+  jev_stub "$BATS_TEST_TMPDIR/real/ext" scriptdir
   mkdir -p "$BATS_TEST_TMPDIR/bin"
   ln -s ../real/vaultmem "$BATS_TEST_TMPDIR/bin/vaultmem"
-  run "$BATS_TEST_TMPDIR/bin/vaultmem" judge list
+  run "$BATS_TEST_TMPDIR/bin/vaultmem" jev list
   [ "$status" -eq 0 ]
   grep -qx 'tag=scriptdir' "$BATS_TEST_TMPDIR/stub.ran"
   real="$(cd -P "$BATS_TEST_TMPDIR/real" && pwd)/vaultmem"
@@ -3128,105 +3128,234 @@ EOF
   grep -qx "config=$VAULTMEM_CONFIG" "$BATS_TEST_TMPDIR/stub.ran"
 }
 
-@test "judge: args after the subcommand reach the extension verbatim, with stdin and its exit code" {
-  judge_isolate
+@test "jev: args after the subcommand reach the extension verbatim, with stdin and its exit code" {
+  jev_isolate
   export VAULTMEM_EXT_DIR="$BATS_TEST_TMPDIR/extdir"
-  judge_stub "$VAULTMEM_EXT_DIR" envdir 2
-  # --vault / --format / -n / -h are core flags everywhere else; after `judge`
+  jev_stub "$VAULTMEM_EXT_DIR" envdir 2
+  # --vault / --format / -n / -h are core flags everywhere else; after `jev`
   # they belong to the extension.
-  STUB_STDIN=1 run bash -c 'printf "the state" | "$0" judge groom-triage --vault jay --format json -n 5 -h' "$JOM"
+  STUB_STDIN=1 run bash -c 'printf "the state" | "$0" jev groom-triage --vault jay --format json -n 5 -h' "$JOM"
   [ "$status" -eq 2 ]
   grep -qx 'args=groom-triage --vault jay --format json -n 5 -h' "$BATS_TEST_TMPDIR/stub.ran"
   grep -qx 'stdin=the state' "$BATS_TEST_TMPDIR/stub.ran"
 }
 
-@test "judge: runs the extension with no vault configured (the extension decides)" {
-  judge_isolate
+@test "jev: runs the extension with no vault configured (the extension decides)" {
+  jev_isolate
   export VAULTMEM_EXT_DIR="$BATS_TEST_TMPDIR/extdir"
-  judge_stub "$VAULTMEM_EXT_DIR" envdir 3
+  jev_stub "$VAULTMEM_EXT_DIR" envdir 3
   export VAULTMEM_CONFIG="$BATS_TEST_TMPDIR/absent.toml"
   export XDG_CONFIG_HOME="$BATS_TEST_TMPDIR/xdg"
   unset OBS_FLO OBS_JAY VAULTMEM_VAULT
-  run "$JOM" judge doctor
+  run "$JOM" jev doctor
   [ "$status" -eq 3 ]
   [[ "$output" != *"no vault configured"* ]]
   [ -e "$BATS_TEST_TMPDIR/stub.ran" ]
 }
 
-@test "_judge returns 3 without running the extension when [ext.judge] is disabled" {
-  judge_isolate
+@test "_jev returns 3 without running the extension when [ext.jev] is disabled" {
+  jev_isolate
   export VAULTMEM_EXT_DIR="$BATS_TEST_TMPDIR/extdir"
-  judge_stub "$VAULTMEM_EXT_DIR" envdir
-  judge_config_on false true
-  run bash -c 'printf state | "$0" _judge nudge jay' "$JOM"
+  jev_stub "$VAULTMEM_EXT_DIR" envdir
+  jev_config_on false true
+  run bash -c 'printf state | "$0" _jev nudge jay' "$JOM"
   [ "$status" -eq 3 ]
   [ -z "$output" ]
   [ ! -e "$BATS_TEST_TMPDIR/stub.ran" ]
-  # Absent [ext.judge] is the same as disabled.
-  printf '[vault.jay]\npath = "%s"\njudge = true\n' "$OBS_JAY" >"$VAULTMEM_CONFIG"
-  run bash -c 'printf state | "$0" _judge nudge jay' "$JOM"
+  # Absent [ext.jev] is the same as disabled.
+  printf '[vault.jay]\npath = "%s"\njev = true\n' "$OBS_JAY" >"$VAULTMEM_CONFIG"
+  run bash -c 'printf state | "$0" _jev nudge jay' "$JOM"
   [ "$status" -eq 3 ]
   [ ! -e "$BATS_TEST_TMPDIR/stub.ran" ]
 }
 
-@test "_judge returns 3 without running the extension for a vault without judge = true" {
-  judge_isolate
+@test "_jev returns 3 without running the extension for a vault without jev = true" {
+  jev_isolate
   export VAULTMEM_EXT_DIR="$BATS_TEST_TMPDIR/extdir"
-  judge_stub "$VAULTMEM_EXT_DIR" envdir
-  judge_config_on true true
+  jev_stub "$VAULTMEM_EXT_DIR" envdir
+  jev_config_on true true
   for v in flo nosuch ""; do
-    run bash -c 'printf state | "$0" _judge nudge "$1"' "$JOM" "$v"
+    run bash -c 'printf state | "$0" _jev nudge "$1"' "$JOM" "$v"
     [ "$status" -eq 3 ]
     [ ! -e "$BATS_TEST_TMPDIR/stub.ran" ]
   done
 }
 
-@test "_judge runs the extension with --vault <id> and state on stdin when enabled" {
-  judge_isolate
+@test "_jev runs the extension with --vault <id> and state on stdin when enabled" {
+  jev_isolate
   export VAULTMEM_EXT_DIR="$BATS_TEST_TMPDIR/extdir"
-  judge_stub "$VAULTMEM_EXT_DIR" envdir 1
-  judge_config_on true true
-  STUB_STDIN=1 run bash -c 'printf "session text" | "$0" _judge nudge jay --gate work_happened' "$JOM"
+  jev_stub "$VAULTMEM_EXT_DIR" envdir 1
+  jev_config_on true true
+  STUB_STDIN=1 run bash -c 'printf "session text" | "$0" _jev nudge jay --gate work_happened' "$JOM"
   [ "$status" -eq 1 ]
   grep -qx 'args=nudge --vault jay --gate work_happened' "$BATS_TEST_TMPDIR/stub.ran"
   grep -qx 'stdin=session text' "$BATS_TEST_TMPDIR/stub.ran"
 }
 
-@test "_judge returns 3 when enabled but the extension is not installed" {
-  judge_isolate
-  judge_config_on true true
-  run bash -c 'printf state | "$0" _judge nudge jay 2>/dev/null' "$JOM"
+@test "_jev returns 3 when enabled but the extension is not installed" {
+  jev_isolate
+  jev_config_on true true
+  run bash -c 'printf state | "$0" _jev nudge jay 2>/dev/null' "$JOM"
   [ "$status" -eq 3 ]
   [ -z "$output" ]
 }
 
-@test "usage documents the judge subcommand" {
+# --- deprecation aliases (one major) ---------------------------------------------
+
+@test "vaultmem judge still dispatches, naming jev on stderr" {
+  jev_isolate
+  jev_config_on true true
+  export VAULTMEM_EXT_DIR="$BATS_TEST_TMPDIR/extdir"
+  jev_stub "$VAULTMEM_EXT_DIR" envdir
+  run "$JOM" judge list
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"judge is deprecated; use vaultmem jev"* ]]
+  grep -qx 'args=list' "$BATS_TEST_TMPDIR/stub.ran"
+}
+
+@test "vaultmem judge config is answered by core, not forwarded" {
+  jev_isolate
+  jev_config_on true true
+  export VAULTMEM_EXT_DIR="$BATS_TEST_TMPDIR/extdir"
+  jev_stub "$VAULTMEM_EXT_DIR" envdir
+  run "$JOM" judge config
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"ext.jev.enabled=true"* ]]
+  [ ! -e "$BATS_TEST_TMPDIR/stub.ran" ]
+}
+
+@test "jev <name> without ask still runs, naming jev ask on stderr" {
+  jev_isolate
+  jev_config_on true true
+  export VAULTMEM_EXT_DIR="$BATS_TEST_TMPDIR/extdir"
+  jev_stub "$VAULTMEM_EXT_DIR" envdir
+  run "$JOM" jev groom-triage --vault jay
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"vaultmem jev groom-triage is deprecated; use vaultmem jev ask groom-triage"* ]]
+  grep -qx 'args=groom-triage --vault jay' "$BATS_TEST_TMPDIR/stub.ran"
+}
+
+@test "jev ask passes the set name and args through with no deprecation line" {
+  jev_isolate
+  jev_config_on true true
+  export VAULTMEM_EXT_DIR="$BATS_TEST_TMPDIR/extdir"
+  jev_stub "$VAULTMEM_EXT_DIR" envdir
+  run "$JOM" jev ask groom-triage --vault jay --format json
+  [ "$status" -eq 0 ]
+  [[ "$output" != *deprecated* ]]
+  grep -qx 'args=groom-triage --vault jay --format json' "$BATS_TEST_TMPDIR/stub.ran"
+}
+
+@test "jev ask with no set name is a usage error" {
+  jev_isolate
+  jev_config_on true true
+  run "$JOM" jev ask
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"usage: vaultmem jev ask <name>"* ]]
+}
+
+@test "groom --judge still triages, naming --triage on stderr" {
+  jev_isolate
+  groom_triage_fixture
+  groom_triage_config true
+  export VAULTMEM_EXT_DIR="$BATS_TEST_TMPDIR/extdir"
+  groom_triage_stub "$VAULTMEM_EXT_DIR" "$GROOM_TRIAGE_OK"
+  run "$JOM" -v jay groom --judge
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"groom --judge is deprecated; use groom --triage"* ]]
+  [[ "$output" == *"→ archive"* ]]
+}
+
+@test "doctor --judge still drift-checks, naming --drift on stderr" {
+  jev_isolate
+  drift_fixture true
+  export VAULTMEM_EXT_DIR="$BATS_TEST_TMPDIR/extdir"
+  drift_stub "$VAULTMEM_EXT_DIR"
+  run "$JOM" -v jay doctor --judge
+  [[ "$output" == *"doctor --judge is deprecated; use doctor --drift"* ]]
+  [[ "$output" == *"▸ DRIFT (informational)"* ]]
+}
+
+@test "nudge --judge names the hooks list on stderr and stays silent on stdout" {
+  nudge_jev_setup
+  cd "$DEV_DIR/github.com/flocasts/app"
+  run bash -c '"$0" nudge --judge 2>"$1"' "$JOM" "$BATS_TEST_TMPDIR/nudge.err" <<<"$HOOK_JSON"
+  [ "$status" -eq 0 ]
+  [ "$output" = "$NUDGE_JEV_LINE" ]
+  grep -q 'nudge --judge is deprecated' "$BATS_TEST_TMPDIR/nudge.err"
+}
+
+@test "[ext.judge] and [vault.<id>] judge still enable jev, and doctor WARNs" {
+  jev_isolate
+  cat >"$VAULTMEM_CONFIG" <<EOF
+[ext.judge]
+enabled = true
+hook_judges = "nudge"
+
+[vault.jay]
+path = "$OBS_JAY"
+judge = true
+EOF
+  run "$JOM" jev config
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"ext.jev.enabled=true"* ]]
+  [[ "$output" == *"ext.jev.hooks=nudge"* ]]
+  [[ "$output" == *"vault.jay.jev=true"* ]]
+
+  run "$JOM" -v jay doctor
+  [[ "$output" == *"WARN: deprecated config keys"* ]]
+  [[ "$output" == *"[ext.judge] is deprecated; use [ext.jev]"* ]]
+  [[ "$output" == *'"judge" in [vault.jay] is deprecated; use "jev"'* ]]
+  [[ "$output" == *'"hook_judges" is deprecated; use "hooks"'* ]]
+}
+
+@test "[ext.jev] wins over [ext.judge] when both name a key" {
+  jev_isolate
+  cat >"$VAULTMEM_CONFIG" <<EOF
+[ext.jev]
+enabled = true
+
+[ext.judge]
+enabled = false
+
+[vault.jay]
+path = "$OBS_JAY"
+jev = true
+judge = false
+EOF
+  run "$JOM" jev config
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"ext.jev.enabled=true"* ]]
+  [[ "$output" == *"vault.jay.jev=true"* ]]
+}
+
+@test "usage documents the jev subcommand" {
   run "$OM" -h
   [ "$status" -eq 0 ]
-  [[ "$output" == *"vaultmem judge config"* ]]
-  [[ "$output" == *"vaultmem judge calibration"* ]]
+  [[ "$output" == *"vaultmem jev config"* ]]
+  [[ "$output" == *"vaultmem jev calibration"* ]]
   [[ "$output" == *"planned → active → done"* ]]
 }
 
 @test "install.sh --ext skips cleanly when the extension is not in the tree" {
   mkdir -p "$BATS_TEST_TMPDIR/rel"
   cp "$ROOT/install.sh" "$ROOT/vaultmem" "$BATS_TEST_TMPDIR/rel/"
-  XDG_DATA_HOME="$BATS_TEST_TMPDIR/data" run "$BATS_TEST_TMPDIR/rel/install.sh" --prefix "$BATS_TEST_TMPDIR/prefix" --ext judge
+  XDG_DATA_HOME="$BATS_TEST_TMPDIR/data" run "$BATS_TEST_TMPDIR/rel/install.sh" --prefix "$BATS_TEST_TMPDIR/prefix" --ext jev
   [ "$status" -eq 0 ]
-  [[ "$output" == *"no ext/judge directory"* ]]
-  [ ! -e "$BATS_TEST_TMPDIR/data/vaultmem/ext/judge" ]
+  [[ "$output" == *"no ext/jev directory"* ]]
+  [ ! -e "$BATS_TEST_TMPDIR/data/vaultmem/ext/jev" ]
 }
 
 @test "install.sh --ext links the extension where vaultmem resolves it" {
   mkdir -p "$BATS_TEST_TMPDIR/rel"
   cp "$ROOT/install.sh" "$ROOT/vaultmem" "$BATS_TEST_TMPDIR/rel/"
-  judge_stub "$BATS_TEST_TMPDIR/rel/ext" shipped
+  jev_stub "$BATS_TEST_TMPDIR/rel/ext" shipped
   export XDG_DATA_HOME="$BATS_TEST_TMPDIR/data"
-  run "$BATS_TEST_TMPDIR/rel/install.sh" --prefix "$BATS_TEST_TMPDIR/prefix" --ext judge
+  run "$BATS_TEST_TMPDIR/rel/install.sh" --prefix "$BATS_TEST_TMPDIR/prefix" --ext jev
   [ "$status" -eq 0 ]
-  [ -L "$XDG_DATA_HOME/vaultmem/ext/judge" ]
+  [ -L "$XDG_DATA_HOME/vaultmem/ext/jev" ]
   # The installed copy has no ext/ beside it, so this resolves through XDG.
-  run "$BATS_TEST_TMPDIR/prefix/bin/vaultmem" judge list
+  run "$BATS_TEST_TMPDIR/prefix/bin/vaultmem" jev list
   [ "$status" -eq 0 ]
   grep -qx 'tag=shipped' "$BATS_TEST_TMPDIR/stub.ran"
 }
@@ -3234,21 +3363,21 @@ EOF
 @test "install.sh --ext rejects a path-like extension name" {
   mkdir -p "$BATS_TEST_TMPDIR/rel"
   cp "$ROOT/install.sh" "$ROOT/vaultmem" "$BATS_TEST_TMPDIR/rel/"
-  XDG_DATA_HOME="$BATS_TEST_TMPDIR/data" run "$BATS_TEST_TMPDIR/rel/install.sh" --prefix "$BATS_TEST_TMPDIR/prefix" --ext ../judge
+  XDG_DATA_HOME="$BATS_TEST_TMPDIR/data" run "$BATS_TEST_TMPDIR/rel/install.sh" --prefix "$BATS_TEST_TMPDIR/prefix" --ext ../jev
   [ "$status" -eq 2 ]
 }
 
-# --- groom --judge (core side) ---------------------------------------------------
+# --- groom --triage (core side) ---------------------------------------------------
 # Every test here runs against a stub extension under $BATS_TEST_TMPDIR printing
 # canned groom-triage JSON. The real extension is never invoked and nothing calls
-# curl: `judge_isolate` also moves the script out of the repo so the script-dir
-# resolution step cannot reach a real ext/judge/.
+# curl: `jev_isolate` also moves the script out of the repo so the script-dir
+# resolution step cannot reach a real ext/jev/.
 
 # A stub that answers with the caller-supplied JSON ($2) and records that it ran,
 # with its args and the state it was handed.
-groom_judge_stub() { # $1 = ext dir, $2 = response JSON, $3 = exit code
-  mkdir -p "$1/judge"
-  cat >"$1/judge/vaultmem-judge" <<EOF
+groom_triage_stub() { # $1 = ext dir, $2 = response JSON, $3 = exit code
+  mkdir -p "$1/jev"
+  cat >"$1/jev/vaultmem-jev" <<EOF
 #!/usr/bin/env bash
 {
   printf 'args=%s\n' "\$*"
@@ -3257,7 +3386,7 @@ groom_judge_stub() { # $1 = ext dir, $2 = response JSON, $3 = exit code
 printf '%s\n' '$2'
 exit ${3:-0}
 EOF
-  chmod +x "$1/judge/vaultmem-judge"
+  chmod +x "$1/jev/vaultmem-jev"
 }
 
 # `days_ago N` stamps exactly N*86400 seconds back, truncated to the minute, so
@@ -3270,36 +3399,36 @@ days_ago_stable() {
   else date -d "$1 days ago 6 hours ago" +"%Y-%m-%d %H:%M"; fi
 }
 
-# One cold-parked session with the sections groom --judge sends, plus its Project.
-groom_judge_fixture() {
+# One cold-parked session with the sections groom --triage sends, plus its Project.
+groom_triage_fixture() {
   mkdir -p "$OBS_JAY/Sessions/cold-one" "$OBS_JAY/Projects"
   printf -- '---\nstatus: parked\nproject: p\nupdated: %s\n---\n# cold-one\n\n## Bookmark\nnext: land the parser\n\n## Pinned\n- a pin\n\n## Git state\n| repo | branch | pr | state |\n| r | b | 1 | open |\n' \
     "$(days_ago_stable 40)" >"$OBS_JAY/Sessions/cold-one/_index.md"
   printf -- '---\ntype: project\nstatus: active\n---\n# p\n\n## Decisions\n- chose the awk scanner\n' >"$OBS_JAY/Projects/p.md"
 }
 
-# Registry with the judge enabled and jay's consent set by the caller.
-groom_judge_config() { # $1 = jay's judge value
+# Registry with Jev enabled and jay's consent set by the caller.
+groom_triage_config() { # $1 = jay's jev value
   cat >"$VAULTMEM_CONFIG" <<EOF
-[ext.judge]
+[ext.jev]
 enabled = true
 
 [vault.jay]
 label = "Personal"
 path = "$OBS_JAY"
-judge = $1
+jev = $1
 EOF
 }
 
-GROOM_JUDGE_OK='{"id":"20260922T101500Z-4f2a","judge":"groom-triage","answers":{"work_complete":{"probability":0.93},"has_next_step":{"probability":0.05},"blocked_external":{"probability":0.02},"undistilled":{"probability":0.91},"recommendation":{"choice":"archive","probabilities":{"archive":0.88,"park":0.07,"keep-active":0.03,"needs-human":0.02}}}}'
+GROOM_TRIAGE_OK='{"id":"20260922T101500Z-4f2a","set":"groom-triage","answers":{"work_complete":{"probability":0.93},"has_next_step":{"probability":0.05},"blocked_external":{"probability":0.02},"undistilled":{"probability":0.91},"recommendation":{"choice":"archive","probabilities":{"archive":0.88,"park":0.07,"keep-active":0.03,"needs-human":0.02}}}}'
 
-@test "groom --judge annotates a flagged row with the choice, probability, flags and log id" {
-  judge_isolate
-  groom_judge_fixture
-  groom_judge_config true
+@test "groom --triage annotates a flagged row with the choice, probability, flags and log id" {
+  jev_isolate
+  groom_triage_fixture
+  groom_triage_config true
   export VAULTMEM_EXT_DIR="$BATS_TEST_TMPDIR/extdir"
-  groom_judge_stub "$VAULTMEM_EXT_DIR" "$GROOM_JUDGE_OK"
-  run "$JOM" -v jay groom --judge
+  groom_triage_stub "$VAULTMEM_EXT_DIR" "$GROOM_TRIAGE_OK"
+  run "$JOM" -v jay groom --triage
   [ "$status" -eq 0 ]
   [[ "$output" == *"cold-one (40d, p)  → archive 0.88 · work_complete, undistilled [20260922T101500Z-4f2a]"* ]]
   # Only the two booleans at or above 0.85 are flagged.
@@ -3307,39 +3436,39 @@ GROOM_JUDGE_OK='{"id":"20260922T101500Z-4f2a","judge":"groom-triage","answers":{
   [[ "$output" != *"blocked_external"* ]]
 }
 
-@test "groom --judge prints → ? when the top choice is below the confidence floor" {
-  judge_isolate
-  groom_judge_fixture
-  groom_judge_config true
+@test "groom --triage prints → ? when the top choice is below the confidence floor" {
+  jev_isolate
+  groom_triage_fixture
+  groom_triage_config true
   export VAULTMEM_EXT_DIR="$BATS_TEST_TMPDIR/extdir"
-  groom_judge_stub "$VAULTMEM_EXT_DIR" \
+  groom_triage_stub "$VAULTMEM_EXT_DIR" \
     '{"id":"low-1","answers":{"work_complete":{"probability":0.9},"recommendation":{"choice":"needs-human","probabilities":{"needs-human":0.42}}}}'
-  run "$JOM" -v jay groom --judge
+  run "$JOM" -v jay groom --triage
   [ "$status" -eq 0 ]
   [[ "$output" == *"cold-one (40d, p)  → ? [low-1]"* ]]
   # Below the floor the choice itself is withheld, flags and all.
   [[ "$output" != *"needs-human 0.42"* ]]
 }
 
-@test "groom --judge leaves the row exactly as today when the judge has no opinion" {
-  judge_isolate
-  groom_judge_fixture
-  groom_judge_config true
+@test "groom --triage leaves the row exactly as today when Jev has no opinion" {
+  jev_isolate
+  groom_triage_fixture
+  groom_triage_config true
   export VAULTMEM_EXT_DIR="$BATS_TEST_TMPDIR/extdir"
-  groom_judge_stub "$VAULTMEM_EXT_DIR" '' 3
-  run "$JOM" -v jay groom --judge
+  groom_triage_stub "$VAULTMEM_EXT_DIR" '' 3
+  run "$JOM" -v jay groom --triage
   [ "$status" -eq 0 ]
   [[ "$output" == *"  Personal: cold-one (40d, p)"* ]]
   [[ "$output" != *"→"* ]]
 }
 
-@test "groom --judge sends the design 8.1 state and the --subject the extension expects" {
-  judge_isolate
-  groom_judge_fixture
-  groom_judge_config true
+@test "groom --triage sends the design 8.1 state and the --subject the extension expects" {
+  jev_isolate
+  groom_triage_fixture
+  groom_triage_config true
   export VAULTMEM_EXT_DIR="$BATS_TEST_TMPDIR/extdir"
-  groom_judge_stub "$VAULTMEM_EXT_DIR" "$GROOM_JUDGE_OK"
-  run "$JOM" -v jay groom --judge
+  groom_triage_stub "$VAULTMEM_EXT_DIR" "$GROOM_TRIAGE_OK"
+  run "$JOM" -v jay groom --triage
   [ "$status" -eq 0 ]
   local ran="$BATS_TEST_TMPDIR/stub.ran"
   grep -q -- '--vault jay' "$ran"
@@ -3357,30 +3486,30 @@ GROOM_JUDGE_OK='{"id":"20260922T101500Z-4f2a","judge":"groom-triage","answers":{
   grep -q 'chose the awk scanner' "$ran"
 }
 
-@test "groom --judge --dry-run prints the same judged report and moves nothing" {
-  judge_isolate
-  groom_judge_fixture
-  groom_judge_config true
+@test "groom --triage --dry-run prints the same triaged report and moves nothing" {
+  jev_isolate
+  groom_triage_fixture
+  groom_triage_config true
   mkdir -p "$OBS_JAY/Sessions/done-one"
   printf -- '---\nstatus: done\n---\n# done-one\n' >"$OBS_JAY/Sessions/done-one/_index.md"
   export VAULTMEM_EXT_DIR="$BATS_TEST_TMPDIR/extdir"
-  groom_judge_stub "$VAULTMEM_EXT_DIR" "$GROOM_JUDGE_OK"
-  run "$JOM" -v jay groom --judge --dry-run
+  groom_triage_stub "$VAULTMEM_EXT_DIR" "$GROOM_TRIAGE_OK"
+  run "$JOM" -v jay groom --triage --dry-run
   [ "$status" -eq 0 ]
   [[ "$output" == *"→ archive 0.88 · work_complete, undistilled"* ]]
   [[ "$output" == *"(dry run"* ]]
-  # The done session is still in place: the judged path never writes.
+  # The done session is still in place: the triaged path never writes.
   [ -f "$OBS_JAY/Sessions/done-one/_index.md" ]
   [ ! -d "$OBS_JAY/Sessions/_archive/done-one" ]
 }
 
-@test "groom --judge --format json carries the row facts and the answers verbatim" {
-  judge_isolate
-  groom_judge_fixture
-  groom_judge_config true
+@test "groom --triage --format json carries the row facts and the answers verbatim" {
+  jev_isolate
+  groom_triage_fixture
+  groom_triage_config true
   export VAULTMEM_EXT_DIR="$BATS_TEST_TMPDIR/extdir"
-  groom_judge_stub "$VAULTMEM_EXT_DIR" "$GROOM_JUDGE_OK"
-  run "$JOM" -v jay groom --judge --format json
+  groom_triage_stub "$VAULTMEM_EXT_DIR" "$GROOM_TRIAGE_OK"
+  run "$JOM" -v jay groom --triage --format json
   [ "$status" -eq 0 ]
   echo "$output" | jq -e '
     length == 1
@@ -3389,38 +3518,38 @@ GROOM_JUDGE_OK='{"id":"20260922T101500Z-4f2a","judge":"groom-triage","answers":{
     and .[0].status == "cold-parked"
     and .[0].age_days == 40
     and (.[0].lines | type) == "number"
-    and .[0].judge.id == "20260922T101500Z-4f2a"
-    and .[0].judge.answers.recommendation.choice == "archive"
-    and .[0].judge.answers.recommendation.probabilities.archive == 0.88
-    and .[0].judge.answers.undistilled.probability == 0.91
+    and .[0].jev.id == "20260922T101500Z-4f2a"
+    and .[0].jev.answers.recommendation.choice == "archive"
+    and .[0].jev.answers.recommendation.probabilities.archive == 0.88
+    and .[0].jev.answers.undistilled.probability == 0.91
   '
 }
 
-@test "groom --judge --format json reports a stale-active session with judge null on no opinion" {
-  judge_isolate
+@test "groom --triage --format json reports a stale-active session with jev null on no opinion" {
+  jev_isolate
   mkdir -p "$OBS_JAY/Sessions/stale-one"
   printf -- '---\nstatus: active\nupdated: %s\n---\n# stale-one\n' "$(days_ago_stable 10)" >"$OBS_JAY/Sessions/stale-one/_index.md"
-  groom_judge_config true
+  groom_triage_config true
   export VAULTMEM_EXT_DIR="$BATS_TEST_TMPDIR/extdir"
-  groom_judge_stub "$VAULTMEM_EXT_DIR" '' 3
-  run "$JOM" -v jay groom --judge --format json
+  groom_triage_stub "$VAULTMEM_EXT_DIR" '' 3
+  run "$JOM" -v jay groom --triage --format json
   [ "$status" -eq 0 ]
   echo "$output" | jq -e '
     length == 1
     and .[0].session == "stale-one"
     and .[0].status == "stale-active"
     and .[0].age_days == 10
-    and .[0].judge == null
+    and .[0].jev == null
   '
 }
 
-@test "groom --judge never assembles state for a vault that has not consented" {
-  judge_isolate
-  groom_judge_fixture
-  groom_judge_config false
+@test "groom --triage never assembles state for a vault that has not consented" {
+  jev_isolate
+  groom_triage_fixture
+  groom_triage_config false
   export VAULTMEM_EXT_DIR="$BATS_TEST_TMPDIR/extdir"
-  groom_judge_stub "$VAULTMEM_EXT_DIR" "$GROOM_JUDGE_OK"
-  run "$JOM" -v jay groom --judge
+  groom_triage_stub "$VAULTMEM_EXT_DIR" "$GROOM_TRIAGE_OK"
+  run "$JOM" -v jay groom --triage
   [ "$status" -eq 0 ]
   # The row prints as today and the extension was never executed.
   [[ "$output" == *"  Personal: cold-one (40d, p)"* ]]
@@ -3428,14 +3557,14 @@ GROOM_JUDGE_OK='{"id":"20260922T101500Z-4f2a","judge":"groom-triage","answers":{
   [ ! -e "$BATS_TEST_TMPDIR/stub.ran" ]
 }
 
-@test "groom without --judge is byte-identical with and without the extension installed" {
-  judge_isolate
-  groom_judge_fixture
+@test "groom without --triage is byte-identical with and without the extension installed" {
+  jev_isolate
+  groom_triage_fixture
   mkdir -p "$OBS_JAY/Sessions/stale-one"
   printf -- '---\nstatus: active\nupdated: %s\n---\n# stale-one\n' "$(days_ago_stable 10)" >"$OBS_JAY/Sessions/stale-one/_index.md"
-  groom_judge_config true
+  groom_triage_config true
   export VAULTMEM_EXT_DIR="$BATS_TEST_TMPDIR/extdir"
-  groom_judge_stub "$VAULTMEM_EXT_DIR" "$GROOM_JUDGE_OK"
+  groom_triage_stub "$VAULTMEM_EXT_DIR" "$GROOM_TRIAGE_OK"
   run "$JOM" -v jay groom
   local with_status="$status" with_out="$output"
   # Same run with nothing installed anywhere the resolver looks.
@@ -3447,36 +3576,36 @@ GROOM_JUDGE_OK='{"id":"20260922T101500Z-4f2a","judge":"groom-triage","answers":{
   [ ! -e "$BATS_TEST_TMPDIR/stub.ran" ]
 }
 
-@test "groom --judge is inert when [ext.judge] is disabled" {
-  judge_isolate
-  groom_judge_fixture
+@test "groom --triage is inert when [ext.jev] is disabled" {
+  jev_isolate
+  groom_triage_fixture
   cat >"$VAULTMEM_CONFIG" <<EOF
-[ext.judge]
+[ext.jev]
 enabled = false
 
 [vault.jay]
 label = "Personal"
 path = "$OBS_JAY"
-judge = true
+jev = true
 EOF
   export VAULTMEM_EXT_DIR="$BATS_TEST_TMPDIR/extdir"
-  groom_judge_stub "$VAULTMEM_EXT_DIR" "$GROOM_JUDGE_OK"
-  run "$JOM" -v jay groom --judge
+  groom_triage_stub "$VAULTMEM_EXT_DIR" "$GROOM_TRIAGE_OK"
+  run "$JOM" -v jay groom --triage
   [ "$status" -eq 0 ]
   [[ "$output" == *"  Personal: cold-one (40d, p)"* ]]
   [[ "$output" != *"→"* ]]
   [ ! -e "$BATS_TEST_TMPDIR/stub.ran" ]
 }
 
-@test "groom --judge judges each flagged session once, across both report sections" {
-  judge_isolate
-  groom_judge_fixture
+@test "groom --triage triages each flagged session once, across both report sections" {
+  jev_isolate
+  groom_triage_fixture
   mkdir -p "$OBS_JAY/Sessions/stale-one"
   printf -- '---\nstatus: active\nupdated: %s\n---\n# stale-one\n' "$(days_ago_stable 10)" >"$OBS_JAY/Sessions/stale-one/_index.md"
-  groom_judge_config true
+  groom_triage_config true
   export VAULTMEM_EXT_DIR="$BATS_TEST_TMPDIR/extdir"
-  groom_judge_stub "$VAULTMEM_EXT_DIR" "$GROOM_JUDGE_OK"
-  run "$JOM" -v jay groom --judge
+  groom_triage_stub "$VAULTMEM_EXT_DIR" "$GROOM_TRIAGE_OK"
+  run "$JOM" -v jay groom --triage
   [ "$status" -eq 0 ]
   # Both sections carry a column, and the stub ran exactly twice.
   [[ "$output" == *"cold-one (40d, p)  → archive"* ]]
@@ -3484,8 +3613,8 @@ EOF
   [ "$(grep -c '^args=' "$BATS_TEST_TMPDIR/stub.ran")" -eq 2 ]
 }
 
-@test "groom --judge does not annotate checkpoint-due or stale-backlog rows" {
-  judge_isolate
+@test "groom --triage does not annotate checkpoint-due or stale-backlog rows" {
+  jev_isolate
   mkdir -p "$OBS_JAY/Sessions/fat-one"
   {
     printf -- '---\nstatus: active\nupdated: %s\n---\n# fat-one\n' "$(days_ago_stable 1)"
@@ -3495,44 +3624,44 @@ EOF
       i=$((i + 1))
     done
   } >"$OBS_JAY/Sessions/fat-one/_index.md"
-  groom_judge_config true
+  groom_triage_config true
   export VAULTMEM_EXT_DIR="$BATS_TEST_TMPDIR/extdir"
-  groom_judge_stub "$VAULTMEM_EXT_DIR" "$GROOM_JUDGE_OK"
-  run "$JOM" -v jay groom --judge
+  groom_triage_stub "$VAULTMEM_EXT_DIR" "$GROOM_TRIAGE_OK"
+  run "$JOM" -v jay groom --triage
   [ "$status" -eq 0 ]
-  # Fresh and only bloated: flagged for a checkpoint, never judged (8.1 covers
+  # Fresh and only bloated: flagged for a checkpoint, never triaged (8.1 covers
   # cold-parked and stale-active only).
   [[ "$output" == *"Checkpoint due"* ]]
   [[ "$output" != *"→"* ]]
   [ ! -e "$BATS_TEST_TMPDIR/stub.ran" ]
 }
 
-@test "groom --judge parses the gateway answer shape, with its type fields" {
-  judge_isolate
-  groom_judge_fixture
-  groom_judge_config true
+@test "groom --triage parses the gateway answer shape, with its type fields" {
+  jev_isolate
+  groom_triage_fixture
+  groom_triage_config true
   export VAULTMEM_EXT_DIR="$BATS_TEST_TMPDIR/extdir"
-  # The extension emits {id, judge, answers} where answers is the gateway object
+  # The extension emits {id, set, answers} where answers is the gateway object
   # verbatim, so every answer carries a "type" and a choice answer also carries
   # "confidence". A scanner that matches `"choice"` anywhere rather than only
   # where it is a key reads `"type":"choice"` instead and loses the choice.
-  groom_judge_stub "$VAULTMEM_EXT_DIR" \
-    '{"id":"gw-1","judge":"groom-triage","answers":{"work_complete":{"type":"boolean","probability":0.04},"has_next_step":{"type":"boolean","probability":0.93},"blocked_external":{"type":"boolean","probability":0.88},"undistilled":{"type":"boolean","probability":0.91},"recommendation":{"type":"choice","choice":"park","probabilities":{"archive":0.02,"park":0.81,"keep-active":0.13,"needs-human":0.04},"confidence":0.81}}}'
-  run "$JOM" -v jay groom --judge
+  groom_triage_stub "$VAULTMEM_EXT_DIR" \
+    '{"id":"gw-1","set":"groom-triage","answers":{"work_complete":{"type":"boolean","probability":0.04},"has_next_step":{"type":"boolean","probability":0.93},"blocked_external":{"type":"boolean","probability":0.88},"undistilled":{"type":"boolean","probability":0.91},"recommendation":{"type":"choice","choice":"park","probabilities":{"archive":0.02,"park":0.81,"keep-active":0.13,"needs-human":0.04},"confidence":0.81}}}'
+  run "$JOM" -v jay groom --triage
   [ "$status" -eq 0 ]
   [[ "$output" == *"→ park 0.81 · has_next_step, blocked_external, undistilled [gw-1]"* ]]
   # 0.04 is below the flag threshold, so the flag list must not carry it.
   [[ "$output" != *"work_complete"* ]]
 }
 
-@test "usage documents groom --judge" {
+@test "usage documents groom --triage" {
   run "$OM"
   [ "$status" -eq 0 ]
-  [[ "$output" == *"vaultmem groom --judge"* ]]
+  [[ "$output" == *"vaultmem groom --triage"* ]]
 }
 
-@test "judge config skips label and description lines for a pathless vault" {
-  judge_isolate
+@test "jev config skips label and description lines for a pathless vault" {
+  jev_isolate
   cat >"$VAULTMEM_CONFIG" <<EOF
 [vault.ghost]
 label = "Ghost"
@@ -3542,7 +3671,7 @@ description = "no path yet"
 path = "$OBS_JAY"
 description = "Personal notes"
 EOF
-  run "$JOM" judge config
+  run "$JOM" jev config
   [ "$status" -eq 0 ]
   [[ "$output" != *"vault.ghost."* ]]
   [ "${lines[$((${#lines[@]} - 2))]}" = "vault.jay.label=jay" ]
@@ -3573,37 +3702,37 @@ EOF
   done
 }
 
-# --- nudge --judge (judge design 8.2) -------------------------------------------
+# --- nudge (Jev design 8.2) -------------------------------------------
 # A consenting, confidently-routed vault: flo claims $DEV_DIR/github.com/flocasts/**
-# and has judge = true; nudge is named in hook_judges. Each test runs from a repo
+# and has jev = true; nudge is named in hooks. Each test runs from a repo
 # dir inside that glob. The stub extension records its args and stdin and prints
 # $BATS_TEST_TMPDIR/stub.out, exiting with $STUB_RC (default 0).
-nudge_judge_setup() { # $1 = hook_judges value, $2 = flo's judge value
-  judge_isolate
+nudge_jev_setup() { # $1 = hooks value, $2 = flo's jev value
+  jev_isolate
   export VAULTMEM_EXT_DIR="$BATS_TEST_TMPDIR/extdir"
-  mkdir -p "$VAULTMEM_EXT_DIR/judge"
-  cat >"$VAULTMEM_EXT_DIR/judge/vaultmem-judge" <<EOF
+  mkdir -p "$VAULTMEM_EXT_DIR/jev"
+  cat >"$VAULTMEM_EXT_DIR/jev/vaultmem-jev" <<EOF
 #!/usr/bin/env bash
 printf 'args=%s\n' "\$*" >"$BATS_TEST_TMPDIR/stub.ran"
 cat >"$BATS_TEST_TMPDIR/stub.stdin"
 cat "$BATS_TEST_TMPDIR/stub.out" 2>/dev/null
 exit \${STUB_RC:-0}
 EOF
-  chmod +x "$VAULTMEM_EXT_DIR/judge/vaultmem-judge"
+  chmod +x "$VAULTMEM_EXT_DIR/jev/vaultmem-jev"
   cat >"$VAULTMEM_CONFIG" <<EOF
-[ext.judge]
+[ext.jev]
 enabled = true
-hook_judges = "${1-groom, nudge}"
+hooks = "${1-groom, nudge}"
 
 [vault.flo]
 label = "Flo"
 path = "$OBS_FLO"
 match_paths = "$DEV_DIR/github.com/flocasts/**"
-judge = ${2:-true}
+jev = ${2:-true}
 
 [vault.jay]
 path = "$OBS_JAY"
-judge = true
+jev = true
 EOF
   printf -- '---\nschema: 1\n---\n# Home\n<!-- AGENT-INDEX:START -->\n<!-- AGENT-INDEX:END -->\n' >"$OBS_FLO/Home.md"
   mkdir -p "$OBS_FLO/Sessions/live" "$OBS_FLO/Projects"
@@ -3613,7 +3742,7 @@ EOF
   mkdir -p "$XDG_CACHE_HOME/vaultmem" "$DEV_DIR/github.com/flocasts/app"
   touch "$XDG_CACHE_HOME/vaultmem/nudge-stamp"
   # A Claude Code transcript: plain-string and array user turns, an assistant
-  # text turn, and lines that must never reach the judge (a tool result, a
+  # text turn, and lines that must never reach Jev (a tool result, a
   # subagent sidechain turn, a meta line, thinking, a tool_use).
   TRANSCRIPT="$BATS_TEST_TMPDIR/transcript.jsonl"
   cat >"$TRANSCRIPT" <<'EOF'
@@ -3628,7 +3757,7 @@ EOF
 EOF
   HOOK_JSON="{\"session_id\":\"s\",\"transcript_path\":\"$TRANSCRIPT\",\"cwd\":\"$DEV_DIR/github.com/flocasts/app\",\"hook_event_name\":\"Stop\",\"stop_hook_active\":false}"
   cat >"$BATS_TEST_TMPDIR/stub.out" <<'EOF'
-{"id":"j-7","judge":"capture-worthy","answers":{"durable":{"type":"boolean","probability":0.93},"kind":{"type":"choice","choice":"root-cause","confidence":0.8,"probabilities":{"root-cause":0.8,"decision":0.1}}},"gate":{"question":"durable","verdict":"yes"}}
+{"id":"j-7","set":"capture-worthy","answers":{"durable":{"type":"boolean","probability":0.93},"kind":{"type":"choice","choice":"root-cause","confidence":0.8,"probabilities":{"root-cause":0.8,"decision":0.1}}},"gate":{"question":"durable","verdict":"yes"}}
 EOF
 }
 
@@ -3641,13 +3770,13 @@ nudge_run() { # $1 = stdin text, rest = nudge args
 }
 
 NUDGE_HEURISTIC_LINE='⚠ vaultmem: notes changed this session but no Sessions/*/_index.md was updated — capture the work log / `updated:` before you stop.'
-NUDGE_JUDGE_LINE='⚠ vaultmem: this session looks to hold a durable root-cause; capture it (vault-capture) before you stop.'
+NUDGE_JEV_LINE='⚠ vaultmem: this session looks to hold a durable root-cause; capture it (vault-capture) before you stop.'
 
-@test "nudge --judge prints the durable line on a confident yes, with the design 8.2 call" {
-  nudge_judge_setup
-  nudge_run "$HOOK_JSON" --judge
+@test "nudge prints the durable line on a confident yes, with the design 8.2 call" {
+  nudge_jev_setup
+  nudge_run "$HOOK_JSON"
   [ "$status" -eq 0 ]
-  [ "$output" = "$NUDGE_JUDGE_LINE" ]
+  [ "$output" = "$NUDGE_JEV_LINE" ]
   grep -qx 'args=capture-worthy --vault flo --subject nudge --gate durable' "$BATS_TEST_TMPDIR/stub.ran"
   state=$(cat "$BATS_TEST_TMPDIR/stub.stdin")
   [[ "$state" == *"user: why does the cache thrash?"* ]]
@@ -3658,8 +3787,8 @@ NUDGE_JUDGE_LINE='⚠ vaultmem: this session looks to hold a durable root-cause;
   done
 }
 
-@test "nudge --judge reads the Codex transcript shape and skips developer messages" {
-  nudge_judge_setup
+@test "nudge reads the Codex transcript shape and skips developer messages" {
+  nudge_jev_setup
   cat >"$TRANSCRIPT" <<'EOF'
 {"timestamp":"t","type":"session_meta","payload":{"id":"x"}}
 {"timestamp":"t","type":"response_item","payload":{"type":"message","role":"developer","content":[{"type":"input_text","text":"DEV-INSTRUCTIONS"}]}}
@@ -3668,19 +3797,19 @@ NUDGE_JUDGE_LINE='⚠ vaultmem: this session looks to hold a durable root-cause;
 {"timestamp":"t","type":"response_item","payload":{"type":"function_call_output","call_id":"c","output":"TOOL-OUTPUT"}}
 {"timestamp":"t","type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"Decision: SQS over Kafka."}]}}
 EOF
-  nudge_run "$HOOK_JSON" --judge
+  nudge_run "$HOOK_JSON"
   [ "$status" -eq 0 ]
-  [ "$output" = "$NUDGE_JUDGE_LINE" ]
+  [ "$output" = "$NUDGE_JEV_LINE" ]
   state=$(cat "$BATS_TEST_TMPDIR/stub.stdin")
   [ "$state" = "user: pick the queue
 
 assistant: Decision: SQS over Kafka." ]
 }
 
-@test "nudge --judge appends last_assistant_message when the transcript lags it" {
-  nudge_judge_setup
+@test "nudge appends last_assistant_message when the transcript lags it" {
+  nudge_jev_setup
   json="{\"transcript_path\":\"$TRANSCRIPT\",\"last_assistant_message\":\"Pattern: retry with jitter.\\nDone.\"}"
-  nudge_run "$json" --judge
+  nudge_run "$json"
   [ "$status" -eq 0 ]
   state=$(cat "$BATS_TEST_TMPDIR/stub.stdin")
   [[ "$state" == *"user: great, thanks
@@ -3690,18 +3819,18 @@ Done." ]]
   # Already the newest turn in the transcript: not repeated.
   printf '%s\n' '{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"same"}]}}' >>"$TRANSCRIPT"
   json="{\"transcript_path\":\"$TRANSCRIPT\",\"last_assistant_message\":\"same\"}"
-  nudge_run "$json" --judge
+  nudge_run "$json"
   [ "$(grep -c '^assistant: same$' "$BATS_TEST_TMPDIR/stub.stdin")" -eq 1 ]
 }
 
-@test "nudge --judge keeps the state under 24000 bytes, newest turns whole" {
-  nudge_judge_setup
+@test "nudge keeps the state under 24000 bytes, newest turns whole" {
+  nudge_jev_setup
   big=$(head -c 5000 /dev/zero | tr '\0' 'x')
   : >"$TRANSCRIPT"
   for i in 1 2 3 4 5 6 7 8 9 10; do
     printf '{"type":"user","message":{"role":"user","content":"turn-%s %s"}}\n' "$i" "$big" >>"$TRANSCRIPT"
   done
-  nudge_run "$HOOK_JSON" --judge
+  nudge_run "$HOOK_JSON"
   [ "$status" -eq 0 ]
   [ "$(wc -c <"$BATS_TEST_TMPDIR/stub.stdin")" -le 24000 ]
   grep -q '^user: turn-10 ' "$BATS_TEST_TMPDIR/stub.stdin"
@@ -3710,24 +3839,24 @@ Done." ]]
   [ "$output" = 0 ]
   # One turn over budget on its own: its tail is sent, still under budget.
   printf '{"type":"user","message":{"role":"user","content":"%s END"}}\n' "$(head -c 30000 /dev/zero | tr '\0' 'y')" >"$TRANSCRIPT"
-  nudge_run "$HOOK_JSON" --judge
+  nudge_run "$HOOK_JSON"
   [ "$(wc -c <"$BATS_TEST_TMPDIR/stub.stdin")" -le 24001 ]
   grep -q 'y END$' "$BATS_TEST_TMPDIR/stub.stdin"
 }
 
-@test "nudge --judge prints the heuristic line first, unchanged, then the judge line" {
-  nudge_judge_setup
+@test "nudge prints the heuristic line first, unchanged, then the Jev line" {
+  nudge_jev_setup
   touch -t 202001010000 "$XDG_CACHE_HOME/vaultmem/nudge-stamp"
   touch "$OBS_FLO/Projects/Notes.md"
-  nudge_run "$HOOK_JSON" --judge
+  nudge_run "$HOOK_JSON"
   [ "$status" -eq 0 ]
   [ "${#lines[@]}" -eq 2 ]
   [ "${lines[0]}" = "$NUDGE_HEURISTIC_LINE" ]
-  [ "${lines[1]}" = "$NUDGE_JUDGE_LINE" ]
+  [ "${lines[1]}" = "$NUDGE_JEV_LINE" ]
 }
 
-@test "nudge without --judge is byte-identical with the extension installed and enabled" {
-  nudge_judge_setup
+@test "nudge is byte-identical with the extension installed but not in hooks" {
+  nudge_jev_setup "groom"
   touch -t 202001010000 "$XDG_CACHE_HOME/vaultmem/nudge-stamp"
   touch "$OBS_FLO/Projects/Notes.md"
   nudge_run "$HOOK_JSON"
@@ -3735,9 +3864,9 @@ Done." ]]
   with_ext="$output"
   [ ! -e "$BATS_TEST_TMPDIR/stub.ran" ]
   [ ! -e "$BATS_TEST_TMPDIR/stub.stdin" ]
-  # Same vault state with no extension anywhere and no [ext.judge] block.
+  # Same vault state with no extension anywhere and no [ext.jev] block.
   mv "$VAULTMEM_EXT_DIR" "$BATS_TEST_TMPDIR/ext-gone"
-  sed -i.bak '/^\[ext.judge\]/,/^$/d' "$VAULTMEM_CONFIG"
+  sed -i.bak '/^\[ext.jev\]/,/^$/d' "$VAULTMEM_CONFIG"
   touch -t 202001010000 "$XDG_CACHE_HOME/vaultmem/nudge-stamp"
   nudge_run "$HOOK_JSON"
   [ "$status" -eq 0 ]
@@ -3745,100 +3874,100 @@ Done." ]]
   [ "$output" = "$NUDGE_HEURISTIC_LINE" ]
 }
 
-@test "nudge --judge never runs the judge when nudge is not in hook_judges" {
+@test "nudge never runs Jev when nudge is not in hooks" {
   for hj in "" "groom" "nudger, groom"; do
-    nudge_judge_setup "$hj"
-    nudge_run "$HOOK_JSON" --judge
+    nudge_jev_setup "$hj"
+    nudge_run "$HOOK_JSON"
     [ "$status" -eq 0 ]
     [ -z "$output" ]
     [ ! -e "$BATS_TEST_TMPDIR/stub.ran" ]
   done
 }
 
-@test "nudge --judge never runs the judge for a vault that has not consented" {
-  nudge_judge_setup "nudge" false
-  nudge_run "$HOOK_JSON" --judge
+@test "nudge never runs Jev for a vault that has not consented" {
+  nudge_jev_setup "nudge" false
+  nudge_run "$HOOK_JSON"
   [ "$status" -eq 0 ]
   [ -z "$output" ]
   [ ! -e "$BATS_TEST_TMPDIR/stub.ran" ]
 }
 
-@test "nudge --judge never runs the judge on a low-confidence vault guess" {
-  nudge_judge_setup
+@test "nudge never runs Jev on a low-confidence vault guess" {
+  nudge_jev_setup
   # jay consents, but it is only the fallback for this dir, not a routing match.
   mkdir -p "$BATS_TEST_TMPDIR/elsewhere"
   cd "$BATS_TEST_TMPDIR/elsewhere"
-  run "$JOM" nudge --judge <<<"$HOOK_JSON"
+  run "$JOM" nudge <<<"$HOOK_JSON"
   [ "$status" -eq 0 ]
   [ -z "$output" ]
   [ ! -e "$BATS_TEST_TMPDIR/stub.ran" ]
 }
 
-@test "nudge --judge is inert when [ext.judge] is disabled" {
-  nudge_judge_setup
+@test "nudge is inert when [ext.jev] is disabled" {
+  nudge_jev_setup
   sed -i.bak 's/^enabled = true/enabled = false/' "$VAULTMEM_CONFIG"
-  nudge_run "$HOOK_JSON" --judge
+  nudge_run "$HOOK_JSON"
   [ "$status" -eq 0 ]
   [ -z "$output" ]
   [ ! -e "$BATS_TEST_TMPDIR/stub.ran" ]
 }
 
-@test "nudge --judge does not judge when a session _index.md was updated" {
-  nudge_judge_setup
+@test "nudge does not ask Jev when a session _index.md was updated" {
+  nudge_jev_setup
   touch "$OBS_FLO/Sessions/live/_index.md"
-  nudge_run "$HOOK_JSON" --judge
+  nudge_run "$HOOK_JSON"
   [ "$status" -eq 0 ]
   [ -z "$output" ]
   [ ! -e "$BATS_TEST_TMPDIR/stub.ran" ]
 }
 
-@test "nudge --judge prints nothing extra on non-JSON stdin or a missing transcript_path" {
-  nudge_judge_setup
+@test "nudge prints nothing extra on non-JSON stdin or a missing transcript_path" {
+  nudge_jev_setup
   for in in "not json at all" "" '{"session_id":"s","stop_hook_active":false}' \
     '{"transcript_path":null}' "{\"transcript_path\":\"$BATS_TEST_TMPDIR/missing.jsonl\"}"; do
-    nudge_run "$in" --judge
+    nudge_run "$in"
     [ "$status" -eq 0 ]
     [ -z "$output" ]
     [ ! -e "$BATS_TEST_TMPDIR/stub.ran" ]
   done
 }
 
-@test "nudge --judge prints nothing extra when the judge exits 1, 2, or 3" {
-  nudge_judge_setup
+@test "nudge prints nothing extra when Jev exits 1, 2, or 3" {
+  nudge_jev_setup
   for rc in 1 2 3; do
     : >"$BATS_TEST_TMPDIR/stub.ran"
-    STUB_RC=$rc nudge_run "$HOOK_JSON" --judge
+    STUB_RC=$rc nudge_run "$HOOK_JSON"
     [ "$status" -eq 0 ]
     [ -z "$output" ]
     grep -q '^args=capture-worthy' "$BATS_TEST_TMPDIR/stub.ran"
   done
 }
 
-@test "nudge --judge prints nothing extra for kind none, a missing kind, or junk output" {
-  nudge_judge_setup
+@test "nudge prints nothing extra for kind none, a missing kind, or junk output" {
+  nudge_jev_setup
   for out in \
     '{"id":"j","answers":{"durable":{"probability":0.9},"kind":{"type":"choice","choice":"none"}}}' \
     '{"id":"j","answers":{"durable":{"probability":0.9}}}' \
     'not json' ''; do
     printf '%s\n' "$out" >"$BATS_TEST_TMPDIR/stub.out"
-    nudge_run "$HOOK_JSON" --judge
+    nudge_run "$HOOK_JSON"
     [ "$status" -eq 0 ]
     [ -z "$output" ]
   done
 }
 
-@test "nudge --judge with the extension not installed prints nothing extra" {
-  nudge_judge_setup
+@test "nudge with the extension not installed prints nothing extra" {
+  nudge_jev_setup
   mv "$VAULTMEM_EXT_DIR" "$BATS_TEST_TMPDIR/ext-gone"
-  nudge_run "$HOOK_JSON" --judge
+  nudge_run "$HOOK_JSON"
   [ "$status" -eq 0 ]
   [ -z "$output" ]
 }
 
-@test "usage documents nudge --judge" {
+@test "usage documents nudge" {
   run "$OM"
   [ "$status" -eq 0 ]
-  [[ "$output" == *"vaultmem nudge [--judge]"* ]]
+  [[ "$output" == *"vaultmem nudge  "* ]]
 }
 
 @test "which routes by match_paths on a vault with no match_owners" {
@@ -3864,8 +3993,8 @@ EOF
 # from the request keeps these tests independent of ripgrep's file order, which
 # is not stable from run to run.
 rerank_stub() { # $1 = ext dir
-  mkdir -p "$1/judge"
-  cat >"$1/judge/vaultmem-judge" <<EOF
+  mkdir -p "$1/jev"
+  cat >"$1/jev/vaultmem-jev" <<EOF
 #!/usr/bin/env bash
 printf 'args=%s\n' "\$*" >"$BATS_TEST_TMPDIR/stub.ran"
 cat >"$BATS_TEST_TMPDIR/stub.stdin"
@@ -3882,20 +4011,20 @@ while IFS= read -r l; do
 done <"$BATS_TEST_TMPDIR/stub.stdin"
 printf '}}\n'
 EOF
-  chmod +x "$1/judge/vaultmem-judge"
+  chmod +x "$1/jev/vaultmem-jev"
 }
 
-# $1 = extra [ext.judge] lines (e.g. `rerank = true`). jay consents, flo does not.
+# $1 = extra [ext.jev] lines (e.g. `rerank = true`). jay consents, flo does not.
 rerank_config() {
   cat >"$VAULTMEM_CONFIG" <<EOF
-[ext.judge]
+[ext.jev]
 enabled = true
 $1
 
 [vault.jay]
 label = "Personal"
 path = "$OBS_JAY"
-judge = true
+jev = true
 
 [vault.flo]
 label = "Flo"
@@ -3910,7 +4039,7 @@ rerank_note() {
 }
 
 rerank_setup() {
-  judge_isolate
+  jev_isolate
   rerank_config "${1:-}"
   export VAULTMEM_EXT_DIR="$BATS_TEST_TMPDIR/extdir"
   rerank_stub "$VAULTMEM_EXT_DIR"
@@ -4050,7 +4179,7 @@ rerank_single_hit() {
 }
 
 @test "search without --rerank is byte-identical with the extension installed and enabled" {
-  judge_isolate
+  jev_isolate
   rerank_single_hit
   local f base
   for f in cli json files; do
@@ -4086,7 +4215,7 @@ EOF
 }
 
 @test "search --rerank with the stub exiting 3 is byte-identical to plain search" {
-  judge_isolate
+  jev_isolate
   rerank_config
   export VAULTMEM_EXT_DIR="$BATS_TEST_TMPDIR/extdir"
   rerank_stub "$VAULTMEM_EXT_DIR"
@@ -4105,7 +4234,7 @@ EOF
 }
 
 @test "search --rerank falls back on a reply without usable scores" {
-  judge_isolate
+  jev_isolate
   rerank_config
   export VAULTMEM_EXT_DIR="$BATS_TEST_TMPDIR/extdir"
   rerank_stub "$VAULTMEM_EXT_DIR"
@@ -4128,14 +4257,14 @@ EOF
   [ -z "$output" ]
   VAULTMEM_VERBOSE=1 run bash -c '"$0" -v jay --rerank widget 2>&1 >/dev/null' "$JOM"
   [ "$status" -eq 0 ]
-  [[ "$output" == *"vaultmem: rerank unavailable (judge rerank exited 3); plain ripgrep order"* ]]
+  [[ "$output" == *"vaultmem: rerank unavailable (jev rerank exited 3); plain ripgrep order"* ]]
   # stdout carries no note either way.
   VAULTMEM_VERBOSE=1 run bash -c '"$0" -v jay --rerank widget 2>/dev/null' "$JOM"
   [[ "$output" != *"unavailable"* ]]
   [[ "$output" != *"  ["* ]]
 }
 
-@test "search --rerank on a vault without judge = true never runs the extension" {
+@test "search --rerank on a vault without jev = true never runs the extension" {
   rerank_setup
   printf 'widget flo\n' >"$OBS_FLO/flo.md"
   run "$JOM" -v flo --rerank widget
@@ -4152,7 +4281,7 @@ EOF
 }
 
 @test "search --rerank sends the golden request body" {
-  judge_isolate
+  jev_isolate
   rerank_config
   export VAULTMEM_EXT_DIR="$BATS_TEST_TMPDIR/extdir"
   rerank_stub "$VAULTMEM_EXT_DIR"
@@ -4213,15 +4342,15 @@ EOF
   [[ "$output" == *'"score":2.5'* ]]
 }
 
-@test "judge config ships rerank = false" {
-  judge_isolate
+@test "jev config ships rerank = false" {
+  jev_isolate
   cat >"$VAULTMEM_CONFIG" <<EOF
 [vault.jay]
 path = "$OBS_JAY"
 EOF
-  run "$JOM" judge config
+  run "$JOM" jev config
   [ "$status" -eq 0 ]
-  [[ "$output" == *"ext.judge.rerank=false"* ]]
+  [[ "$output" == *"ext.jev.rerank=false"* ]]
 }
 
 @test "usage documents --rerank, --no-rerank, --min-score and VAULTMEM_VERBOSE" {
@@ -4233,27 +4362,27 @@ EOF
   [[ "$output" == *"VAULTMEM_VERBOSE=1"* ]]
 }
 
-# --- doctor --judge: semantic index drift (judge design 8.5) ---------------------
+# --- doctor --drift: semantic index drift (Jev design 8.5) ---------------------
 # A stub `index-drift` extension: each call appends its args, saves its stdin to
 # drift.stdin.<n>, and answers with canned probabilities for r1..r5. The first
 # batch drifts r1 (0.05) and r2 (0.15, the threshold itself); r3 (0.16) does not.
 drift_stub() { # $1 = ext dir, $2 = exit code
-  mkdir -p "$1/judge"
-  cat >"$1/judge/vaultmem-judge" <<EOS
+  mkdir -p "$1/jev"
+  cat >"$1/jev/vaultmem-jev" <<EOS
 #!/usr/bin/env bash
 n=\$(cat "$BATS_TEST_TMPDIR/drift.calls" 2>/dev/null || echo 0)
 n=\$((n + 1))
 echo "\$n" >"$BATS_TEST_TMPDIR/drift.calls"
 printf 'args=%s\n' "\$*" >>"$BATS_TEST_TMPDIR/drift.args"
 cat >"$BATS_TEST_TMPDIR/drift.stdin.\$n"
-printf '%s\n' '{"id":"20260922T120000Z-dd01","judge":"index-drift","answers":{"r1":{"probability":0.05},"r2":{"probability":0.15},"r3":{"probability":0.16},"r4":{"probability":0.9},"r5":{"probability":0.99}}}'
+printf '%s\n' '{"id":"20260922T120000Z-dd01","set":"index-drift","answers":{"r1":{"probability":0.05},"r2":{"probability":0.15},"r3":{"probability":0.16},"r4":{"probability":0.9},"r5":{"probability":0.99}}}'
 exit ${2:-0}
 EOS
-  chmod +x "$1/judge/vaultmem-judge"
+  chmod +x "$1/jev/vaultmem-jev"
 }
 
-# Six indexed notes that exist, plus one BROKEN row that must never be judged.
-drift_fixture() { # $1 = jay's judge value
+# Six indexed notes that exist, plus one BROKEN row that must never be drift-checked.
+drift_fixture() { # $1 = jay's jev value
   mkdir -p "$OBS_JAY/Architecture"
   local i
   for i in 1 2 3 4 5 6; do
@@ -4266,32 +4395,32 @@ drift_fixture() { # $1 = jay's judge value
     printf '<!-- AGENT-INDEX:END -->\n'
   } >"$OBS_JAY/Home.md"
   cat >"$VAULTMEM_CONFIG" <<EOC
-[ext.judge]
+[ext.jev]
 enabled = true
 
 [vault.jay]
 label = "Personal"
 path = "$OBS_JAY"
-judge = $1
+jev = $1
 EOC
 }
 
 # The growth line times a search, so two runs never match byte for byte there.
 drift_norm() { printf '%s\n' "$1" | sed -E 's/search [0-9.]+s/search Xs/'; }
 
-@test "doctor --judge prints DRIFT rows in batches of at most 5 and keeps doctor's exit code" {
-  judge_isolate
+@test "doctor --drift prints DRIFT rows in batches of at most 5 and keeps doctor's exit code" {
+  jev_isolate
   drift_fixture true
   export VAULTMEM_EXT_DIR="$BATS_TEST_TMPDIR/extdir"
   drift_stub "$VAULTMEM_EXT_DIR"
   run "$JOM" doctor
   local plain_status="$status"
   [ ! -e "$BATS_TEST_TMPDIR/drift.calls" ]
-  run "$JOM" doctor --judge
+  run "$JOM" doctor --drift
   # The stub reports drift and a BROKEN row exists: the exit is plain doctor's.
   [ "$status" -eq "$plain_status" ]
   [ "$status" -eq 2 ]
-  # Six judgeable rows, BROKEN skipped: one call of 5 rows, one of 1.
+  # Six drift-checkable rows, BROKEN skipped: one call of 5 rows, one of 1.
   [ "$(cat "$BATS_TEST_TMPDIR/drift.calls")" = 2 ]
   [ "$(grep -o '"id":"r[0-9]*"' "$BATS_TEST_TMPDIR/drift.stdin.1" | wc -l | tr -d ' ')" = 5 ]
   [ "$(grep -o '"id":"r[0-9]*"' "$BATS_TEST_TMPDIR/drift.stdin.2" | wc -l | tr -d ' ')" = 1 ]
@@ -4306,7 +4435,7 @@ drift_norm() { printf '%s\n' "$1" | sed -E 's/search [0-9.]+s/search Xs/'; }
     python3 -c 'import json,sys; [json.load(open(f)) for f in sys.argv[1:]]' \
       "$BATS_TEST_TMPDIR/drift.stdin.1" "$BATS_TEST_TMPDIR/drift.stdin.2"
   fi
-  [[ "$output" == *"▸ DRIFT (judged, informational)"* ]]
+  [[ "$output" == *"▸ DRIFT (informational)"* ]]
   [[ "$output" == *$'DRIFT\tArchitecture/Note 1\t0.05\tsummary "1" of note'* ]]
   [[ "$output" == *$'DRIFT\tArchitecture/Note 2\t0.15\tsummary "2" of note'* ]]
   [[ "$output" == *$'DRIFT\tArchitecture/Note 6\t0.05\tsummary "6" of note'* ]]
@@ -4314,8 +4443,8 @@ drift_norm() { printf '%s\n' "$1" | sed -E 's/search [0-9.]+s/search Xs/'; }
   [ "$(printf '%s\n' "$output" | grep -c $'^DRIFT\t')" = 3 ]
 }
 
-@test "doctor --judge exits 0 on a clean vault even when the judge reports drift" {
-  judge_isolate
+@test "doctor --drift exits 0 on a clean vault even when Jev reports drift" {
+  jev_isolate
   drift_fixture true
   # Drop the BROKEN row so plain doctor is clean.
   grep -v Gone "$OBS_JAY/Home.md" >"$BATS_TEST_TMPDIR/h" && mv "$BATS_TEST_TMPDIR/h" "$OBS_JAY/Home.md"
@@ -4323,39 +4452,39 @@ drift_norm() { printf '%s\n' "$1" | sed -E 's/search [0-9.]+s/search Xs/'; }
   drift_stub "$VAULTMEM_EXT_DIR"
   run "$JOM" doctor
   [ "$status" -eq 0 ]
-  run "$JOM" doctor --judge
+  run "$JOM" doctor --drift
   [ "$status" -eq 0 ]
   [[ "$output" == *$'DRIFT\tArchitecture/Note 1\t0.05'* ]]
 }
 
-@test "doctor --judge prints no DRIFT section when the extension fails" {
-  judge_isolate
+@test "doctor --drift prints no DRIFT section when the extension fails" {
+  jev_isolate
   drift_fixture true
   export VAULTMEM_EXT_DIR="$BATS_TEST_TMPDIR/extdir"
   drift_stub "$VAULTMEM_EXT_DIR" 1
   run "$JOM" doctor
   local plain_status="$status" plain_out
   plain_out=$(drift_norm "$output")
-  run "$JOM" doctor --judge
+  run "$JOM" doctor --drift
   [ "$status" -eq "$plain_status" ]
   [ -e "$BATS_TEST_TMPDIR/drift.calls" ]
   [[ "$output" != *"DRIFT"* ]]
   [ "$(drift_norm "$output")" = "$plain_out" ]
 }
 
-@test "doctor --judge never invokes the extension for a vault that has not consented" {
-  judge_isolate
+@test "doctor --drift never invokes the extension for a vault that has not consented" {
+  jev_isolate
   drift_fixture false
   export VAULTMEM_EXT_DIR="$BATS_TEST_TMPDIR/extdir"
   drift_stub "$VAULTMEM_EXT_DIR"
-  run "$JOM" doctor --judge
+  run "$JOM" doctor --drift
   [ "$status" -eq 2 ]
   [[ "$output" != *"DRIFT"* ]]
   [ ! -e "$BATS_TEST_TMPDIR/drift.calls" ]
 }
 
-@test "doctor without --judge is byte-identical with and without the extension installed" {
-  judge_isolate
+@test "doctor without --drift is byte-identical with and without the extension installed" {
+  jev_isolate
   drift_fixture true
   export VAULTMEM_EXT_DIR="$BATS_TEST_TMPDIR/extdir"
   drift_stub "$VAULTMEM_EXT_DIR"
@@ -4369,8 +4498,8 @@ drift_norm() { printf '%s\n' "$1" | sed -E 's/search [0-9.]+s/search Xs/'; }
   [ ! -e "$BATS_TEST_TMPDIR/drift.calls" ]
 }
 
-@test "doctor --judge --deep composes with the deep scan" {
-  judge_isolate
+@test "doctor --drift --deep composes with the deep scan" {
+  jev_isolate
   drift_fixture true
   printf -- '---\ntype: architecture\n---\n# Lonely\n' >"$OBS_JAY/Architecture/Lonely.md"
   export VAULTMEM_EXT_DIR="$BATS_TEST_TMPDIR/extdir"
@@ -4379,7 +4508,7 @@ drift_norm() { printf '%s\n' "$1" | sed -E 's/search [0-9.]+s/search Xs/'; }
   local deep_status="$status"
   [[ "$output" == *"Lonely"* ]]
   rm -f "$BATS_TEST_TMPDIR/drift.calls"
-  for order in "--judge --deep" "--deep --judge"; do
+  for order in "--drift --deep" "--deep --drift"; do
     # shellcheck disable=SC2086
     run "$JOM" doctor $order
     [ "$status" -eq "$deep_status" ]
@@ -4388,20 +4517,20 @@ drift_norm() { printf '%s\n' "$1" | sed -E 's/search [0-9.]+s/search Xs/'; }
   done
 }
 
-@test "groom never runs the index-drift judge" {
-  judge_isolate
+@test "groom never runs the index-drift set" {
+  jev_isolate
   drift_fixture true
   export VAULTMEM_EXT_DIR="$BATS_TEST_TMPDIR/extdir"
   drift_stub "$VAULTMEM_EXT_DIR"
-  run "$JOM" groom --judge
+  run "$JOM" groom --triage
   [ "$status" -eq 0 ]
   [[ "$output" != *"DRIFT"* ]]
   ! grep -q index-drift "$BATS_TEST_TMPDIR/drift.args" 2>/dev/null
 }
 
-@test "usage documents doctor [--deep] [--judge]" {
+@test "usage documents doctor [--deep] [--drift]" {
   run "$OM" -h
   [ "$status" -eq 0 ]
-  [[ "$output" == *"vaultmem doctor [--deep] [--judge]"* ]]
-  [[ "$output" == *"DRIFT (judged, informational)"* ]]
+  [[ "$output" == *"vaultmem doctor [--deep] [--drift]"* ]]
+  [[ "$output" == *"DRIFT (informational)"* ]]
 }

@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "description": "Test judge: one boolean, one choice, one score. Tail-biased, tiny state budget.",
+  "description": "Test set: one boolean, one choice, one score. Tail-biased, tiny state budget.",
   "max_state_bytes": 10,
   "truncate": "tail",
   "questions": {

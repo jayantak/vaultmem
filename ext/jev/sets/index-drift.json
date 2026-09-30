@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "description": "Used by `judge index-drift` (doctor --judge): does each Agent Index row still describe the note it points at. `accurate` is the template for the per-row questions.",
+  "description": "Used by `jev index-drift` (doctor --drift): does each Agent Index row still describe the note it points at. `accurate` is the template for the per-row questions.",
   "max_state_bytes": 24000,
   "truncate": "head",
   "questions": {

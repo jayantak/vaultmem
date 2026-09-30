@@ -22,9 +22,9 @@ jobs:
             https://github.com/mvdan/sh/releases/download/v3.10.0/shfmt_v3.10.0_linux_amd64
           sudo chmod +x /usr/local/bin/shfmt
       - name: shellcheck
-        run: shellcheck vaultmem install.sh tests/subcommand-lint.sh tests/bash32-lint.sh ext/judge/vaultmem-judge
+        run: shellcheck vaultmem install.sh tests/subcommand-lint.sh tests/bash32-lint.sh ext/jev/vaultmem-jev
       - name: shfmt --diff
-        run: shfmt --diff vaultmem install.sh tests/subcommand-lint.sh tests/bash32-lint.sh ext/judge/vaultmem-judge
+        run: shfmt --diff vaultmem install.sh tests/subcommand-lint.sh tests/bash32-lint.sh ext/jev/vaultmem-jev
       # shellcheck has no bash-version target (only a dialect), so it cannot see
       # bash-4-only constructs. This names them explicitly; the bash-3.2 bats job
       # below is the broader net.
@@ -40,7 +40,7 @@ jobs:
         os: [ubuntu-latest, macos-latest]
     steps:
       - uses: actions/checkout@v4
-      # jq is for the judge extension and its tests only; core needs neither
+      # jq is for the Jev extension and its tests only; core needs neither
       # jq nor curl.
       - name: Install ripgrep + bats + jq (Linux)
         if: runner.os == 'Linux'
@@ -50,8 +50,8 @@ jobs:
         run: brew install ripgrep bats-core jq
       - name: Run tests
         run: bats tests/vaultmem.bats
-      - name: Run judge extension tests
-        run: bats tests/judge.bats
+      - name: Run Jev extension tests
+        run: bats tests/jev.bats
 
   bash32:
     name: bats under macOS system bash 3.2
@@ -88,10 +88,10 @@ jobs:
         run: bats tests/vaultmem.bats </dev/null
       # VAULTMEM_TEST_BASH also makes the suite invoke the extension with
       # /bin/bash explicitly, independent of PATH.
-      - name: Run judge extension tests under bash 3.2
+      - name: Run Jev extension tests under bash 3.2
         env:
           VAULTMEM_TEST_BASH: /bin/bash
-        run: bats tests/judge.bats </dev/null
+        run: bats tests/jev.bats </dev/null
       - name: Run the shipped lints under bash 3.2
         run: |
           /bin/bash ./tests/subcommand-lint.sh

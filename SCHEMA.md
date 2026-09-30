@@ -32,7 +32,7 @@ defaults `init` writes and the rest of this document assumes.
 
 What a vault is *for* lives in the config, not in the vault: an optional
 `description` string on `[vault.<id>]` states in prose what belongs there. Only
-the optional `judge` extension reads it, to route a capture that has no repo
+the optional `jev` extension reads it, to route a capture that has no repo
 context (see [docs/config.md](docs/config.md)).
 
 ## Frontmatter fields the tool reads
