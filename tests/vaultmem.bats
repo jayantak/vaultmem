@@ -2909,7 +2909,6 @@ ext.judge.key_file=$BATS_TEST_TMPDIR/home/.config/vaultmem/ai-gateway.key
 ext.judge.log=true
 ext.judge.rerank=false
 ext.judge.hook_judges=
-ext.judge.callers=
 vault.flo.judge=false
 vault.jay.judge=false
 vault.flo.label=Flo
@@ -2929,7 +2928,6 @@ zdr = false                 # owner's plan refuses ZDR
 timeout_ms = 900
 key_file = "~/keys/gw.key"
 hook_judges = "nudge,groom"
-callers = "rig"
 future_key = "kept"
 
 [vault.flo]
@@ -2953,7 +2951,6 @@ ext.judge.key_file=$BATS_TEST_TMPDIR/home/keys/gw.key
 ext.judge.log=true
 ext.judge.rerank=false
 ext.judge.hook_judges=nudge,groom
-ext.judge.callers=rig
 ext.judge.future_key=kept
 vault.flo.judge=false
 vault.jay.judge=true
@@ -2976,8 +2973,7 @@ vault.jay.description=Home lab, dotfiles, side projects; never FloSports work"
   [ "$status" -eq 0 ]
   [ "${lines[0]}" = "ext.judge.enabled=false" ]
   [ "${lines[8]}" = "ext.judge.hook_judges=" ]
-  [ "${lines[9]}" = "ext.judge.callers=" ]
-  [ "${#lines[@]}" -eq 10 ]
+  [ "${#lines[@]}" -eq 9 ]
   [[ "$output" != *"vault."* ]]
 }
 
@@ -3142,15 +3138,6 @@ EOF
   [ "$status" -eq 2 ]
   grep -qx 'args=groom-triage --vault jay --format json -n 5 -h' "$BATS_TEST_TMPDIR/stub.ran"
   grep -qx 'stdin=the state' "$BATS_TEST_TMPDIR/stub.ran"
-}
-
-@test "judge: --caller and --questions reach the extension verbatim" {
-  judge_isolate
-  export VAULTMEM_EXT_DIR="$BATS_TEST_TMPDIR/extdir"
-  judge_stub "$VAULTMEM_EXT_DIR" envdir 0
-  run "$JOM" judge smoke --caller rig --questions /tmp/q.json --gate ship
-  [ "$status" -eq 0 ]
-  grep -qx 'args=smoke --caller rig --questions /tmp/q.json --gate ship' "$BATS_TEST_TMPDIR/stub.ran"
 }
 
 @test "judge: runs the extension with no vault configured (the extension decides)" {

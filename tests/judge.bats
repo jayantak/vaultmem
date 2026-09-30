@@ -135,7 +135,7 @@ EOF
 # write_config [key=value …]: the core contract, with per-test overrides.
 write_config() {
   local enabled=true zdr=true log=true timeout_ms=1500 personal=true work=false side=false nodesc=false
-  local base_url="https://ai-gateway.vercel.sh" key_file="$HOME/.config/vaultmem/ai-gateway.key" extra="" hook_judges="" callers=""
+  local base_url="https://ai-gateway.vercel.sh" key_file="$HOME/.config/vaultmem/ai-gateway.key" extra="" hook_judges=""
   local kv
   for kv in "$@"; do
     case "$kv" in
@@ -153,7 +153,6 @@ write_config() {
     printf 'ext.judge.log=%s\n' "$log"
     printf 'ext.judge.rerank=false\n'
     printf 'ext.judge.hook_judges=%s\n' "$hook_judges"
-    printf 'ext.judge.callers=%s\n' "$callers"
     [ -z "$extra" ] || printf '%s\n' "$extra"
     printf 'vault.personal.judge=%s\n' "$personal"
     printf 'vault.work.judge=%s\n' "$work"
@@ -528,7 +527,7 @@ use_outcome_judge() { cp "$FIX/outcome-judge.json" "$XDG_CONFIG_HOME/vaultmem/ju
   run judge_in "$STATE_TEXT" smoke --vault personal --subject "Sessions/foo/_index.md"
   [ "$status" -eq 0 ]
   [ "$(wc -l <"$LOG" | tr -d ' ')" -eq 1 ]
-  [ "$(jq -c 'keys' "$LOG")" = '["answers","caller","cost","feedback","http","id","input_tokens","judge","latency_ms","market_cost","model","state_sha256","subject","truncated","ts","vault"]' ]
+  [ "$(jq -c 'keys' "$LOG")" = '["answers","cost","feedback","http","id","input_tokens","judge","latency_ms","market_cost","model","state_sha256","subject","truncated","ts","vault"]' ]
   local want
   want=$(printf '%s' "$STATE_TEXT" | shasum -a 256 2>/dev/null | awk '{print $1}')
   [ -n "$want" ] || want=$(printf '%s' "$STATE_TEXT" | sha256sum | awk '{print $1}')
@@ -1910,203 +1909,6 @@ prompt_in() { printf '%s' "$1" | "$JUDGE_SH" "$JUDGE" prompt 2>"$STDERR"; }
   run judge_cmd prompt --vault personal
   [ "$status" -eq 64 ]
   curl_not_invoked
-}
-
-# --- non-vault callers: --caller ----------------------------------------------------
-
-@test "caller: a listed caller passes the egress gate and the log row records it" {
-  write_config callers=rig,other personal=false
-  run judge_in "$STATE_TEXT" smoke --caller rig --gate failed
-  [ "$status" -eq 0 ]
-  [ "$(printf '%s' "$output" | jq -r '.gate.verdict')" = "yes" ]
-  [ "$(jq -r '.caller' "$LOG")" = "rig" ]
-  [ "$(jq -r '.vault' "$LOG")" = "null" ]
-  diff <(jq -S . "$CURL_REC/body") <(jq -S . "$FIX/smoke-body-zdr.json")
-}
-
-@test "caller: whitespace around listed names is ignored" {
-  write_config "callers= rig , other"
-  run judge_in "$STATE_TEXT" smoke --caller other
-  [ "$status" -eq 0 ]
-}
-
-@test "caller: a caller not in [ext.judge] callers exits 3 before the key is read" {
-  write_config callers=other
-  unset AI_GATEWAY_API_KEY
-  run judge_in "$STATE_TEXT" smoke --caller rig
-  [ "$status" -eq 3 ]
-  [ -z "$output" ]
-  grep -qF 'vaultmem-judge: unavailable: caller rig has not consented to egress ([ext.judge] callers)' "$STDERR"
-  curl_not_invoked
-  [ ! -e "$LOG" ]
-}
-
-@test "caller: the default (empty) callers list consents nobody" {
-  run judge_in "$STATE_TEXT" smoke --caller rig
-  [ "$status" -eq 3 ]
-  grep -q 'caller rig has not consented' "$STDERR"
-  curl_not_invoked
-}
-
-@test "caller: enabled=false exits 3 even for a listed caller" {
-  write_config callers=rig enabled=false
-  run judge_in "$STATE_TEXT" smoke --caller rig
-  [ "$status" -eq 3 ]
-  grep -q 'enabled is not true' "$STDERR"
-  curl_not_invoked
-}
-
-@test "caller: --caller with --vault is a usage error" {
-  write_config callers=rig
-  run judge_in "$STATE_TEXT" smoke --caller rig --vault personal
-  [ "$status" -eq 64 ]
-  grep -q -- '--caller and --vault are mutually exclusive' "$STDERR"
-  run judge_in "$STATE_TEXT" smoke --vault personal --caller rig
-  [ "$status" -eq 64 ]
-  curl_not_invoked
-}
-
-@test "caller: an invalid caller name is a usage error" {
-  write_config callers=rig
-  run judge_in "$STATE_TEXT" smoke --caller '../rig'
-  [ "$status" -eq 64 ]
-  run judge_in "$STATE_TEXT" smoke --caller ''
-  [ "$status" -eq 64 ]
-  grep -q 'invalid caller name' "$STDERR"
-  curl_not_invoked
-}
-
-@test "caller: a vault call logs caller null" {
-  run judge_in "$STATE_TEXT" smoke --vault personal
-  [ "$status" -eq 0 ]
-  [ "$(jq -c '.caller' "$LOG")" = "null" ]
-  [ "$(jq -r '.vault' "$LOG")" = "personal" ]
-}
-
-@test "caller: an error row records the caller too" {
-  write_config callers=rig
-  FAKE_CURL_RESPONSE="$FIX/error-500.json" FAKE_CURL_HTTP=500 run judge_in "$STATE_TEXT" smoke --caller rig
-  [ "$status" -eq 3 ]
-  [ "$(jq -r '.caller' "$LOG")" = "rig" ]
-  [ "$(jq -r '.error.type' "$LOG")" != "null" ]
-}
-
-@test "doctor: [ext.judge] callers must be a comma list of names" {
-  write_config "callers=rig,bad name"
-  run judge_cmd doctor
-  [ "$status" -ne 0 ]
-  grep -q 'callers must be a comma list' "$STDERR" || [[ "$output" == *'callers must be a comma list'* ]]
-  write_config callers=rig,other
-  run judge_cmd doctor
-  [[ "$output" != *'unknown key: callers'* ]]
-  [[ "$output" != *'callers must be'* ]]
-}
-
-# --- --questions override --------------------------------------------------------------
-
-# write_questions <json>: the override file at $QFILE.
-write_questions() {
-  QFILE="$BATS_TEST_TMPDIR/questions.json"
-  printf '%s\n' "$1" >"$QFILE"
-}
-
-@test "questions: the override replaces the judge file's questions in the request" {
-  use_outcome_judge
-  write_questions '{"pick": {"type": "choice", "instructions": "Which worker?", "criteria": {"a": "worker a", "b": "worker b"}}}'
-  jq -n '{model: "typesafe-ai/jev", answers: {pick: {type: "choice", choice: "b", probabilities: {a: 0.1, b: 0.9}}}}' >"$BATS_TEST_TMPDIR/resp.json"
-  FAKE_CURL_RESPONSE="$BATS_TEST_TMPDIR/resp.json" run judge_in "$STATE_TEXT" outcome --vault personal --questions "$QFILE"
-  [ "$status" -eq 0 ]
-  [ "$(jq -c '.questions' "$CURL_REC/body")" = "$(jq -c . "$QFILE")" ]
-  [ "$(printf '%s' "$output" | jq -r '.answers.pick.choice')" = "b" ]
-  # max_state_bytes and truncate still come from the named file (10 bytes, tail).
-  [ "$(jq -r '.state' "$CURL_REC/body")" = "it code 1." ]
-  [ "$(jq -r '.truncated' "$LOG")" = "true" ]
-}
-
-@test "questions: thresholds for kept questions still apply; --gate resolves against the override" {
-  use_outcome_judge
-  # failed keeps the named file's yes=0.9: a 0.87 answer abstains.
-  write_questions '{"failed": {"type": "boolean", "instructions": "Did it fail?"}}'
-  jq '{model, answers: {failed: {type: "boolean", probability: 0.87}}}' "$FIX/boolean-yes.json" >"$BATS_TEST_TMPDIR/resp.json"
-  FAKE_CURL_RESPONSE="$BATS_TEST_TMPDIR/resp.json" run judge_in "$STATE_TEXT" outcome --vault personal --questions "$QFILE" --gate failed
-  [ "$status" -eq 2 ]
-  [ "$(printf '%s' "$output" | jq -r '.gate.verdict')" = "abstain" ]
-}
-
-@test "questions: --gate on a question only the override has" {
-  write_questions '{"ship": {"type": "boolean", "instructions": "Is it ready to ship?"}}'
-  jq -n '{model: "typesafe-ai/jev", answers: {ship: {type: "boolean", probability: 0.1}}}' >"$BATS_TEST_TMPDIR/resp.json"
-  FAKE_CURL_RESPONSE="$BATS_TEST_TMPDIR/resp.json" run judge_in "$STATE_TEXT" smoke --vault personal --questions "$QFILE" --gate ship
-  [ "$status" -eq 1 ]
-  [ "$(printf '%s' "$output" | jq -r '.gate.question')" = "ship" ]
-  # smoke's own question is gone: gating on it is a usage error.
-  run judge_in "$STATE_TEXT" smoke --vault personal --questions "$QFILE" --gate failed
-  [ "$status" -eq 64 ]
-}
-
-@test "questions: thresholds naming a question the override lacks are ignored" {
-  use_outcome_judge
-  write_questions '{"severity": {"type": "score", "instructions": "How bad?"}}'
-  jq '{model, answers: {severity: .answers.severity}}' "$FIX/mixed.json" >"$BATS_TEST_TMPDIR/resp.json"
-  FAKE_CURL_RESPONSE="$BATS_TEST_TMPDIR/resp.json" run judge_in "$STATE_TEXT" outcome --vault personal --questions "$QFILE"
-  [ "$status" -eq 0 ]
-  [ ! -s "$STDERR" ]
-}
-
-@test "questions: an invalid override exits 3 with the first problem, before any network call" {
-  write_questions 'not json'
-  run judge_in "$STATE_TEXT" smoke --vault personal --questions "$QFILE"
-  [ "$status" -eq 3 ]
-  grep -q -- '--questions .* is invalid: not valid JSON' "$STDERR"
-  write_questions '{}'
-  run judge_in "$STATE_TEXT" smoke --vault personal --questions "$QFILE"
-  [ "$status" -eq 3 ]
-  grep -q 'questions must be a non-empty object' "$STDERR"
-  write_questions '["failed"]'
-  run judge_in "$STATE_TEXT" smoke --vault personal --questions "$QFILE"
-  [ "$status" -eq 3 ]
-  grep -q 'questions must be a non-empty object' "$STDERR"
-  write_questions '{"x": {"type": "free-text"}}'
-  run judge_in "$STATE_TEXT" smoke --vault personal --questions "$QFILE"
-  [ "$status" -eq 3 ]
-  grep -q 'question x: type must be boolean, choice, or score' "$STDERR"
-  [ -z "$output" ]
-  curl_not_invoked
-}
-
-@test "questions: a missing override file is a usage error" {
-  run judge_in "$STATE_TEXT" smoke --vault personal --questions "$BATS_TEST_TMPDIR/nope.json"
-  [ "$status" -eq 64 ]
-  curl_not_invoked
-}
-
-@test "questions: the named judge must still exist" {
-  write_questions '{"ship": {"type": "boolean"}}'
-  run judge_in "$STATE_TEXT" no-such-judge --vault personal --questions "$QFILE"
-  [ "$status" -eq 64 ]
-  grep -q 'no such judge' "$STDERR"
-}
-
-@test "questions: works with --caller" {
-  write_config callers=rig
-  write_questions '{"ship": {"type": "boolean", "instructions": "Ready?"}}'
-  jq -n '{model: "typesafe-ai/jev", answers: {ship: {type: "boolean", probability: 0.95}}}' >"$BATS_TEST_TMPDIR/resp.json"
-  FAKE_CURL_RESPONSE="$BATS_TEST_TMPDIR/resp.json" run judge_in "$STATE_TEXT" smoke --caller rig --questions "$QFILE" --gate ship
-  [ "$status" -eq 0 ]
-  [ "$(jq -r '.caller' "$LOG")" = "rig" ]
-}
-
-@test "caller and questions run under /bin/bash when that is bash 3.2" {
-  /bin/bash --version 2>/dev/null | head -n 1 | grep -q 'version 3\.2' || skip "/bin/bash is not 3.2 here"
-  JUDGE_SH=/bin/bash
-  write_config callers=rig
-  write_questions '{"ship": {"type": "boolean", "instructions": "Ready?"}}'
-  jq -n '{model: "typesafe-ai/jev", answers: {ship: {type: "boolean", probability: 0.95}}}' >"$BATS_TEST_TMPDIR/resp.json"
-  FAKE_CURL_RESPONSE="$BATS_TEST_TMPDIR/resp.json" run judge_in "$STATE_TEXT" smoke --caller rig --questions "$QFILE" --gate ship
-  [ "$status" -eq 0 ]
-  [ ! -s "$STDERR" ]
-  run judge_in "$STATE_TEXT" smoke --caller rig --vault personal
-  [ "$status" -eq 64 ]
 }
 
 # --- the shell floor -----------------------------------------------------------------
