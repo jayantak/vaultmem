@@ -154,8 +154,8 @@
 #                               each vault's egress consent, as `ext.judge.<key>=<value>`
 #                               then `vault.<id>.judge=true|false` lines. Answered by core,
 #                               extension or not; it is how the extension reads the config.
-#   vaultmem judge <name> [--vault <id>] [--gate <question>] [--format json|tsv]
-#                               ask judge <name> about the state on stdin
+#   vaultmem judge <name> [--vault <id> | --caller <name>] [--gate <question>] [--format json|tsv]
+#                               [--questions <file>] ask judge <name> about the state on stdin
 #   vaultmem judge list         judges available (shipped + user)
 #   vaultmem judge doctor [--live]  key present, config valid, judges parse; --live = one call
 #   vaultmem judge bench [--fixture F]  measure a judge against a labelled fixture
@@ -164,7 +164,7 @@
 #   vaultmem judge calibration  accuracy per confidence bucket, from feedback rows
 #     Every form but `config` runs the extension; args after `judge` pass through verbatim.
 #     exit codes: 0=ok/yes 1=no (--gate) 2=abstain 3=unavailable (not installed, disabled,
-#     vault has not set `judge = true`, no key, timeout, HTTP error) 64=usage
+#     vault has not set `judge = true` or caller not in `callers`, no key, timeout, HTTP error) 64=usage
 #
 # Design notes:
 #   - Curated hits (Home.md Agent Index + MOCs/) come first: they are
@@ -4154,13 +4154,13 @@ _ext_exec() {
 
 # `vaultmem judge config`: the core/extension config contract, answered by core.
 # FROZEN FORMAT, one per line, values unquoted, defaults filled in:
-#   ext.judge.<key>=<value>     the nine known keys in the order below, then any
+#   ext.judge.<key>=<value>     the ten known keys in the order below, then any
 #                               other [ext.judge] key in file order (the extension's
 #                               own doctor rejects unknown names; core does not)
 #   vault.<id>.judge=true|false every registry vault that has a path
 #   vault.<id>.label=<label>    then, per vault with a path in registry order, its
 #   vault.<id>.description=<s>  label (default: the id) and description (default: empty)
-_JUDGE_KEYS="enabled model base_url zdr timeout_ms key_file log rerank hook_judges"
+_JUDGE_KEYS="enabled model base_url zdr timeout_ms key_file log rerank hook_judges callers"
 _judge_default() {
 	case "$1" in
 	enabled | rerank) printf 'false' ;;
