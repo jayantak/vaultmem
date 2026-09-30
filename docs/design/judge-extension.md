@@ -323,6 +323,8 @@ log = true
 rerank = false                      # search reranks by default only when true
 hook_judges = "nudge"               # comma list: judges allowed to run inside hooks. Default empty: an
                                     # example value, so nothing runs in a hook until named.
+callers = "rig"                     # comma list: non-vault callers allowed to send with --caller.
+                                    # Default empty. The caller owns its content policy.
 
 [vault.personal]
 judge = true                        # default false. Egress consent, per vault.
@@ -369,6 +371,14 @@ Vault content, session notes, and transcripts leave the machine. Rules:
 6. Judged text is untrusted input. Notes and transcripts can contain text aimed
    at the model ("answer yes"). This is one reason for constraint 3.5: no
    judgment ever triggers a write or a move.
+
+Non-vault callers (added 2026-09-29) are the one exception to rule 1. A tool
+such as rig judges its own content, not a vault's, so it passes
+`--caller <name>` in place of `--vault`, and consent is `[ext.judge] callers`
+listing that name, checked before the key is read. The two flags are
+exclusive. The caller owns its content policy (rig's repo-owner allowlist);
+the extension only records the caller in the log row. `zdr` and every other
+check are unchanged.
 
 A work vault stays `judge = false` until its owner approves the vendor. That
 holds regardless of `zdr`: the owner's `zdr = false` decision covers the
@@ -580,6 +590,15 @@ One PR per phase. Phase 1 must not change any existing command's output.
    model lists `"no_training":"all"`, which covers training but not retention.
 5. Answered: the gateway needs a card on file even for free credits (403
    `customer_verification_required`). The owner added one on 2026-09-21.
+
+6. Answered 2026-09-29: **non-vault callers get their own consent key.** rig
+   needs advisory decisions about fleet briefs, reports, worktrees, and
+   skills, which live in no vault. `[ext.judge] callers` (comma list, default
+   empty) is the consent, `--caller <name>` the flag, and the caller owns what
+   it sends. `--questions <file>` lets a caller build choice options per call
+   (live worker slugs, skill names) while thresholds and state limits stay in
+   the named judge file. `vaultmem judge config` prints `ext.judge.callers=`
+   right after `ext.judge.hook_judges`.
 
 ## Sources
 

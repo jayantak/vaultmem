@@ -4,8 +4,9 @@
 # lives here; the core script never opens a socket.
 #
 # Usage:
-#   vaultmem-judge <name> [--vault <id>] [--gate <question>] [--format json|tsv]
-#                         [--subject <text>]        state on stdin
+#   vaultmem-judge <name> [--vault <id> | --caller <name>] [--gate <question>]
+#                         [--format json|tsv] [--subject <text>]
+#                         [--questions <file>]      state on stdin
 #   vaultmem-judge list                 judges available (user overrides shipped)
 #   vaultmem-judge doctor [--live]      config, key, and judge-file checks
 #   vaultmem-judge log [-n N]           tail the decision log (default 20 rows)
@@ -42,7 +43,7 @@
 set -uo pipefail
 
 PROG="vaultmem-judge"
-KNOWN_KEYS="enabled model base_url zdr timeout_ms key_file log rerank hook_judges"
+KNOWN_KEYS="enabled model base_url zdr timeout_ms key_file log rerank hook_judges callers"
 LOG_MAX_BYTES_DEFAULT=5242880 # 5 MiB; one rotated generation (judge.jsonl.1)
 LIVE_STATE="The build failed with exit code 1."
 
@@ -55,7 +56,8 @@ trap cleanup EXIT
 
 usage_err() {
 	printf '%s: %s\n' "$PROG" "$1" >&2
-	printf 'usage: %s <name> [--vault <id>] [--gate <question>] [--format json|tsv]\n' "$PROG" >&2
+	printf 'usage: %s <name> [--vault <id> | --caller <name>] [--gate <question>] [--format json|tsv]\n' "$PROG" >&2
+	printf '       %s <name> ... [--subject <text>] [--questions <file>]\n' "$PROG" >&2
 	printf '       %s list | doctor [--live] | log [-n N]\n' "$PROG" >&2
 	printf '       %s feedback <id> right|wrong | calibration [--judge <name>]\n' "$PROG" >&2
 	printf '       %s route [--subject <text>] | dupes [--vault <id>] [--subject <text>]\n' "$PROG" >&2
@@ -349,8 +351,10 @@ fit_state() {
 # POSTs one request, validates the response, and logs one row. <required> is a
 # space-separated list of question names the answers must include. An empty
 # <vault> logs the response's `vault` choice (route's multi-vault request).
-# Sets CALL_ID. Any failure logs an error row and exits 3.
+# Sets CALL_ID. Any failure logs an error row and exits 3. The row's `caller` is
+# $CALLER (set only by a named judge's --caller), null when empty.
 CALL_ID=""
+CALLER=""
 evaluate() {
 	local name="$1" vault="$2" subject="$3" state="$4" questions="$5" required="$6" resp="$7"
 	local body="$TMPD/body.json" model
@@ -403,11 +407,12 @@ evaluate() {
 		[ -n "$KEY" ] && err_msg="${err_msg//"$KEY"/[redacted]}"
 		if [ "$log_on" = "true" ]; then
 			log_append "$(jq -nc --arg id "$id" --arg ts "$ts" --arg judge "$name" --arg vault "$vault" \
-				--arg subject "$subject" --arg model "$model" --arg sha "$sha" \
+				--arg subject "$subject" --arg model "$model" --arg sha "$sha" --arg caller "$CALLER" \
 				--argjson truncated "$TRUNCATED" --argjson latency "$LATENCY_MS" --argjson http "$HTTP_CODE" \
 				--arg etype "$err_type" --arg emsg "$err_msg" '
 				{ id: $id, ts: $ts, judge: $judge,
 				  vault: (if $vault == "" then null else $vault end),
+				  caller: (if $caller == "" then null else $caller end),
 				  subject: (if $subject == "" then null else $subject end),
 				  model: $model, state_sha256: $sha, truncated: $truncated, answers: null,
 				  input_tokens: null, cost: null, market_cost: null,
@@ -419,10 +424,11 @@ evaluate() {
 
 	if [ "$log_on" = "true" ]; then
 		log_append "$(jq -c --arg id "$id" --arg ts "$ts" --arg judge "$name" --arg vault "$vault" \
-			--arg subject "$subject" --arg model "$model" --arg sha "$sha" \
+			--arg subject "$subject" --arg model "$model" --arg sha "$sha" --arg caller "$CALLER" \
 			--argjson truncated "$TRUNCATED" --argjson latency "$LATENCY_MS" --argjson http "$HTTP_CODE" '
 			{ id: $id, ts: $ts, judge: $judge,
 			  vault: (if $vault != "" then $vault else (.answers.vault.choice // null) end),
+			  caller: (if $caller == "" then null else $caller end),
 			  subject: (if $subject == "" then null else $subject end),
 			  model: (.model // $model), state_sha256: $sha, truncated: $truncated,
 			  answers: .answers,
@@ -455,20 +461,52 @@ egress_gate_vault() {
 		unavailable "vault $VAULT has not consented to egress (judge = true)"
 }
 
+# egress_gate_caller <name>: consent for a non-vault caller (rig, say), which owns
+# its own content policy. Exits 3 on no config, disabled, or <name> not listed in
+# [ext.judge] callers. Loads CFG, like egress_gate_vault.
+egress_gate_caller() {
+	load_config || unavailable "config not available (is VAULTMEM_BIN set?)"
+	[ "$(cfg enabled false)" = "true" ] || unavailable "[ext.judge] enabled is not true"
+	case ",$(cfg callers "" | tr -d '[:space:]')," in
+	*",$1,"*) ;;
+	*) unavailable "caller $1 has not consented to egress ([ext.judge] callers)" ;;
+	esac
+}
+
+# merge_questions <judge-file> <override-file> <out>: the judge file with its
+# questions replaced by the override's, and thresholds for questions the override
+# lacks dropped. Returns 1 when the override is not JSON.
+merge_questions() {
+	jq -e . "$2" >/dev/null 2>&1 || return 1
+	jq --slurpfile q "$2" '
+		.questions = $q[0]
+		| if (.thresholds | type) == "object" and ($q[0] | type) == "object"
+		  then .thresholds |= with_entries(select(.key as $k | $q[0] | has($k)))
+		  else . end' "$1" >"$3"
+}
+
 # --- subcommand: <name> ----------------------------------------------------------
 
 cmd_judge() {
-	local name="$1" vault="" gate="" format="json" subject=""
+	local name="$1" vault="" gate="" format="json" subject="" caller="" qfile="" has_vault=false has_caller=false
 	shift
 	while [ $# -gt 0 ]; do
 		case "$1" in
-		--vault | --gate | --format | --subject)
+		--vault | --gate | --format | --subject | --caller | --questions)
 			[ $# -ge 2 ] || usage_err "$1 needs a value"
 			case "$1" in
-			--vault) vault="$2" ;;
+			--vault)
+				vault="$2"
+				has_vault=true
+				;;
 			--gate) gate="$2" ;;
 			--format) format="$2" ;;
 			--subject) subject="$2" ;;
+			--caller)
+				caller="$2"
+				has_caller=true
+				;;
+			--questions) qfile="$2" ;;
 			esac
 			shift 2
 			;;
@@ -480,12 +518,29 @@ cmd_judge() {
 	json | tsv) ;;
 	*) usage_err "--format must be json or tsv" ;;
 	esac
+	[ "$has_vault" = true ] && [ "$has_caller" = true ] && usage_err "--caller and --vault are mutually exclusive"
+	if [ "$has_caller" = true ]; then
+		valid_name "$caller" || usage_err "invalid caller name: $caller"
+	fi
+	if [ -n "$qfile" ] && [ ! -f "$qfile" ]; then
+		usage_err "--questions: no such file: $qfile"
+	fi
 
 	local jfile problems gate_type
 	jfile=$(judge_path "$name") || usage_err "no such judge: $name"
 	command -v jq >/dev/null 2>&1 || unavailable "jq is not installed"
 	problems=$(judge_problems "$jfile")
 	[ -z "$problems" ] || unavailable "judge file $jfile is invalid: $(printf '%s' "$problems" | head -n 1)"
+	# --questions: the named file still supplies max_state_bytes, truncate, and
+	# thresholds; everything below reads the merged document.
+	if [ -n "$qfile" ]; then
+		mktmp || unavailable "cannot create a temp dir"
+		merge_questions "$jfile" "$qfile" "$TMPD/judge.json" ||
+			unavailable "--questions $qfile is invalid: not valid JSON"
+		jfile="$TMPD/judge.json"
+		problems=$(judge_problems "$jfile")
+		[ -z "$problems" ] || unavailable "--questions $qfile is invalid: $(printf '%s' "$problems" | head -n 1)"
+	fi
 	if [ -n "$gate" ]; then
 		gate_type=$(jq -r --arg q "$gate" '.questions[$q].type // ""' "$jfile")
 		case "$gate_type" in
@@ -497,8 +552,13 @@ cmd_judge() {
 
 	# Egress gate. Everything below this block may touch the network; nothing
 	# above it does. Order matters: consent is checked before the key is read.
-	egress_gate_vault "$vault"
-	vault="$VAULT"
+	if [ "$has_caller" = true ]; then
+		egress_gate_caller "$caller"
+		CALLER="$caller"
+	else
+		egress_gate_vault "$vault"
+		vault="$VAULT"
+	fi
 	egress_ready
 
 	local raw="$TMPD/state.raw" state="$TMPD/state" questions="$TMPD/questions.json" resp="$TMPD/resp.json"
@@ -1542,9 +1602,9 @@ doctor_config() {
 		model | key_file)
 			[ -n "$val" ] || doc_err "[ext.judge] $key must not be empty"
 			;;
-		hook_judges)
+		hook_judges | callers)
 			case "$val" in
-			*[!A-Za-z0-9._,-]*) doc_err "[ext.judge] hook_judges must be a comma list of judge names (got: $val)" ;;
+			*[!A-Za-z0-9._,-]*) doc_err "[ext.judge] $key must be a comma list of names (got: $val)" ;;
 			esac
 			;;
 		esac
