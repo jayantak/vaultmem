@@ -67,7 +67,6 @@ judge = false
 | `log` | `true` | Write the decision log. |
 | `rerank` | `false` | Makes `vaultmem search --rerank` the default for the cli format. Leave it off until `bench` shows a gain on your own fixture. |
 | `hook_judges` | empty | Comma list of judges allowed to run inside hooks: `nudge` (`nudge --judge`) and `prompt` (`judge prompt`). Nothing runs inside a hook until it is named here. |
-| `callers` | empty | Comma list of non-vault callers allowed to send state with `--caller <name>` (for example `rig`). See [Non-vault callers](#non-vault-callers). |
 | `[vault.<id>] judge` | `false` | Egress consent for that vault. |
 
 Core lint checks `[ext.judge]` for TOML shape only. Key names and value shapes
@@ -106,8 +105,6 @@ builds the request, and exits 3 when no candidate is left. `index-drift`
 sends only the rows core read from the consenting vault's Agent Index.
 `prompt` adds one more check before the vault's: `prompt` must be in
 `hook_judges`. It prints nothing and exits 0 where the others exit 3.
-A named judge called with `--caller <name>` skips the vault check and applies
-the caller check instead: `<name>` must be in `callers`.
 
 Judged text is untrusted input. A note can contain text aimed at the model
 ("answer yes"). That is one reason a judgment never triggers a write.
@@ -115,8 +112,7 @@ Judged text is untrusted input. A note can contain text aimed at the model
 ## Commands
 
 ```
-vaultmem judge <name> [--vault <id> | --caller <name>] [--gate <question>] [--format json|tsv]
-                      [--subject <text>] [--questions <file>]
+vaultmem judge <name> [--vault <id>] [--gate <question>] [--format json|tsv] [--subject <text>]
 vaultmem judge list
 vaultmem judge doctor [--live]
 vaultmem judge log [-n N]
@@ -154,19 +150,6 @@ payload or raw text; see [Recall reflex gate](#recall-reflex-gate-prompt).
   value is the score, with an empty probability.
 - `--subject <text>` is a label for the log row, such as the note's path. It is
   never sent to the gateway.
-- `--caller <name>` names a non-vault caller in place of `--vault`. Passing
-  both is a usage error (64). The name follows the judge-name rule
-  (`[A-Za-z0-9._-]`, no leading dot). See
-  [Non-vault callers](#non-vault-callers).
-- `--questions <file>` replaces the named judge's `questions` for this call
-  with the JSON object in `<file>`. `max_state_bytes`, `truncate`, and
-  `thresholds` still come from the named judge file, which must still exist.
-  A threshold naming a question the override lacks is dropped, not an error.
-  `--gate` resolves against the override. The override is checked with the
-  same rules as a judge file's `questions` (a non-empty object, each question
-  `boolean`, `choice`, or `score`); an invalid override exits 3 with the first
-  problem, and a missing file exits 64. Use it when the options are built per
-  call, such as live worker names.
 
 `list` prints `name`, `shipped|user`, and the description, tab-separated.
 
@@ -218,33 +201,6 @@ bucket	n	right	accuracy
 0.9-1.0	17	16	0.94
 ```
 
-
-### Non-vault callers
-
-`--vault` consent fits vault content. A tool that judges its own content (rig
-judging fleet worker briefs, reports, worktrees, or skills) has no vault, so it
-calls with `--caller <name>`:
-
-```toml
-[ext.judge]
-enabled = true
-callers = "rig"
-```
-
-```
-printf '%s' "$brief" | vaultmem judge smoke --caller rig --questions q.json --gate ship
-```
-
-The gate is `enabled = true` and `<name>` listed in `callers`. Anything else
-exits 3 with `unavailable: caller <name> has not consented to egress
-([ext.judge] callers)`, checked before the key is read, and `curl` never
-starts. `zdr`, `base_url`, and the key checks apply as for a vault.
-
-Listing a caller consents to whatever that caller sends. The extension cannot
-see what the content is, so **the caller owns its content policy**: rig, for
-example, sends only content from repos whose owner is on its own allowlist.
-Keep a caller out of `callers` until its policy is one you accept. The
-decision log records the caller as `"caller": "<name>"`, with `"vault": null`.
 
 ### Capture routing: `route` and `dupes`
 
@@ -562,8 +518,8 @@ moves notes on `status:` alone.
 | 0 | OK. With `--gate`: yes. A boolean's probability is at or above its `yes` threshold, or a choice's top probability is at or above `min_confidence`. |
 | 1 | `--gate` only: no. The probability is at or below the `no` threshold. |
 | 2 | `--gate` only: abstain. Between thresholds, or the top choice is below `min_confidence`. `route`: the top vault is below `min_confidence`. |
-| 3 | Unavailable: disabled, no consent (vault or caller), an invalid `--questions` override, no key, timeout, any non-2xx status, or a response body that does not parse as an evaluate response. |
-| 64 | Usage error: bad flag, `--caller` with `--vault`, a missing `--questions` file, unknown judge, unknown or ungateable `--gate` question, malformed `rerank` or `index-drift` stdin (including more than 5 rows), a missing or empty `bench` fixture. |
+| 3 | Unavailable: disabled, no consent, no key, timeout, any non-2xx status, or a response body that does not parse as an evaluate response. |
+| 64 | Usage error: bad flag, unknown judge, unknown or ungateable `--gate` question, malformed `rerank` or `index-drift` stdin (including more than 5 rows), a missing or empty `bench` fixture. |
 
 Without `--gate` the code is 0 or 3. On exit 3 stdout is empty and one line on
 stderr names the reason. Callers treat anything other than 0, 1, or 2 as "no
@@ -682,7 +638,7 @@ object per gateway call:
 
 ```json
 {"id":"20260921T101500Z-4f2a","ts":"2026-09-21T10:15:00Z","judge":"smoke","vault":"personal",
- "caller":null,"subject":null,"model":"typesafe-ai/jev","state_sha256":"...","truncated":false,
+ "subject":null,"model":"typesafe-ai/jev","state_sha256":"...","truncated":false,
  "answers":{"failed":{"type":"boolean","probability":0.99}},"input_tokens":304,
  "cost":"0","market_cost":"0.000012768","latency_ms":212,"http":200,"feedback":null}
 ```
@@ -692,7 +648,6 @@ object per gateway call:
 - A failed call (timeout, non-2xx, bad body) is logged too, with
   `"answers": null` and an extra `"error": {"type": "...", "message": "..."}`.
   A call the egress gate refused is not logged: nothing was sent.
-- `caller` is the `--caller` name, and `null` for every other call.
 - `latency_ms` is curl's total request time. `http` is 0 when no response
   arrived.
 - `log = false` turns the log off.

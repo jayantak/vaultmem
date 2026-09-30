@@ -157,7 +157,7 @@ dispatch case and that makes every query ambiguous.
 - **`vaultmem judge config` is a frozen contract, answered by core**, never
   forwarded. One line each, values unquoted, defaults filled in, in this order:
   `ext.judge.enabled`, `.model`, `.base_url`, `.zdr`, `.timeout_ms`,
-  `.key_file` (`~` expanded), `.log`, `.rerank`, `.hook_judges`, `.callers`, then any other
+  `.key_file` (`~` expanded), `.log`, `.rerank`, `.hook_judges`, then any other
   `[ext.judge]` key in file order, then `vault.<id>.judge=true|false` for every
   registry vault with a path. It must work with no config file and no vault
   (`judge` is in the pre-dispatch allowlist). The extension's tests stub
