@@ -30,12 +30,12 @@
 #                               vaultmem 'AD-4[0-9]{2}' works.
 #   vaultmem --rerank <query>   reorder content hits by the Jev extension's `rerank` score
 #                               (0 to 3), printed after each row as `[2.9]`; curated rows stay
-#                               on top, ties and unscored rows keep ripgrep order. json objects
+#                               on top, ties and unscored rows keep plain search order. json objects
 #                               gain `score` (null = unscored); files prints the new order.
 #                               Unavailable (not installed, disabled, no vault with `jev =
-#                               true`): plain ripgrep order, and VAULTMEM_VERBOSE=1 says why on
+#                               true`): plain search order, and VAULTMEM_VERBOSE=1 says why on
 #                               stderr. `rerank = true` in [ext.jev] makes it the cli default.
-#   vaultmem --no-rerank <query>  plain ripgrep order even when [ext.jev] rerank = true
+#   vaultmem --no-rerank <query>  plain search order even when [ext.jev] rerank = true
 #   vaultmem --rerank --min-score S <query>
 #                               drop reranked content rows scoring below S (unscored rows
 #                               stay). Without --rerank in effect it is a usage error (exit 64).
@@ -172,7 +172,7 @@
 # Design notes:
 #   - Curated hits (Home.md Agent Index + MOCs/) come first: they are
 #     human/agent-curated summaries, the highest-signal entry points.
-#   - Content hits are raw ripgrep over note bodies, capped for frugality.
+#   - Content hits are raw ripgrep over note bodies, ranked by match count and capped for frugality.
 #   - `status`/`sessions`/`verify`/`nudge` are fail-quiet: an unmounted/
 #     unconfigured vault (or a non-vault path for `verify`) prints nothing and
 #     exits 0, so they can never break a hook.
