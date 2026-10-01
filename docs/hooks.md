@@ -224,7 +224,10 @@ stamp; only later calls compare against it and can produce a nudge. If you also
 want the stamp anchored at the true start of the session rather than the first
 Stop, add the same `vaultmem nudge` command to your SessionStart hooks too —
 planting the stamp there is harmless (it is a no-op once the stamp already
-exists later in the same run).
+exists later in the same run). Jev is not consulted there: `nudge` reads the
+payload's `hook_event_name` and asks `capture-worthy` only on `Stop` (or on no
+`hook_event_name` at all, for a caller piping bare JSON), so a SessionStart
+wiring never sends a transcript and never prints a "before you stop" line.
 
 ### What the Stop hook receives on stdin
 
@@ -268,16 +271,18 @@ calls, tool results, thinking, and subagent turns are left out), appends
 
 The Stop wiring above is the whole of it: no extra flag, no second hook.
 
-Jev runs only when **all three** consent preconditions hold, and a
-session `_index.md` was not updated since the stamp:
+Jev runs only when **all four** preconditions hold, and a session `_index.md`
+was not updated since the stamp:
 
-1. The extension is installed and `[ext.jev] enabled = true`.
-2. `nudge` is named in `[ext.jev] hooks` (default empty: nothing runs
+1. The payload is a `Stop` payload: `hook_event_name` is `Stop`, or absent (a
+   caller piping bare JSON). A SessionStart wiring never reaches Jev.
+2. The extension is installed and `[ext.jev] enabled = true`.
+3. `nudge` is named in `[ext.jev] hooks` (default empty: nothing runs
    inside a hook until you name it).
-3. `vaultmem which` routes `$PWD` to a vault **confidently** (a `match_owners`
+4. `vaultmem which` routes `$PWD` to a vault **confidently** (a `match_owners`
    or `match_paths` rule, not the fallback), and that vault sets `jev = true`.
 
-**When all three hold, the transcript tail leaves the machine**: it is sent to
+**When all four hold, the transcript tail leaves the machine**: it is sent to
 the remote evaluation model through the extension. Leave `nudge` out of
 `hooks`, or keep `jev = false` on a vault, to keep it local.
 
