@@ -20,6 +20,8 @@
 #                               vaultmem stag '"dry run"' → AND of a term and a phrase
 #   vaultmem -v <id> <query>    restrict to one vault (see `vaultmem vaults`)
 #   vaultmem -n 40 <query>      cap results (default 20 files)
+#   vaultmem -- <query>         global flags go BEFORE the query; `--` ends them, and every
+#                               token after the first query word is literal text
 #   vaultmem --format F <query> search output format: cli (default, curated+content, ANSI) |
 #                               files (bare content-hit paths, pipeable) | json (array of
 #                               {file, line, text} content matches; escaped for bash 3.2)
@@ -4358,23 +4360,60 @@ _jev() {
 }
 
 # --- arg parsing ---------------------------------------------------------------
+# Global flags are positional-anchored: they are read only BEFORE the first
+# positional, and `--` ends flag parsing outright. Everything from the first
+# positional on is literal — which is what makes a free-text query containing a
+# `-v`/`-n` token reach search intact (`vaultmem foo -v` searches `foo -v`).
+# The one exception is a known subcommand: `vaultmem next -n 5` and
+# `vaultmem groom --format json` read $LIMIT/$FORMAT off the globals, so flag
+# scanning continues past a recognized verb. See issue #4.
 VAULT=both
 ARGS=()
-while [ $# -gt 0 ]; do
+# Verbs that keep global-flag scanning alive after them. Anything else is a
+# query, and a query's tokens are never flags.
+_is_subcommand() { # $1 = candidate first positional
 	case "$1" in
+	status | sessions | verify | nudge | which | init | doctor | index | mocs | vaults | path | projects | project | next | task | groom | resolve | links | backlinks | neighbors | dangling | bookmark | worktrees | cat | frontier) return 0 ;;
+	esac
+	return 1
+}
+# A value-taking flag with nothing after it is a usage error, never a silent
+# `shift 2` no-op — that no-op left the loop spinning at 100% CPU (issue #4).
+_need_value() { # $1 = flag name, $2 = remaining arg count
+	[ "$2" -ge 2 ] && return 0
+	printf 'vaultmem: %s needs a value\n' "$1" >&2
+	printf 'usage: vaultmem [-v <vault>] [-n <limit>] [--format <fmt>] [--] <query>|<subcommand>\n' >&2
+	exit 64
+}
+_flags_done=0
+while [ $# -gt 0 ]; do
+	if [ "$_flags_done" = 1 ]; then
+		ARGS+=("$1")
+		shift
+		continue
+	fi
+	case "$1" in
+	--)
+		_flags_done=1
+		shift
+		;;
 	-v | --vault)
+		_need_value "$1" $#
 		VAULT="$2"
 		shift 2
 		;;
 	-n | --limit)
+		_need_value "$1" $#
 		LIMIT="$2"
 		shift 2
 		;;
 	--format)
+		_need_value "$1" $#
 		FORMAT="$2"
 		shift 2
 		;;
 	--exclude)
+		_need_value "$1" $#
 		EXCLUDE="$2"
 		HAVE_EXCL=1
 		shift 2
@@ -4388,15 +4427,12 @@ while [ $# -gt 0 ]; do
 		shift
 		;;
 	--min-score)
-		if [ $# -lt 2 ]; then
-			printf 'vaultmem: --min-score needs a value\n' >&2
-			exit 64
-		fi
+		_need_value "$1" $#
 		MIN_SCORE="$2"
 		shift 2
 		;;
 	-h | --help)
-		sed -n '4,183p' "$0"
+		sed -n '4,185p' "$0"
 		exit 0
 		;;
 	*)
@@ -4411,6 +4447,9 @@ while [ $# -gt 0 ]; do
 			done
 			;;
 		esac
+		# A query stops flag parsing here; a subcommand keeps it open for its
+		# own flags.
+		_is_subcommand "${ARGS[0]}" || _flags_done=1
 		;;
 	esac
 done
@@ -4432,7 +4471,7 @@ status | sessions | verify | nudge | which | init | doctor | jev | judge | _jev 
 esac
 
 case "${ARGS[0]:-}" in
-"") sed -n '4,183p' "$0" ;; # no args → print usage
+"") sed -n '4,185p' "$0" ;; # no args → print usage
 status) cmd_status ;;
 nudge) cmd_nudge "${ARGS[@]:1}" ;;
 index) cmd_index "${ARGS[1]:-}" ;;
