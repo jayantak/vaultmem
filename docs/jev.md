@@ -62,7 +62,7 @@ jev = false
 | `model` | `typesafe-ai/jev` | Gateway model id. The gateway offers no versioned id. |
 | `base_url` | `https://ai-gateway.vercel.sh` | Must be `https`. Plain `http` is accepted only for `localhost` and `127.0.0.1`, because the key rides on every call. |
 | `zdr` | `true` | Sends `providerOptions.gateway.zeroDataRetention: true`. Never downgraded automatically. |
-| `timeout_ms` | `1500` | Whole-request limit, passed to `curl --max-time`. |
+| `timeout_ms` | `1500` | Whole-request limit, passed to `curl --max-time`. Warm calls take 300 to 600 ms, but the first call after a quiet spell has taken 2 to 3 s, so at 1500 that call fails open. 3000 catches most of them. |
 | `key_file` | `~/.config/vaultmem/ai-gateway.key` | Read when `AI_GATEWAY_API_KEY` is unset. Refused if its mode is wider than 600. |
 | `log` | `true` | Write the decision log. |
 | `rerank` | `false` | Makes `vaultmem --rerank <query>` the default for the cli format. Leave it off until `bench` shows a gain on your own fixture. |
@@ -168,11 +168,20 @@ bare exit 3 would hide:
 
 | HTTP | `.error.type` | Cause |
 |---|---|---|
-| 401 | `authentication_error` | Invalid or missing key. |
+| 401 | `authentication_error` | Invalid or missing key, or a Vercel access token where an AI Gateway API key belongs. |
 | 403 | `customer_verification_required` | No card on file. |
-| 403 | `permission_denied` | ZDR requested on a Hobby plan. |
+| 403 | `permission_denied` | ZDR requested on a Hobby plan. The message names the plan. |
+| 403 | `no_providers_available` | Free tier. The free monthly AI Gateway credit does not cover `typesafe-ai/jev`; buy AI Gateway credit. |
 | 404 | `model_not_found` | Wrong `model`. |
 | 400 | `invalid_request_error` | A malformed set file. Says nothing about the key: the schema is checked first. |
+
+On a new account the errors arrive in this order: a 401 until the key is
+right, then a 403 `permission_denied` until ZDR is either paid for (Pro) or
+turned off, then a 403 `no_providers_available` until the account holds
+purchased credit. A key copied through the clipboard is the usual 401. Writing
+it from a password manager straight to `key_file` avoids that, for example
+`op read "op://<vault>/<item>/credential" > ~/.config/vaultmem/ai-gateway.key`
+followed by `chmod 600`. A trailing newline is fine: only the first line is read.
 
 `feedback` and `calibration` are offline. They read and append to the local
 decision log, never the gateway, so they work with `enabled = false`, with no
@@ -708,6 +717,9 @@ object per gateway call:
  "cost":"0","market_cost":"0.000012768","latency_ms":212,"http":200,"feedback":null}
 ```
 
+- `cost` is what the call charged in US dollars, as a string. Measured on the
+  shipped sets: about $0.00003 for a short state, $0.0001 to $0.0002 for a
+  session triage, and $0.0003 to $0.0004 for a 20-candidate rerank.
 - The state is stored as a SHA-256 only, never as text. The hash covers the
   state as sent, after truncation.
 - A failed call (timeout, non-2xx, bad body) is logged too, with
