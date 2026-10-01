@@ -119,7 +119,7 @@ for verify-on-write.
   sessions gone stale (untouched past `stale_active_days`, default 7),
   `active`/`parked` sessions whose `_index.md` has grown past `bloat_lines`
   (default 150) as checkpoint-due, and unblocked `backlog`/`next` tasks
-  untouched past `VAULTMEM_TASK_STALE_DAYS` (default 14). Hygiene, on demand.
+  untouched past `task_stale_days` (default 14). Hygiene, on demand.
   `groom --dry-run` previews the exact would-move / would-flip list with no
   `mv` and no writes.
 - **Verify-on-write** — `verify <file>` is `doctor`'s schema lints plus a
@@ -306,6 +306,8 @@ vault = "personal"        # fallback vault when routing finds no signal
 limit = 20                # default result cap
 cold_days = 21            # a parked session untouched this long is grooming-due
 bloat_lines = 150         # an active/parked _index.md over this many lines is checkpoint-due
+stale_active_days = 7     # an active session untouched this long is stale
+task_stale_days = 14      # an unstarted task untouched this long is stale backlog
 directive_file = ""       # optional: path to custom AGENT DIRECTIVE text
 
 [vault.personal]
@@ -318,9 +320,9 @@ path = "~/Obsidian/Personal"
 Every vault field, the `which` routing algorithm, and the per-vault Agent-Index
 gating are documented in the **[Config reference](docs/config.md)**. Env
 overrides: `VAULTMEM_COLD_DAYS` beats `cold_days`, `VAULTMEM_BLOAT_LINES` beats
-`bloat_lines`. Two thresholds are env-only (no config key yet):
-`VAULTMEM_STALE_ACTIVE_DAYS` (default 7, stale-active sessions) and
-`VAULTMEM_TASK_STALE_DAYS` (default 14, stale backlog).
+`bloat_lines`, `VAULTMEM_STALE_ACTIVE_DAYS` beats `stale_active_days` (default 7,
+stale-active sessions), and `VAULTMEM_TASK_STALE_DAYS` beats `task_stale_days`
+(default 14, stale backlog).
 
 ## Jev extension (optional)
 

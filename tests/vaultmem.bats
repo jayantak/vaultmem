@@ -4821,6 +4821,77 @@ EOF
   [[ "$output" == *"--format wants cli|json|files"* ]]
 }
 
+# --- [defaults] staleness keys -------------------------------------------------
+
+# Rewrite VAULTMEM_CONFIG with extra [defaults] keys. Appending to the file born
+# in setup() would land them under [vault.jay], not [defaults].
+config_with_defaults() { # $@ = extra `key = value` lines for [defaults]
+  local line
+  {
+    printf '[defaults]\nvault = "jay"\n'
+    for line in "$@"; do printf '%s\n' "$line"; done
+    printf '\n[vault.flo]\nlabel = "Flo"\npath = "%s"\n' "$OBS_FLO"
+    printf '\n[vault.jay]\nlabel = "Personal"\npath = "%s"\n' "$OBS_JAY"
+  } >"$VAULTMEM_CONFIG"
+}
+
+@test "stale_active_days is read from [defaults]" {
+  config_with_defaults 'stale_active_days = 3'
+  mkdir -p "$OBS_JAY/Sessions/stalesess"
+  printf -- '---\nstatus: active\nupdated: %s\n---\n# stalesess\n' "$(days_ago 5)" \
+    >"$OBS_JAY/Sessions/stalesess/_index.md"
+  run "$OM" groom
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"Stale active (>3d"* ]]
+}
+
+@test "VAULTMEM_STALE_ACTIVE_DAYS beats stale_active_days" {
+  config_with_defaults 'stale_active_days = 3'
+  mkdir -p "$OBS_JAY/Sessions/stalesess"
+  printf -- '---\nstatus: active\nupdated: %s\n---\n# stalesess\n' "$(days_ago 5)" \
+    >"$OBS_JAY/Sessions/stalesess/_index.md"
+  VAULTMEM_STALE_ACTIVE_DAYS=99 run "$OM" groom
+  [ "$status" -eq 0 ]
+  [[ "$output" != *"Stale active"* ]]
+}
+
+@test "task_stale_days is read from [defaults]" {
+  config_with_defaults 'task_stale_days = 4'
+  mkdir -p "$OBS_JAY/Tasks"
+  printf -- '---\nstatus: backlog\nupdated: %s\n---\n# staletask\n' "$(days_ago 9)" \
+    >"$OBS_JAY/Tasks/staletask.md"
+  run "$OM" groom
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"Stale backlog (>4d"* ]]
+}
+
+@test "VAULTMEM_TASK_STALE_DAYS beats task_stale_days" {
+  config_with_defaults 'task_stale_days = 4'
+  mkdir -p "$OBS_JAY/Tasks"
+  printf -- '---\nstatus: backlog\nupdated: %s\n---\n# staletask\n' "$(days_ago 9)" \
+    >"$OBS_JAY/Tasks/staletask.md"
+  VAULTMEM_TASK_STALE_DAYS=99 run "$OM" groom
+  [ "$status" -eq 0 ]
+  [[ "$output" != *"Stale backlog"* ]]
+}
+
+@test "doctor accepts both staleness keys in [defaults]" {
+  config_with_defaults 'stale_active_days = 3' 'task_stale_days = 4'
+  run "$OM" doctor
+  [[ "$output" != *"stale_active_days"* ]]
+  [[ "$output" != *"task_stale_days"* ]]
+  # Config lints set bit 1 of the exit code; neither key may trip one.
+  [ $((status & 1)) -eq 0 ]
+}
+
+@test "init --config scaffolds a config documenting both staleness keys" {
+  export VAULTMEM_CONFIG="$BATS_TEST_TMPDIR/scaffold/config.toml"
+  run "$OM" init --config
+  [ "$status" -eq 0 ]
+  grep -q 'stale_active_days = 7' "$VAULTMEM_CONFIG"
+  grep -q 'task_stale_days = 14' "$VAULTMEM_CONFIG"
+}
+
 @test "usage documents -- and flags-before-query" {
   run "$OM" -h
   [ "$status" -eq 0 ]
