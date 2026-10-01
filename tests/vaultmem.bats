@@ -632,6 +632,20 @@ seed_search_notes() {
   [[ "$output" != *"Curated index"* ]]
 }
 
+@test "search ranks content hits by match count, ties by path, and caps that order" {
+  mkdir -p "$OBS_JAY/Notes"
+  printf 'needle\n' >"$OBS_JAY/Notes/a-once.md"
+  printf 'needle\nneedle\nneedle\n' >"$OBS_JAY/Notes/z-thrice.md"
+  printf 'needle\nneedle\n' >"$OBS_JAY/Notes/m: twice.md"
+  printf 'needle\n' >"$OBS_JAY/Notes/b-once.md"
+  run "$OM" -v jay --format files -n 3 needle
+  [ "$status" -eq 0 ]
+  [ "${lines[0]##*/}" = "z-thrice.md" ]
+  [ "${lines[1]##*/}" = "m: twice.md" ]
+  [ "${lines[2]##*/}" = "a-once.md" ]
+  [ "${#lines[@]}" -eq 3 ]
+}
+
 @test "search --format json emits a {file,line,text} array with escaped text" {
   seed_search_notes
   run "$OM" -v jay --format json needle

@@ -2302,7 +2302,22 @@ EOF
 			else
 				cat
 			fi
-		} | head -n "$LIMIT"
+		} | _rank_by_count "$query" | head -n "$LIMIT"
+}
+
+# Order candidate files by match count (most first), ties by byte-order path.
+# `rg -l` walks in parallel, so its file order changes run to run; capping that
+# order made the same query return a different LIMIT-sized set each time.
+# --include-zero keeps a file the AND chain kept even if the alternation counts
+# it differently; --null separates the path, which may itself hold a colon.
+_rank_by_count() {
+	local alt files
+	alt=$(_search_alt "$1")
+	files=$(cat)
+	[ -n "$files" ] || return 0
+	printf '%s\n' "$files" | tr '\n' '\0' |
+		xargs -0 rg -ic --include-zero --with-filename --null -e "$alt" 2>/dev/null |
+		tr '\0' '\t' | LC_ALL=C sort -t "$(printf '\t')" -k2,2nr -k1,1 | cut -f1
 }
 
 # The terms as one alternation, for the passes that must HIGHLIGHT or EXCERPT
