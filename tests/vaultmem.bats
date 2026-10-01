@@ -3134,9 +3134,9 @@ EOF
   jev_stub "$VAULTMEM_EXT_DIR" envdir 2
   # --vault / --format / -n / -h are core flags everywhere else; after `jev`
   # they belong to the extension.
-  STUB_STDIN=1 run bash -c 'printf "the state" | "$0" jev groom-triage --vault jay --format json -n 5 -h' "$JOM"
+  STUB_STDIN=1 run bash -c 'printf "the state" | "$0" jev ask groom-triage --vault jay --format json -n 5 -h' "$JOM"
   [ "$status" -eq 2 ]
-  grep -qx 'args=groom-triage --vault jay --format json -n 5 -h' "$BATS_TEST_TMPDIR/stub.ran"
+  grep -qx 'args=ask groom-triage --vault jay --format json -n 5 -h' "$BATS_TEST_TMPDIR/stub.ran"
   grep -qx 'stdin=the state' "$BATS_TEST_TMPDIR/stub.ran"
 }
 
@@ -3200,7 +3200,7 @@ EOF
   [ -z "$output" ]
 }
 
-# --- deprecation aliases (one major) ---------------------------------------------
+# --- deprecation aliases (until the next breaking release) ---------------------------------------------
 
 @test "vaultmem judge still dispatches, naming jev on stderr" {
   jev_isolate
@@ -3224,6 +3224,18 @@ EOF
   [ ! -e "$BATS_TEST_TMPDIR/stub.ran" ]
 }
 
+@test "vaultmem judge <name> prints exactly one deprecation line" {
+  jev_isolate
+  jev_config_on true true
+  export VAULTMEM_EXT_DIR="$BATS_TEST_TMPDIR/extdir"
+  jev_stub "$VAULTMEM_EXT_DIR" envdir
+  run bash -c '"$0" judge groom-triage --vault jay 2>"$1" >/dev/null' "$JOM" "$BATS_TEST_TMPDIR/dep.err"
+  [ "$status" -eq 0 ]
+  [ "$(grep -c deprecated "$BATS_TEST_TMPDIR/dep.err")" -eq 1 ]
+  grep -q 'vaultmem judge groom-triage is deprecated; use vaultmem jev ask groom-triage' "$BATS_TEST_TMPDIR/dep.err"
+  grep -qx 'args=ask groom-triage --vault jay' "$BATS_TEST_TMPDIR/stub.ran"
+}
+
 @test "jev <name> without ask still runs, naming jev ask on stderr" {
   jev_isolate
   jev_config_on true true
@@ -3232,7 +3244,7 @@ EOF
   run "$JOM" jev groom-triage --vault jay
   [ "$status" -eq 0 ]
   [[ "$output" == *"vaultmem jev groom-triage is deprecated; use vaultmem jev ask groom-triage"* ]]
-  grep -qx 'args=groom-triage --vault jay' "$BATS_TEST_TMPDIR/stub.ran"
+  grep -qx 'args=ask groom-triage --vault jay' "$BATS_TEST_TMPDIR/stub.ran"
 }
 
 @test "jev ask passes the set name and args through with no deprecation line" {
@@ -3243,15 +3255,49 @@ EOF
   run "$JOM" jev ask groom-triage --vault jay --format json
   [ "$status" -eq 0 ]
   [[ "$output" != *deprecated* ]]
-  grep -qx 'args=groom-triage --vault jay --format json' "$BATS_TEST_TMPDIR/stub.ran"
+  grep -qx 'args=ask groom-triage --vault jay --format json' "$BATS_TEST_TMPDIR/stub.ran"
 }
 
-@test "jev ask with no set name is a usage error" {
+@test "jev ask with no set name is a usage error, exit 64" {
   jev_isolate
   jev_config_on true true
   run "$JOM" jev ask
-  [ "$status" -eq 1 ]
+  [ "$status" -eq 64 ]
   [[ "$output" == *"usage: vaultmem jev ask <name>"* ]]
+}
+
+@test "jev ask <name> reaches the extension with ask prepended, even for a subcommand name" {
+  jev_isolate
+  jev_config_on true true
+  export VAULTMEM_EXT_DIR="$BATS_TEST_TMPDIR/extdir"
+  jev_stub "$VAULTMEM_EXT_DIR" envdir
+  # `route` is both a subcommand and a shipped set: with `ask` the set wins.
+  run "$JOM" jev ask route --vault jay
+  [ "$status" -eq 0 ]
+  [[ "$output" != *deprecated* ]]
+  grep -qx 'args=ask route --vault jay' "$BATS_TEST_TMPDIR/stub.ran"
+}
+
+@test "jev route without ask still reaches the route subcommand" {
+  jev_isolate
+  jev_config_on true true
+  export VAULTMEM_EXT_DIR="$BATS_TEST_TMPDIR/extdir"
+  jev_stub "$VAULTMEM_EXT_DIR" envdir
+  run "$JOM" jev route --subject x
+  [ "$status" -eq 0 ]
+  [[ "$output" != *deprecated* ]]
+  grep -qx 'args=route --subject x' "$BATS_TEST_TMPDIR/stub.ran"
+}
+
+@test "a flag after jev is not a set name and never deprecates" {
+  jev_isolate
+  jev_config_on true true
+  export VAULTMEM_EXT_DIR="$BATS_TEST_TMPDIR/extdir"
+  jev_stub "$VAULTMEM_EXT_DIR" envdir
+  run "$JOM" jev --format json
+  [ "$status" -eq 0 ]
+  [[ "$output" != *deprecated* ]]
+  grep -qx 'args=--format json' "$BATS_TEST_TMPDIR/stub.ran"
 }
 
 @test "groom --judge still triages, naming --triage on stderr" {
@@ -3358,6 +3404,20 @@ EOF
   run "$BATS_TEST_TMPDIR/prefix/bin/vaultmem" jev list
   [ "$status" -eq 0 ]
   grep -qx 'tag=shipped' "$BATS_TEST_TMPDIR/stub.ran"
+}
+
+@test "install.sh --ext judge links jev and clears the stale judge link" {
+  mkdir -p "$BATS_TEST_TMPDIR/rel"
+  cp "$ROOT/install.sh" "$ROOT/vaultmem" "$BATS_TEST_TMPDIR/rel/"
+  jev_stub "$BATS_TEST_TMPDIR/rel/ext" shipped
+  export XDG_DATA_HOME="$BATS_TEST_TMPDIR/data"
+  mkdir -p "$XDG_DATA_HOME/vaultmem/ext"
+  ln -s /nowhere "$XDG_DATA_HOME/vaultmem/ext/judge"
+  run "$BATS_TEST_TMPDIR/rel/install.sh" --prefix "$BATS_TEST_TMPDIR/prefix" --ext judge
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"--ext judge is deprecated; use --ext jev"* ]]
+  [ -L "$XDG_DATA_HOME/vaultmem/ext/jev" ]
+  [ ! -e "$XDG_DATA_HOME/vaultmem/ext/judge" ]
 }
 
 @test "install.sh --ext rejects a path-like extension name" {
@@ -3872,6 +3932,24 @@ Done." ]]
   [ "$status" -eq 0 ]
   [ "$output" = "$with_ext" ]
   [ "$output" = "$NUDGE_HEURISTIC_LINE" ]
+}
+
+@test "nudge never runs Jev on a SessionStart payload" {
+  nudge_jev_setup
+  local json="${HOOK_JSON/\"hook_event_name\":\"Stop\"/\"hook_event_name\":\"SessionStart\"}"
+  nudge_run "$json"
+  [ "$status" -eq 0 ]
+  [ -z "$output" ]
+  [ ! -e "$BATS_TEST_TMPDIR/stub.ran" ]
+}
+
+@test "nudge runs Jev on a payload with no hook_event_name" {
+  nudge_jev_setup
+  local json="${HOOK_JSON/,\"hook_event_name\":\"Stop\"/}"
+  nudge_run "$json"
+  [ "$status" -eq 0 ]
+  [ "$output" = "$NUDGE_JEV_LINE" ]
+  grep -q '^args=capture-worthy' "$BATS_TEST_TMPDIR/stub.ran"
 }
 
 @test "nudge never runs Jev when nudge is not in hooks" {

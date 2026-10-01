@@ -189,6 +189,29 @@ use_outcome_set() { cp "$FIX/outcome-jev.json" "$XDG_CONFIG_HOME/vaultmem/jev/ou
   [ "$(printf '%s' "$output" | jq -r '.set')" = "smoke" ]
 }
 
+@test "doctor WARNs about a pre-jev ext/judge dir without failing" {
+  mkdir -p "$BATS_TEST_TMPDIR/stale/judge"
+  VAULTMEM_EXT_DIR="$BATS_TEST_TMPDIR/stale" run jev_cmd doctor
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"WARN   $BATS_TEST_TMPDIR/stale/judge is the pre-jev extension dir"* ]]
+}
+
+@test "doctor is silent about ext/judge when it is not there" {
+  mkdir -p "$BATS_TEST_TMPDIR/clean/jev"
+  VAULTMEM_EXT_DIR="$BATS_TEST_TMPDIR/clean" run jev_cmd doctor
+  [ "$status" -eq 0 ]
+  [[ "$output" != *"pre-jev extension dir"* ]]
+}
+
+@test "ask <name> runs the set even when <name> is also a subcommand" {
+  # `route` ships as both a subcommand and a set file. `ask route` must answer
+  # the route set's questions, not run the route subcommand's two-request flow.
+  FAKE_CURL_RESPONSE="$FIX/boolean-yes.json" run jev_in "$STATE_TEXT" ask route --vault personal
+  [ "$status" -eq 0 ]
+  [ "$(printf '%s' "$output" | jq -r '.set')" = "route" ]
+  [ "$(jq -r '.set' "$LOG")" = "route" ]
+}
+
 @test "ask with no set name is a usage error and never invokes curl" {
   run jev_cmd ask
   [ "$status" -eq 64 ]

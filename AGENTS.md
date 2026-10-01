@@ -160,14 +160,14 @@ dispatch case and that makes every query ambiguous.
   `.key_file` (`~` expanded), `.log`, `.rerank`, `.hooks`, then any other
   `[ext.jev]` key in file order, then `vault.<id>.jev=true|false` for every
   registry vault with a path. It must work with no config file and no vault
-  (`set` is in the pre-dispatch allowlist). The extension's tests stub
+  (`jev` is in the pre-dispatch allowlist). The extension's tests stub
   `VAULTMEM_BIN` with a script printing this format, so changing it breaks the
   extension silently. A bats test pins it byte for byte.
 - Core lints `[ext.<name>]` for subset shape only; key names belong to the
   extension (`vaultmem jev doctor`). `[vault.<id>] jev` must be a bare boolean.
 - The pre-jev names (`vaultmem judge`, `groom/doctor/nudge --judge`,
   `[ext.judge]`, `[vault.<id>] judge`, `hook_judges`, `calibration --judge`) are
-  accepted for one major and each print one stderr line naming the replacement.
+  accepted until the next breaking release and each print one stderr line naming the replacement.
   Hook paths keep stdout untouched, and `doctor` reports a deprecated key as a
   `WARN` without moving its exit code. The old user-override dir and log path are
   not migrated; see the CHANGELOG migration table.

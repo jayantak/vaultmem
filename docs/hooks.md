@@ -266,23 +266,7 @@ calls, tool results, thinking, and subagent turns are left out), appends
 ⚠ vaultmem: this session looks to hold a durable root-cause; capture it (vault-capture) before you stop.
 ```
 
-```jsonc
-// ~/.claude/settings.json → "hooks"
-{
-  "hooks": {
-    "Stop": [
-      {
-        "hooks": [
-          {
-            "type": "command",
-            "command": "command -v vaultmem >/dev/null && vaultmem nudge"
-          }
-        ]
-      }
-    ]
-  }
-}
-```
+The Stop wiring above is the whole of it: no extra flag, no second hook.
 
 Jev runs only when **all three** consent preconditions hold, and a
 session `_index.md` was not updated since the stamp:

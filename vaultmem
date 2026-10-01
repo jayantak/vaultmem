@@ -155,7 +155,8 @@
 #                               then `vault.<id>.jev=true|false` lines. Answered by core,
 #                               extension or not; it is how the extension reads the config.
 #   vaultmem jev ask <name> [--vault <id>] [--gate <question>] [--format json|tsv]
-#                               ask set <name> about the state on stdin
+#                               ask set <name> about the state on stdin. `ask` is what
+#                               disambiguates a set named like a subcommand (`jev ask route`)
 #   vaultmem jev list         sets available (shipped + user)
 #   vaultmem jev doctor [--live]  key present, config valid, sets parse; --live = one call
 #   vaultmem jev bench [--fixture F]  measure a set against a labelled fixture
@@ -187,7 +188,7 @@ die() {
 	exit 1
 }
 
-# One stderr line naming the replacement for a pre-jev name, kept for one major.
+# One stderr line naming the replacement for a pre-jev name, kept until the next breaking release.
 # stdout is untouched, so a hook wired to the old name stays silent where it is
 # supposed to be silent.
 _deprecated() { # $1 = old name, $2 = replacement
@@ -258,7 +259,7 @@ _parse_config() { # $1 = config path
 # bare comma-list token. Rejected: [[array tables]], deeper nesting ([a.b.c]),
 # arrays ([...] / {...} inline), unknown keys, unquoted string values, a
 # non-boolean [vault.<id>] jev, a non-string [vault.<id>] description.
-# Pre-jev key and section names still honored for one major. WARN rows only:
+# Pre-jev key and section names still honored until the next breaking release. WARN rows only:
 # doctor's exit code never moves on a deprecation.
 _deprecated_config_keys() { # $1 = config path
 	awk '
@@ -408,7 +409,7 @@ _load_registry() {
 			_EXT_CFG=$(printf '%s\n' "$parsed" | awk -F'\t' '$1 ~ /^ext\./')
 			[ "$(_cfg ext.jev enabled)" = true ] && EXT_JEV_ENABLED=true
 			[ "$(_cfg ext.jev rerank)" = true ] && EXT_JEV_RERANK=true
-			# [ext.judge] is the pre-jev section name, honored for one major.
+			# [ext.judge] is the pre-jev section name, honored until the next breaking release.
 			[ -z "$(_cfg ext.jev enabled)" ] && [ "$(_cfg ext.judge enabled)" = true ] && EXT_JEV_ENABLED=true
 			[ -z "$(_cfg ext.jev rerank)" ] && [ "$(_cfg ext.judge rerank)" = true ] && EXT_JEV_RERANK=true
 			;;
@@ -494,7 +495,7 @@ _nudge_stamp_dir() { printf '%s/vaultmem' "${XDG_CACHE_HOME:-$HOME/.cache}"; }
 _nudge_stamp_file() { printf '%s/nudge-stamp' "$(_nudge_stamp_dir)"; }
 cmd_nudge() {
 	# --judge was the old opt-in; `nudge` in [ext.jev] hooks is now the only
-	# consent. Accepted for one major, silent on stdout for the hook path.
+	# consent. Accepted until the next breaking release, silent on stdout for the hook path.
 	[ "${1:-}" = --judge ] && _deprecated "nudge --judge" "nudge (list nudge in [ext.jev] hooks)"
 	[ -f "$PRIMARY_HOME" ] || exit 0
 	local dir stamp
@@ -526,6 +527,16 @@ cmd_nudge() {
 	return 0
 }
 
+# true when the hook payload $1 is a Stop payload: hook_event_name is "Stop", or
+# absent (a caller that pipes bare JSON). docs/hooks.md also wires `nudge` on
+# SessionStart, where the transcript must not leave the machine and a
+# "before you stop" line would be wrong.
+_nudge_is_stop() { # $1 = hook JSON
+	local ev
+	ev=$(printf '%s' "$1" | _hook_json_str hook_event_name) || return 0
+	[ -z "$ev" ] || [ "$ev" = Stop ]
+}
+
 # --- nudge and Jev: ask `capture-worthy` about the transcript tail -------------
 # Jev design 8.2. Every precondition is checked before the transcript is read,
 # and every failure prints nothing: the Stop hook's fail-quiet contract holds on
@@ -540,6 +551,7 @@ _nudge_jev() {
 	[ "$(_vault_jev "$vid")" = true ] || return 0
 	[ -t 0 ] && return 0
 	hook=$(cat)
+	_nudge_is_stop "$hook" || return 0
 	path=$(printf '%s' "$hook" | _hook_json_str transcript_path) || return 0
 	[ -n "$path" ] && [ -f "$path" ] && [ -r "$path" ] || return 0
 	last=$(printf '%s' "$hook" | _hook_json_str last_assistant_message) || last=""
@@ -4287,23 +4299,32 @@ _vault_desc() {
 }
 
 # `jev <sub>`: `config` is answered by core; `ask <name>` and every other
-# subcommand go to the extension verbatim. `jev <name>` without `ask` is the
-# pre-jev form, kept for one major.
+# subcommand go to the extension verbatim. A bare set name (no `ask`) is the
+# pre-jev form, kept until the next breaking release; a flag is never one.
+# _quiet is the same routing with the deprecation line left to the caller, for
+# `vaultmem judge <name>`, which names both renames in one line.
 _dispatch_jev() {
+	case "${1:-}" in
+	config | ask | list | doctor | log | feedback | calibration | bench | route | dupes | rerank | index-drift | prompt | -h | --help | "" | -*) ;;
+	*) _deprecated "vaultmem jev $1" "vaultmem jev ask $1" ;;
+	esac
+	_dispatch_jev_quiet "$@"
+}
+_dispatch_jev_quiet() {
 	case "${1:-}" in
 	config) cmd_jev_config ;;
 	ask)
 		shift
-		[ $# -gt 0 ] || die "usage: vaultmem jev ask <name> [args]"
+		if [ $# -eq 0 ]; then
+			printf 'vaultmem: usage: vaultmem jev ask <name> [args]\n' >&2
+			exit 64
+		fi
+		_ext_exec jev ask "$@"
+		;;
+	list | doctor | log | feedback | calibration | bench | route | dupes | rerank | index-drift | prompt | -h | --help | "" | -*)
 		_ext_exec jev "$@"
 		;;
-	list | doctor | log | feedback | calibration | bench | route | dupes | rerank | index-drift | prompt | -h | --help | "")
-		_ext_exec jev "$@"
-		;;
-	*)
-		_deprecated "vaultmem jev $1" "vaultmem jev ask $1"
-		_ext_exec jev "$@"
-		;;
+	*) _ext_exec jev ask "$@" ;;
 	esac
 }
 
@@ -4375,7 +4396,7 @@ while [ $# -gt 0 ]; do
 		shift 2
 		;;
 	-h | --help)
-		sed -n '4,182p' "$0"
+		sed -n '4,183p' "$0"
 		exit 0
 		;;
 	*)
@@ -4411,7 +4432,7 @@ status | sessions | verify | nudge | which | init | doctor | jev | judge | _jev 
 esac
 
 case "${ARGS[0]:-}" in
-"") sed -n '4,182p' "$0" ;; # no args → print usage
+"") sed -n '4,183p' "$0" ;; # no args → print usage
 status) cmd_status ;;
 nudge) cmd_nudge "${ARGS[@]:1}" ;;
 index) cmd_index "${ARGS[1]:-}" ;;
@@ -4438,8 +4459,18 @@ cat) cmd_cat "${ARGS[@]:1}" ;;
 verify) cmd_verify "${ARGS[1]:-}" ;;
 frontier) cmd_frontier ;;
 jev | judge)
-	[ "${ARGS[0]}" = judge ] && _deprecated "vaultmem judge" "vaultmem jev"
-	_dispatch_jev "${ARGS[@]:1}"
+	# One line, never two: `vaultmem judge <name>` is renamed in one step.
+	if [ "${ARGS[0]}" = judge ]; then
+		case "${ARGS[1]:-}" in
+		config | list | doctor | log | feedback | calibration | bench | route | dupes | rerank | index-drift | prompt | ask | -* | "")
+			_deprecated "vaultmem judge" "vaultmem jev"
+			;;
+		*) _deprecated "vaultmem judge ${ARGS[1]}" "vaultmem jev ask ${ARGS[1]}" ;;
+		esac
+		_dispatch_jev_quiet "${ARGS[@]:1}"
+	else
+		_dispatch_jev "${ARGS[@]:1}"
+	fi
 	;;
 _jev) _jev "${ARGS[@]:1}" ;; # test seam for the internal helper; not a public command
 *) cmd_search "${ARGS[*]}" ;;

@@ -55,7 +55,7 @@ trap cleanup EXIT
 
 usage_err() {
 	printf '%s: %s\n' "$PROG" "$1" >&2
-	printf 'usage: %s <name> [--vault <id>] [--gate <question>] [--format json|tsv]\n' "$PROG" >&2
+	printf 'usage: %s ask <name> [--vault <id>] [--gate <question>] [--format json|tsv]\n' "$PROG" >&2
 	printf '       %s list | doctor [--live] | log [-n N]\n' "$PROG" >&2
 	printf '       %s feedback <id> right|wrong | calibration [--set <name>]\n' "$PROG" >&2
 	printf '       %s route [--subject <text>] | dupes [--vault <id>] [--subject <text>]\n' "$PROG" >&2
@@ -1441,6 +1441,26 @@ cmd_calibration() {
 DOC_FAIL=0
 doc_ok() { printf 'ok     %s\n' "$1"; }
 doc_note() { printf 'note   %s\n' "$1"; }
+# Advisory: never touches DOC_FAIL, so a leftover pre-jev install cannot fail a
+# doctor run or a CI job.
+doc_warn() { printf 'WARN   %s\n' "$1"; }
+
+# A pre-jev install can leave ext/judge beside (or instead of) ext/jev in any of
+# the three resolution roots. Resolution order is unchanged; this only says so.
+doctor_stale_ext() {
+	local root
+	for root in \
+		"${VAULTMEM_EXT_DIR:-}" \
+		"${XDG_DATA_HOME:-$HOME/.local/share}/vaultmem/ext" \
+		"$(self_dir)/.."; do
+		[ -n "$root" ] || continue
+		if [ -e "$root/judge" ] && [ ! -e "$root/jev" ]; then
+			doc_warn "$root/judge is the pre-jev extension dir and $root/jev does not exist; re-run ./install.sh --ext jev"
+		elif [ -e "$root/judge" ]; then
+			doc_warn "$root/judge is a stale pre-jev extension dir; remove it (./install.sh --ext jev clears the symlink form)"
+		fi
+	done
+}
 doc_err() {
 	local msg="$1"
 	[ -n "$KEY" ] && msg="${msg//"$KEY"/[redacted]}"
@@ -1457,6 +1477,8 @@ cmd_doctor() {
 		esac
 		shift
 	done
+
+	doctor_stale_ext
 
 	local tool
 	for tool in curl jq; do
@@ -1654,5 +1676,5 @@ ask)
 	cmd_jev_ask "$@"
 	;;
 -*) usage_err "unknown option: $1" ;;
-*) cmd_jev_ask "$@" ;; # the pre-jev bare-name form, kept for one major
+*) cmd_jev_ask "$@" ;; # the pre-jev bare-name form, kept until the next breaking release
 esac

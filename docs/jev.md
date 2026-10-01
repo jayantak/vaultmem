@@ -126,7 +126,9 @@ vaultmem jev index-drift --vault <id>
 vaultmem jev prompt
 ```
 
-`ask <name>` reads the state to evaluate on stdin. `route` and `dupes` read a capture
+`ask <name>` reads the state to evaluate on stdin. `ask` is what disambiguates a
+set whose name is also a subcommand: `jev ask route` asks the `route` set, while
+`jev route` runs the route subcommand. `route` and `dupes` read a capture
 summary on stdin; see [Capture routing](#capture-routing-route-and-dupes).
 `rerank` reads search candidates as JSON on stdin; see
 [Search rerank](#search-rerank-rerank). `bench` reads a fixture file; see
@@ -531,7 +533,9 @@ This section is the canonical reference for the Jev wire protocol and the
 question-set file shape. Another tool implementing Jev independently codes
 against this, not against `vaultmem-jev`: nothing is shared but the contract, so
 a question set is portable by copy and a gateway change breaks every
-implementation in the same recognizable way.
+implementation in the same recognizable way. The file format itself, with the
+full field table and the rules for writing questions, is
+[§ Question-set files](#question-set-files) below.
 
 ### Wire
 
@@ -565,6 +569,9 @@ Thresholds live in the set file, never in the caller:
 - `choice`: the top option's probability `>= min_confidence` is yes, else
   abstain. Default `min_confidence = 0.6`, compared against that probability
   and not against the reply's own `confidence` field.
+
+See [§ Question-set files](#question-set-files) for where `thresholds` sits in
+the file and what a missing entry falls back to.
 
 ### Invariants
 
