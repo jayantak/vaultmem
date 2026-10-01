@@ -4231,7 +4231,9 @@ $OBS_FLO/flo.md" ]
   run "$JOM" -v jay --rerank --min-score high widget
   [ "$status" -eq 64 ]
   [ "${#lines[@]}" -eq 1 ]
-  run "$JOM" -v jay --rerank widget --min-score
+  # A value-less flag is only a flag before the first positional (issue #4);
+  # after the query it would be query text.
+  run "$JOM" -v jay --rerank --min-score
   [ "$status" -eq 64 ]
   [ ! -e "$BATS_TEST_TMPDIR/stub.ran" ]
 }
@@ -4611,4 +4613,231 @@ drift_norm() { printf '%s\n' "$1" | sed -E 's/search [0-9.]+s/search Xs/'; }
   [ "$status" -eq 0 ]
   [[ "$output" == *"vaultmem doctor [--deep] [--drift]"* ]]
   [[ "$output" == *"DRIFT (informational)"* ]]
+}
+
+# --- arg parsing (issue #4) ----------------------------------------------------
+# Global flags are read only BEFORE the first positional; `--` ends flag
+# parsing; a value-taking flag with nothing after it exits 64. Before the fix a
+# trailing `-v`/`-n` made `shift 2` a silent no-op and the parse loop spun at
+# 100% CPU forever, so every trailing-flag test below runs under a watchdog:
+# a regression must fail the suite, never hang CI.
+
+# Run "$@" with a hard wall-clock cap, setting `status` and `output` the way
+# bats' own `run` does, plus status 124 on timeout. Portable: coreutils
+# `timeout` is absent on macOS runners, so this is a watchdog subshell plus a
+# kill. Every command substitution/`wait` is guarded with `|| true` because the
+# suite runs under `set -e` and a non-zero exit here is the thing being tested.
+run_capped() { # $1 = seconds, rest = command
+  local secs="$1" out pid timedout=0 rc=0
+  shift
+  out="$BATS_TEST_TMPDIR/capped.out"
+  : >"$out"
+  "$@" >"$out" 2>&1 &
+  pid=$!
+  # Poll instead of a killer subshell: a killer racing `wait` makes the exit
+  # status of the thing under test unreadable.
+  local waited=0
+  while kill -0 "$pid" 2>/dev/null; do
+    if [ "$waited" -ge "$secs" ]; then
+      kill -9 "$pid" 2>/dev/null || true
+      timedout=1
+      break
+    fi
+    sleep 1
+    waited=$((waited + 1))
+  done
+  wait "$pid" 2>/dev/null || rc=$?
+  [ "$timedout" -eq 1 ] && rc=124
+  status="$rc"
+  output="$(cat "$out")"
+}
+
+@test "a trailing -v exits 64 instead of hanging" {
+  run_capped 10 "$OM" -v
+  [ "$status" -eq 64 ]
+  [[ "$output" == *"-v needs a value"* ]]
+  [[ "$output" == *"usage: vaultmem"* ]]
+}
+
+@test "a trailing -n exits 64 instead of hanging" {
+  run_capped 10 "$OM" -n
+  [ "$status" -eq 64 ]
+  [[ "$output" == *"-n needs a value"* ]]
+}
+
+@test "a trailing --vault/--limit/--format/--exclude exits 64" {
+  local f
+  for f in --vault --limit --format --exclude; do
+    run_capped 10 "$OM" "$f"
+    [ "$status" -eq 64 ]
+    [[ "$output" == *"$f needs a value"* ]]
+  done
+}
+
+@test "a trailing flag after a query does not hang and stays query text" {
+  # `-v` here is the LAST token but follows a positional, so it is query text,
+  # not a flag: the search runs and finds nothing. The watchdog is the point.
+  run_capped 10 "$OM" --format files zzz-no-such-note -v
+  [ "$status" -eq 0 ]
+  [ -z "$output" ]
+}
+
+@test "a query containing a literal -v token reaches search intact" {
+  mkdir -p "$OBS_JAY/Debug"
+  printf -- '---\nupdated: 2026-01-01 00:00\n---\n# dashnote\n\nthe flag -v appears here\n' \
+    >"$OBS_JAY/Debug/dashnote.md"
+  run_capped 10 "$OM" --format files dashnote -v
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"dashnote.md"* ]]
+}
+
+@test "a query containing a literal -n token reaches search intact" {
+  mkdir -p "$OBS_JAY/Debug"
+  printf -- '---\nupdated: 2026-01-01 00:00\n---\n# capnote\n\nthe flag -n appears here\n' \
+    >"$OBS_JAY/Debug/capnote.md"
+  run_capped 10 "$OM" --format files capnote -n
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"capnote.md"* ]]
+}
+
+@test "a -v token in a query does not select a vault" {
+  # Before the fix the scanner ate `-v jay` from mid-query, silently narrowing
+  # the search to the jay vault and missing this flo note.
+  mkdir -p "$OBS_FLO/Debug"
+  printf -- '---\nupdated: 2026-01-01 00:00\n---\n# flonote\n\nrun it with -v jay\n' \
+    >"$OBS_FLO/Debug/flonote.md"
+  run_capped 10 "$OM" --format files flonote -v jay
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"flonote.md"* ]]
+}
+
+@test "-- ends flag parsing so a leading -v becomes query text" {
+  mkdir -p "$OBS_JAY/Debug"
+  printf -- '---\nupdated: 2026-01-01 00:00\n---\n# ddnote\n\ntoken -v here\n' \
+    >"$OBS_JAY/Debug/ddnote.md"
+  # Control note: no `-v` token. The old parser searched the literal `--`,
+  # which matches every note's `---` frontmatter fence, this one included.
+  printf -- '---\nupdated: 2026-01-01 00:00\n---\n# ddcontrol\n\nddnote mentioned\n' \
+    >"$OBS_JAY/Debug/ddcontrol.md"
+  run_capped 10 "$OM" --format files -- -v ddnote
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"ddnote.md"* ]]
+  [[ "$output" != *"ddcontrol.md"* ]]
+}
+
+@test "global flags still parse before a subcommand" {
+  run "$OM" -v jay sessions
+  [ "$status" -eq 0 ]
+}
+
+@test "a subcommand still takes its own flags after the verb" {
+  # `next -n N` and `groom --format json` read $LIMIT/$FORMAT off the globals,
+  # so flag scanning must stay open past a recognized verb.
+  run "$OM" next -n 3
+  [ "$status" -eq 0 ]
+  run "$OM" groom --triage --format json
+  [ "$status" -eq 0 ]
+}
+
+# --- smoke coverage for the plain read subcommands ------------------------------
+
+@test "status exits 0 and names the indexed note count" {
+  run "$OM" status
+  [ "$status" -eq 0 ]
+}
+
+# `index` reads the primary vault's Home.md (the Agent Index) and dies without
+# one, so the smoke tests seed a minimal two-section index.
+index_fixture() {
+  mkdir -p "$OBS_FLO/Architecture" "$OBS_FLO/Debug"
+  printf -- '---\nupdated: 2026-01-01 00:00\n---\n# arch-note\n' >"$OBS_FLO/Architecture/arch-note.md"
+  printf -- '---\nupdated: 2026-01-01 00:00\n---\n# debug-note\n' >"$OBS_FLO/Debug/debug-note.md"
+  cat >"$OBS_FLO/Home.md" <<'EOF'
+---
+schema: 1
+---
+# Home
+
+<!-- AGENT-INDEX:START -->
+
+### Architecture
+| [[Architecture/arch-note]] | how the thing is wired |
+
+### Debug
+| [[Debug/debug-note]] | why the thing broke |
+
+<!-- AGENT-INDEX:END -->
+EOF
+}
+
+@test "index exits 0 and prints the index shape" {
+  index_fixture
+  run "$OM" index
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"rchitecture"* ]]
+}
+
+@test "index expands one section" {
+  index_fixture
+  run "$OM" index architecture
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"arch-note"* ]]
+}
+
+@test "index all exits 0" {
+  index_fixture
+  run "$OM" index all
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"debug-note"* ]]
+}
+
+@test "index dies cleanly when the primary vault has no Home.md" {
+  rm -f "$OBS_FLO/Home.md"
+  run "$OM" index
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"Home not found"* ]]
+}
+
+@test "mocs exits 0" {
+  run "$OM" mocs
+  [ "$status" -eq 0 ]
+}
+
+@test "search honors -n as a result cap" {
+  mkdir -p "$OBS_JAY/Debug"
+  local i
+  for i in 1 2 3 4 5; do
+    printf -- '---\nupdated: 2026-01-01 00:00\n---\n# capped%s\n\ncappedterm\n' "$i" \
+      >"$OBS_JAY/Debug/capped$i.md"
+  done
+  run "$OM" -n 2 --format files cappedterm
+  [ "$status" -eq 0 ]
+  [ "$(printf '%s\n' "$output" | grep -c 'capped')" -le 2 ]
+}
+
+@test "search rejects an unknown --format" {
+  run "$OM" --format bogus anything
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"--format wants cli|json|files"* ]]
+}
+
+@test "usage documents -- and flags-before-query" {
+  run "$OM" -h
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"vaultmem -- <query>"* ]]
+}
+
+@test "every dispatch-table verb keeps global-flag scanning open" {
+  # _is_subcommand decides whether `<verb> -n 5` reads -n as a flag. A verb
+  # added to the dispatch table but not to _is_subcommand would silently turn
+  # its flags into a search query. jev/judge/_jev take their args verbatim.
+  local verbs listed v
+  verbs=$(awk '/^case "\$\{ARGS\[0\]:-\}" in/{n++} n==2' "$OM" |
+    grep -oE '^[a-z_][a-z_|]*\)' | tr -d ')' | tr '|' '\n' | grep -vE '^(jev|judge|_jev)$')
+  listed="|$(awk '/^_is_subcommand\(\)/{f=1} f && /return 0/{print; exit}' "$OM" |
+    sed 's/).*//' | tr -d ' \t')|"
+  [ -n "$verbs" ]
+  for v in $verbs; do
+    [[ "$listed" == *"|$v|"* ]] || { echo "missing: $v"; false; }
+  done
 }

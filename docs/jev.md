@@ -65,7 +65,7 @@ jev = false
 | `timeout_ms` | `1500` | Whole-request limit, passed to `curl --max-time`. |
 | `key_file` | `~/.config/vaultmem/ai-gateway.key` | Read when `AI_GATEWAY_API_KEY` is unset. Refused if its mode is wider than 600. |
 | `log` | `true` | Write the decision log. |
-| `rerank` | `false` | Makes `vaultmem search --rerank` the default for the cli format. Leave it off until `bench` shows a gain on your own fixture. |
+| `rerank` | `false` | Makes `vaultmem --rerank <query>` the default for the cli format. Leave it off until `bench` shows a gain on your own fixture. |
 | `hooks` | empty | Comma list of sets allowed to run inside hooks: `nudge` (`nudge`) and `prompt` (`jev prompt`). Nothing runs inside a hook until it is named here. |
 | `[vault.<id>] jev` | `false` | Egress consent for that vault. |
 
@@ -291,7 +291,7 @@ steps.
 
 ### Search rerank: `rerank`
 
-`rerank` is the primitive under core's `vaultmem search --rerank`, and under
+`rerank` is the primitive under core's `vaultmem --rerank <query>`, and under
 `bench`. Core assembles the candidates and reorders its own output; the
 extension builds the one request and returns a score per candidate. Scripts
 can call it too.
@@ -656,7 +656,7 @@ All sets, by who runs them:
 | `capture-worthy` | `vaultmem nudge` | `durable` (boolean), `kind` (choice) | Stop, when `nudge` is in `hooks` |
 | `route` | `jev route` (`vault-capture`) | `vault`, `category`, `moc` (choices) | no |
 | `dupes` | `jev dupes` (`vault-capture`) | `c1` to `c5` (booleans) | no |
-| `rerank` | `vaultmem search --rerank`, `jev bench` | one score per candidate, up to 20 | no |
+| `rerank` | `vaultmem --rerank <query>`, `jev bench` | one score per candidate, up to 20 | no |
 | `index-drift` | `vaultmem doctor --drift` | one boolean per row, up to 5 | no |
 | `prompt` | `jev prompt` | `asks_why` (boolean) | UserPromptSubmit, when `prompt` is in `hooks` |
 
