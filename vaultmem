@@ -293,6 +293,7 @@ _lint_config() { # $1 = config path
       ok_defaults["vault"]=1; ok_defaults["limit"]=1
       ok_defaults["cold_days"]=1; ok_defaults["directive_file"]=1
       ok_defaults["bloat_lines"]=1
+      ok_defaults["task_stale_days"]=1; ok_defaults["stale_active_days"]=1
       ok_vault["label"]=1; ok_vault["path"]=1; ok_vault["sessions"]=1
       ok_vault["home"]=1; ok_vault["mocs"]=1
       ok_vault["match_owners"]=1; ok_vault["match_paths"]=1
@@ -381,6 +382,8 @@ _load_registry() {
 	DEF_COLD_DAYS=""
 	DEF_DIRECTIVE_FILE=""
 	DEF_BLOAT_LINES=""
+	DEF_TASK_STALE_DAYS=""
+	DEF_STALE_ACTIVE_DAYS=""
 	if [ -r "$VAULTMEM_CONFIG" ]; then
 		local parsed ids id path label sess home mocs mo mp vj
 		parsed=$(_parse_config "$VAULTMEM_CONFIG")
@@ -421,6 +424,8 @@ _load_registry() {
 		DEF_COLD_DAYS=$(_cfg defaults cold_days)
 		DEF_DIRECTIVE_FILE=$(_expand_path "$(_cfg defaults directive_file)")
 		DEF_BLOAT_LINES=$(_cfg defaults bloat_lines)
+		DEF_TASK_STALE_DAYS=$(_cfg defaults task_stale_days)
+		DEF_STALE_ACTIVE_DAYS=$(_cfg defaults stale_active_days)
 		unset -f _cfg
 	else
 		# No config file: thin zero-config escape hatch. Register a single
@@ -2960,8 +2965,8 @@ COLD_DAYS="${VAULTMEM_COLD_DAYS:-${OBSIDIAN_SESSION_COLD_DAYS:-${DEF_COLD_DAYS:-
 
 # Stale-active threshold in days (an `active` session untouched this long
 # likely stalled — either park it or flip it to `done` if the work actually
-# finished). No config-file key yet, env override only.
-STALE_ACTIVE_DAYS="${VAULTMEM_STALE_ACTIVE_DAYS:-7}"
+# finished). Env override wins over the config default, same pattern as COLD_DAYS.
+STALE_ACTIVE_DAYS="${VAULTMEM_STALE_ACTIVE_DAYS:-${DEF_STALE_ACTIVE_DAYS:-7}}"
 
 # Bloat threshold in lines (an active/parked session's _index.md past this many
 # lines is due for a checkpoint/distill per the session skill). Env override
@@ -3093,8 +3098,8 @@ _task_rows() { # $1 = vault root
 # Stale-backlog threshold in days. An unstarted task has no forcing function —
 # nothing fails when it rots — so a backlog that is never triaged silently makes
 # `next` untrustworthy, which defeats the point of having it. Nagging is the
-# guard. Env override only, same shape as STALE_ACTIVE_DAYS.
-TASK_STALE_DAYS="${VAULTMEM_TASK_STALE_DAYS:-14}"
+# guard. Env override wins over the config default, same shape as STALE_ACTIVE_DAYS.
+TASK_STALE_DAYS="${VAULTMEM_TASK_STALE_DAYS:-${DEF_TASK_STALE_DAYS:-14}}"
 
 # --- subcommand: next (the ready backlog) --------------------------------------
 cmd_next() {
@@ -4069,6 +4074,8 @@ vault = "personal"        # fallback vault when routing finds no signal
 limit = 20                # default result cap
 cold_days = 21            # a parked session untouched this long is grooming-due
 bloat_lines = 150         # an active/parked _index.md over this many lines is checkpoint-due
+stale_active_days = 7     # an active session untouched this long is stale
+task_stale_days = 14      # an unstarted task untouched this long is stale backlog
 directive_file = ""       # optional: path to custom AGENT DIRECTIVE text
 
 [vault.personal]
