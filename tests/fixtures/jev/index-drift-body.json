@@ -1,6 +1,6 @@
 {
   "model": "typesafe-ai/jev",
-  "state": "Row r1\nIndex row: - [[Athlete rebuild OOM]] — root cause of the nightly rebuild running out of memory\nNote title: Athlete rebuild OOM\nFrontmatter:\ntype: debug\nupdated: 2026-09-01\nFirst lines:\n# Athlete rebuild OOM\nThe nightly rebuild held every team profile in memory at once.\nFix: stream per team.\n\nRow r2\nIndex row: - [[Egress policy]] — which vaults may send content to the judge\nNote title: Egress policy\nFrontmatter:\ntype: architecture\nFirst lines:\n# Egress policy\nGrocery list: eggs, milk, bread.\n\nRow r3\nIndex row: - [[Hook timeout]] — why hooks time out\nNote title: Hook timeout",
+  "state": "Row r1\nIndex row: - [[Athlete rebuild OOM]] — root cause of the nightly rebuild running out of memory\nNote title: Athlete rebuild OOM\nFrontmatter:\ntype: debug\nupdated: 2026-09-01\nFirst lines:\n# Athlete rebuild OOM\nThe nightly rebuild held every team profile in memory at once.\nFix: stream per team.\n\nRow r2\nIndex row: - [[Egress policy]] — which vaults may send content to Jev\nNote title: Egress policy\nFrontmatter:\ntype: architecture\nFirst lines:\n# Egress policy\nGrocery list: eggs, milk, bread.\n\nRow r3\nIndex row: - [[Hook timeout]] — why hooks time out\nNote title: Hook timeout",
   "questions": {
     "r1": {
       "type": "boolean",

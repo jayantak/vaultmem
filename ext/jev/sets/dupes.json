@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "description": "Used by `judge dupes`: for each search candidate, does that note already cover the summary. `covers` is the template for the per-candidate questions c1 to c5.",
+  "description": "Used by `jev dupes`: for each search candidate, does that note already cover the summary. `covers` is the template for the per-candidate questions c1 to c5.",
   "max_state_bytes": 24000,
   "truncate": "head",
   "questions": {

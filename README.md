@@ -192,8 +192,8 @@ vaultmem projects           Project notes + active/total session counts
 vaultmem project <name>     one project: repos, linear, MOC, sessions by status
 vaultmem status             one-line index summary + groom-nudge count (fail-quiet)
 vaultmem bookmark <thread>  print only ## Bookmark + ## Pinned from a session's _index.md
-vaultmem nudge              Stop-hook check: notes changed but the session's _index.md wasn't (fail-quiet)
-vaultmem nudge --judge      + ask the judge extension whether the transcript holds a durable decision (opt-in)
+vaultmem nudge              Stop-hook check: notes changed but the session's _index.md wasn't (fail-quiet);
+                            with `nudge` in [ext.jev] hooks, also asks Jev whether the transcript holds a durable decision
 ```
 
 **backlog**
@@ -210,12 +210,12 @@ vaultmem task <slug> --promote
 ```
 vaultmem groom              archive done sessions/projects/tasks; report cold-parked + stale-active + checkpoint-due + stale-backlog
 vaultmem groom --dry-run    preview groom: would-move list + would-flip project lines; no writes
-vaultmem groom --judge [--format json]
+vaultmem groom --triage [--format json]
                             annotate cold-parked/stale-active rows with a `groom-triage` judgment
-                            (advisory; needs the judge extension and per-vault consent)
+                            (advisory; needs the Jev extension and per-vault consent)
 vaultmem doctor             lint the config + flag drifted index rows + vault schema lints
 vaultmem doctor --deep      + vault-wide orphan/unindexed scan (slower; not run by base doctor/groom)
-vaultmem doctor --judge     + judged DRIFT rows (index row no longer describes its note); never changes the exit code
+vaultmem doctor --drift     + DRIFT rows (index row no longer describes its note); never changes the exit code
 vaultmem init [--vault <id>]  scaffold a compliant vault skeleton
 vaultmem init --config      write a starter config.toml
 ```
@@ -322,25 +322,25 @@ overrides: `VAULTMEM_COLD_DAYS` beats `cold_days`, `VAULTMEM_BLOAT_LINES` beats
 `VAULTMEM_STALE_ACTIVE_DAYS` (default 7, stale-active sessions) and
 `VAULTMEM_TASK_STALE_DAYS` (default 14, stale backlog).
 
-## Judge extension (optional)
+## Jev extension (optional)
 
-`vaultmem judge` asks a remote evaluation model typed questions about vault
+`vaultmem jev` asks a remote evaluation model typed questions about vault
 content: yes/no, one-of-N, and rubric scores. It is an extension, not part of
 the script: `./vaultmem` opens no socket and gains no dependency, and all HTTP
-lives in `ext/judge/` (which needs `curl` and `jq`). It is off until you set
-`[ext.judge] enabled = true`, and a vault's content leaves the machine only when
-that vault sets `judge = true`. Absent, disabled, or offline, every command
+lives in `ext/jev/` (which needs `curl` and `jq`). It is off until you set
+`[ext.jev] enabled = true`, and a vault's content leaves the machine only when
+that vault sets `jev = true`. Absent, disabled, or offline, every command
 behaves as it does without it.
 
 ```bash
-./install.sh --ext judge     # link ext/judge/ into ${XDG_DATA_HOME:-~/.local/share}/vaultmem/ext/
-vaultmem judge config        # what core parsed: [ext.judge] keys + per-vault consent
+./install.sh --ext jev     # link ext/jev/ into ${XDG_DATA_HOME:-~/.local/share}/vaultmem/ext/
+vaultmem jev config        # what core parsed: [ext.jev] keys + per-vault consent
 ```
 
-Setup, the egress rules, judge files, and exit codes:
-**[docs/judge.md](docs/judge.md)**. Config keys: [docs/config.md](docs/config.md).
+Setup, the egress rules, set files, and exit codes:
+**[docs/jev.md](docs/jev.md)**. Config keys: [docs/config.md](docs/config.md).
 
-`vaultmem --rerank <query>` reorders content hits by a judge score; whether it earns `rerank = true` as your default is what [`judge bench`](docs/judge.md#bench) measures on your own notes.
+`vaultmem --rerank <query>` reorders content hits by a Jev relevance score; whether it earns `rerank = true` as your default is what [`jev bench`](docs/jev.md#bench) measures on your own notes.
 
 ## Agent skills
 

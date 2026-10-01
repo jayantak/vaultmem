@@ -26,21 +26,21 @@
 #   vaultmem --exclude P <query>  drop notes whose body also matches rg pattern P (find
 #                               notes matching <query> but NOT P). Terms stay regex, so
 #                               vaultmem 'AD-4[0-9]{2}' works.
-#   vaultmem --rerank <query>   reorder content hits by the judge extension's `rerank` score
+#   vaultmem --rerank <query>   reorder content hits by the Jev extension's `rerank` score
 #                               (0 to 3), printed after each row as `[2.9]`; curated rows stay
 #                               on top, ties and unscored rows keep ripgrep order. json objects
 #                               gain `score` (null = unscored); files prints the new order.
-#                               Unavailable (not installed, disabled, no vault with `judge =
+#                               Unavailable (not installed, disabled, no vault with `jev =
 #                               true`): plain ripgrep order, and VAULTMEM_VERBOSE=1 says why on
-#                               stderr. `rerank = true` in [ext.judge] makes it the cli default.
-#   vaultmem --no-rerank <query>  plain ripgrep order even when [ext.judge] rerank = true
+#                               stderr. `rerank = true` in [ext.jev] makes it the cli default.
+#   vaultmem --no-rerank <query>  plain ripgrep order even when [ext.jev] rerank = true
 #   vaultmem --rerank --min-score S <query>
 #                               drop reranked content rows scoring below S (unscored rows
 #                               stay). Without --rerank in effect it is a usage error (exit 64).
 #   vaultmem index             browse the Agent Index: section counts + MOCs (the shape)
 #   vaultmem index <section>    expand one section (e.g. index architecture); rows capped
 #   vaultmem index all          full flat dump (escape hatch; rows still width-capped)
-#   vaultmem doctor [--deep] [--judge]
+#   vaultmem doctor [--deep] [--drift]
 #                               flag drifted index rows + vault schema lints; also lint the config;
 #                               prints a per-vault growth line (note count + timed representative
 #                               search) — the ripgrep-vs-FTS5 tripwire, informational, never affects exit
@@ -51,11 +51,11 @@
 #                               exit codes: 0=clean 1=config errors 2=drift/lint findings 3=both
 #   vaultmem doctor --deep      + vault-wide ORPHAN (no inbound links) and UNINDEXED (not in
 #                               Agent Index or any MOC) scan; slower, not run by base doctor/groom
-#   vaultmem doctor --judge     + DRIFT: the `index-drift` judge asks whether each primary-vault
+#   vaultmem doctor --drift     + DRIFT: the `index-drift` set asks whether each primary-vault
 #                               Agent-Index row still describes its note (at most 5 rows per call);
 #                               rows at p <= 0.15 print as `DRIFT <note> <p> <row excerpt>` under
-#                               `▸ DRIFT (judged, informational)`. Never changes the exit code. Needs
-#                               the judge extension enabled and `judge = true` on that vault.
+#                               `▸ DRIFT (informational)`. Never changes the exit code. Needs
+#                               the Jev extension enabled and `jev = true` on that vault.
 #   vaultmem mocs               list Maps of Content (the domain hubs)
 #   vaultmem vaults             print vault registry (id, path, MOC, routing rules)
 #   vaultmem path <id>          print the vault root path (for V="$(…)" in scripts)
@@ -71,19 +71,19 @@
 #                               (non-archived) session still points at it)
 #   vaultmem groom --dry-run    preview groom: print the would-move list + would-flip
 #                               project-index lines; no mv, no writes
-#   vaultmem groom --judge [--format json]
+#   vaultmem groom --triage [--format json]
 #                               annotate each cold-parked/stale-active row with a
-#                               `groom-triage` judgment: `→ <choice> <p> · <flags> [<log id>]`,
+#                               `groom-triage` verdict: `→ <choice> <p> · <flags> [<log id>]`,
 #                               or `→ ?` below the confidence floor. Advisory only: nothing
-#                               moves on a judgment. Needs the judge extension enabled and
-#                               `judge = true` on the vault; otherwise rows print as usual.
-#                               Feed the log id back with `vaultmem judge feedback <id>`.
+#                               moves on a verdict. Needs the Jev extension enabled and
+#                               `jev = true` on the vault; otherwise rows print as usual.
+#                               Feed the log id back with `vaultmem jev feedback <id>`.
 #   vaultmem status             one-line summary + groom-nudge count (used by the SessionStart hook)
-#   vaultmem nudge [--judge]    fail-quiet Stop-hook check: vault touched but session note not updated.
-#                               --judge (hook stdin JSON; see docs/hooks.md) adds a second line when the
-#                               `capture-worthy` judge finds a durable decision/root cause/etc. in the
-#                               transcript tail. Needs the extension enabled, `nudge` in hook_judges, and
-#                               `judge = true` on the vault `which` confidently routes $PWD to.
+#   vaultmem nudge              fail-quiet Stop-hook check: vault touched but session note not updated.
+#                               With hook stdin JSON (see docs/hooks.md) it adds a second line when the
+#                               `capture-worthy` set finds a durable decision/root cause/etc. in the
+#                               transcript tail. Needs the extension enabled, `nudge` in hooks, and
+#                               `jev = true` on the vault `which` confidently routes $PWD to.
 #   vaultmem init [--vault <id>]  scaffold a compliant vault skeleton (see SCHEMA.md)
 #
 # Backlog (Tasks/ — planned work that has not started; the tier BEFORE a session):
@@ -148,23 +148,24 @@
 #                               (exit 0, silent) for any path outside a configured
 #                               vault root; non-zero only on a real finding.
 #
-# Judge extension (optional, ext/judge/: typed yes/no, choice, and score answers from
+# Jev extension (optional, ext/jev/: typed yes/no, choice, and score answers from
 # a remote evaluation model. Core opens no socket; all HTTP lives in the extension):
-#   vaultmem judge config       print the parsed [ext.judge] keys (defaults filled in) and
-#                               each vault's egress consent, as `ext.judge.<key>=<value>`
-#                               then `vault.<id>.judge=true|false` lines. Answered by core,
+#   vaultmem jev config       print the parsed [ext.jev] keys (defaults filled in) and
+#                               each vault's egress consent, as `ext.jev.<key>=<value>`
+#                               then `vault.<id>.jev=true|false` lines. Answered by core,
 #                               extension or not; it is how the extension reads the config.
-#   vaultmem judge <name> [--vault <id>] [--gate <question>] [--format json|tsv]
-#                               ask judge <name> about the state on stdin
-#   vaultmem judge list         judges available (shipped + user)
-#   vaultmem judge doctor [--live]  key present, config valid, judges parse; --live = one call
-#   vaultmem judge bench [--fixture F]  measure a judge against a labelled fixture
-#   vaultmem judge log [-n N]   tail the decision log
-#   vaultmem judge feedback <id> right|wrong
-#   vaultmem judge calibration  accuracy per confidence bucket, from feedback rows
-#     Every form but `config` runs the extension; args after `judge` pass through verbatim.
+#   vaultmem jev ask <name> [--vault <id>] [--gate <question>] [--format json|tsv]
+#                               ask set <name> about the state on stdin. `ask` is what
+#                               disambiguates a set named like a subcommand (`jev ask route`)
+#   vaultmem jev list         sets available (shipped + user)
+#   vaultmem jev doctor [--live]  key present, config valid, sets parse; --live = one call
+#   vaultmem jev bench [--fixture F]  measure a set against a labelled fixture
+#   vaultmem jev log [-n N]   tail the decision log
+#   vaultmem jev feedback <id> right|wrong
+#   vaultmem jev calibration  accuracy per confidence bucket, from feedback rows
+#     Every form but `config` runs the extension; args after `jev` pass through verbatim.
 #     exit codes: 0=ok/yes 1=no (--gate) 2=abstain 3=unavailable (not installed, disabled,
-#     vault has not set `judge = true`, no key, timeout, HTTP error) 64=usage
+#     vault has not set `jev = true`, no key, timeout, HTTP error) 64=usage
 #
 # Design notes:
 #   - Curated hits (Home.md Agent Index + MOCs/) come first: they are
@@ -185,6 +186,13 @@ DEV_DIR="${DEV_DIR:-$HOME/src}"
 die() {
 	printf 'vaultmem: %s\n' "$1" >&2
 	exit 1
+}
+
+# One stderr line naming the replacement for a pre-jev name, kept until the next breaking release.
+# stdout is untouched, so a hook wired to the old name stays silent where it is
+# supposed to be silent.
+_deprecated() { # $1 = old name, $2 = replacement
+	printf 'vaultmem: %s is deprecated; use %s\n' "$1" "$2" >&2
 }
 
 # --- vault registry ------------------------------------------------------------
@@ -246,11 +254,36 @@ _parse_config() { # $1 = config path
 # mis-parse must fail loudly (§3 of the design), never mis-route silently.
 # Accepted headers: [defaults], [vault.<id>], [ext.<name>]. Accepted keys per
 # section are a fixed allow-list, except [ext.<name>]: an extension owns its key
-# names (`vaultmem judge doctor` validates them), so core checks those values
+# names (`vaultmem jev doctor` validates them), so core checks those values
 # for subset shape only. Values must be a quoted string, a bare bool/int, or a
 # bare comma-list token. Rejected: [[array tables]], deeper nesting ([a.b.c]),
 # arrays ([...] / {...} inline), unknown keys, unquoted string values, a
-# non-boolean [vault.<id>] judge, a non-string [vault.<id>] description.
+# non-boolean [vault.<id>] jev, a non-string [vault.<id>] description.
+# Pre-jev key and section names still honored until the next breaking release. WARN rows only:
+# doctor's exit code never moves on a deprecation.
+_deprecated_config_keys() { # $1 = config path
+	awk '
+    function trim(s){ gsub(/^[[:space:]]+|[[:space:]]+$/, "", s); return s }
+    /^[[:space:]]*#/ { next }
+    /^[[:space:]]*\[/ {
+      s=$0; sub(/^[[:space:]]*\[/, "", s); sub(/\].*$/, "", s); gsub(/[[:space:]]/, "", s)
+      section=s
+      if (section == "ext.judge") printf "%d: [ext.judge] is deprecated; use [ext.jev]\n", NR
+      next
+    }
+    {
+      eq=index($0, "="); if (eq == 0) next
+      key=trim(substr($0, 1, eq-1))
+      if (section ~ /^vault\./ && key == "judge")
+        printf "%d: \"judge\" in [%s] is deprecated; use \"jev\"\n", NR, section
+      if (section == "ext.judge" && key == "hook_judges")
+        printf "%d: \"hook_judges\" is deprecated; use \"hooks\"\n", NR
+      if (section == "ext.jev" && key == "hook_judges")
+        printf "%d: \"hook_judges\" is deprecated; use \"hooks\"\n", NR
+    }
+  ' "$1"
+}
+
 _lint_config() { # $1 = config path
 	awk '
     function trim(s){ gsub(/^[[:space:]]+|[[:space:]]+$/, "", s); return s }
@@ -261,7 +294,7 @@ _lint_config() { # $1 = config path
       ok_vault["label"]=1; ok_vault["path"]=1; ok_vault["sessions"]=1
       ok_vault["home"]=1; ok_vault["mocs"]=1
       ok_vault["match_owners"]=1; ok_vault["match_paths"]=1
-      ok_vault["judge"]=1; ok_vault["description"]=1
+      ok_vault["jev"]=1; ok_vault["judge"]=1; ok_vault["description"]=1
     }
     /^[[:space:]]*#/ { next }
     /^[[:space:]]*$/ { next }
@@ -285,9 +318,9 @@ _lint_config() { # $1 = config path
       if (kind == "?") { next }
       # strip a trailing inline comment for bare values before shape checks
       bare=val; sub(/[[:space:]]*#.*$/, "", bare); bare=trim(bare)
-      # judge is egress consent: only a bare true/false, never a quoted or fuzzy truthy value
-      if (kind == "vault" && key == "judge") {
-        if (bare != "true" && bare != "false") { printf "%d: \"judge\" in [%s] must be true or false\n", NR, section; bad=1 }
+      # jev is egress consent: only a bare true/false, never a quoted or fuzzy truthy value
+      if (kind == "vault" && (key == "jev" || key == "judge")) {
+        if (bare != "true" && bare != "false") { printf "%d: \"%s\" in [%s] must be true or false\n", NR, key, section; bad=1 }
         next
       }
       # description is prose routing criteria: a quoted string, never a bare token
@@ -330,17 +363,17 @@ _vault_path() {
 _vault_known() { [ -n "$1" ] && _vault_path "$1" >/dev/null; }
 
 # Side tables sit beside $_REG rather than widening it (every reader splits $_REG
-# on its fixed 8 columns): $_REG_JUDGE is "id<TAB>true|false" per vault (the
+# on its fixed 8 columns): $_REG_JEV is "id<TAB>true|false" per vault (the
 # per-vault egress consent), $_REG_DESC "id<TAB>description" per vault (routing
-# criteria for the judge extension), $_EXT_CFG the raw
+# criteria for the Jev extension), $_EXT_CFG the raw
 # "ext.<name><TAB>key<TAB>value" rows.
 _load_registry() {
 	_REG=""
-	_REG_JUDGE=""
+	_REG_JEV=""
 	_REG_DESC=""
 	_EXT_CFG=""
-	EXT_JUDGE_ENABLED=false
-	EXT_JUDGE_RERANK=false
+	EXT_JEV_ENABLED=false
+	EXT_JEV_RERANK=false
 	DEF_VAULT=""
 	DEF_LIMIT=""
 	DEF_COLD_DAYS=""
@@ -367,14 +400,18 @@ _load_registry() {
 			mp=$(_expand_path "$(_cfg "vault.$id" match_paths)")
 			_reg_add "$id" "$path" "$label" "$sess" "$home" "$mocs" "$mo" "$mp"
 			vj=false
-			[ "$(_cfg "vault.$id" judge)" = true ] && vj=true
-			_REG_JUDGE="${_REG_JUDGE}${id}"$'\t'"${vj}"$'\n'
+			[ "$(_cfg "vault.$id" jev)" = true ] && vj=true
+			[ -z "$(_cfg "vault.$id" jev)" ] && [ "$(_cfg "vault.$id" judge)" = true ] && vj=true
+			_REG_JEV="${_REG_JEV}${id}"$'\t'"${vj}"$'\n'
 			_REG_DESC="${_REG_DESC}${id}"$'\t'"$(_cfg "vault.$id" description)"$'\n'
 		done <<<"$ids"
 		case "$parsed" in *ext.*)
 			_EXT_CFG=$(printf '%s\n' "$parsed" | awk -F'\t' '$1 ~ /^ext\./')
-			[ "$(_cfg ext.judge enabled)" = true ] && EXT_JUDGE_ENABLED=true
-			[ "$(_cfg ext.judge rerank)" = true ] && EXT_JUDGE_RERANK=true
+			[ "$(_cfg ext.jev enabled)" = true ] && EXT_JEV_ENABLED=true
+			[ "$(_cfg ext.jev rerank)" = true ] && EXT_JEV_RERANK=true
+			# [ext.judge] is the pre-jev section name, honored until the next breaking release.
+			[ -z "$(_cfg ext.jev enabled)" ] && [ "$(_cfg ext.judge enabled)" = true ] && EXT_JEV_ENABLED=true
+			[ -z "$(_cfg ext.jev rerank)" ] && [ "$(_cfg ext.judge rerank)" = true ] && EXT_JEV_RERANK=true
 			;;
 		esac
 		DEF_VAULT=$(_cfg defaults vault)
@@ -416,7 +453,7 @@ LIMIT="${DEF_LIMIT:-20}"
 FORMAT=cli  # search output format: cli (default) | json | files
 EXCLUDE=""  # search: drop notes whose body matches this rg pattern (empty = off)
 HAVE_EXCL=0 # whether --exclude was passed (distinguishes "" pattern from unset)
-RERANK=""   # search: 1 = --rerank, 0 = --no-rerank, "" = [ext.judge] rerank decides (cli only)
+RERANK=""   # search: 1 = --rerank, 0 = --no-rerank, "" = [ext.jev] rerank decides (cli only)
 MIN_SCORE=""
 if [ -t 1 ]; then
 	B=$'\033[1m'
@@ -457,8 +494,9 @@ cmd_status() {
 _nudge_stamp_dir() { printf '%s/vaultmem' "${XDG_CACHE_HOME:-$HOME/.cache}"; }
 _nudge_stamp_file() { printf '%s/nudge-stamp' "$(_nudge_stamp_dir)"; }
 cmd_nudge() {
-	local judge=0
-	[ "${1:-}" = --judge ] && judge=1
+	# --judge was the old opt-in; `nudge` in [ext.jev] hooks is now the only
+	# consent. Accepted until the next breaking release, silent on stdout for the hook path.
+	[ "${1:-}" = --judge ] && _deprecated "nudge --judge" "nudge (list nudge in [ext.jev] hooks)"
 	[ -f "$PRIMARY_HOME" ] || exit 0
 	local dir stamp
 	dir=$(_nudge_stamp_dir)
@@ -483,33 +521,44 @@ cmd_nudge() {
 		fi
 	fi
 	touch "$stamp" 2>/dev/null
-	if [ "$judge" = 1 ] && [ -z "$idx_touched" ]; then
-		_nudge_judge 2>/dev/null
+	if [ -z "$idx_touched" ]; then
+		_nudge_jev 2>/dev/null
 	fi
 	return 0
 }
 
-# --- nudge --judge: ask `capture-worthy` about the transcript tail -------------
-# Judge design 8.2. Every precondition is checked before the transcript is read,
+# true when the hook payload $1 is a Stop payload: hook_event_name is "Stop", or
+# absent (a caller that pipes bare JSON). docs/hooks.md also wires `nudge` on
+# SessionStart, where the transcript must not leave the machine and a
+# "before you stop" line would be wrong.
+_nudge_is_stop() { # $1 = hook JSON
+	local ev
+	ev=$(printf '%s' "$1" | _hook_json_str hook_event_name) || return 0
+	[ -z "$ev" ] || [ "$ev" = Stop ]
+}
+
+# --- nudge and Jev: ask `capture-worthy` about the transcript tail -------------
+# Jev design 8.2. Every precondition is checked before the transcript is read,
 # and every failure prints nothing: the Stop hook's fail-quiet contract holds on
 # this path too. The extension enforces timeout_ms; core adds no timer.
-NUDGE_STATE_MAX=24000  # bytes of transcript tail sent; the judge's max_state_bytes
+NUDGE_STATE_MAX=24000  # bytes of transcript tail sent; the set's max_state_bytes
 NUDGE_READ_MAX=2097152 # bytes read from the end of the transcript file
-_nudge_judge() {
-	[ "$EXT_JUDGE_ENABLED" = true ] || return 0
+_nudge_jev() {
+	[ "$EXT_JEV_ENABLED" = true ] || return 0
 	_nudge_hook_allowed || return 0
 	local vid hook path last state out kind
 	vid=$(_which_confident "$PWD") || return 0
-	[ "$(_vault_judge "$vid")" = true ] || return 0
+	[ "$(_vault_jev "$vid")" = true ] || return 0
 	[ -t 0 ] && return 0
 	hook=$(cat)
+	_nudge_is_stop "$hook" || return 0
 	path=$(printf '%s' "$hook" | _hook_json_str transcript_path) || return 0
 	[ -n "$path" ] && [ -f "$path" ] && [ -r "$path" ] || return 0
 	last=$(printf '%s' "$hook" | _hook_json_str last_assistant_message) || last=""
 	state=$(_transcript_tail "$path" "$NUDGE_STATE_MAX" "$last")
 	[ -n "$state" ] || return 0
-	out=$(printf '%s\n' "$state" | _judge capture-worthy "$vid" --subject nudge --gate durable) || return 0
-	kind=$(printf '%s' "$out" | _judge_answer kind.choice) || return 0
+	out=$(printf '%s\n' "$state" | _jev capture-worthy "$vid" --subject nudge --gate durable) || return 0
+	kind=$(printf '%s' "$out" | _jev_answer kind.choice) || return 0
 	case "$kind" in
 	decision | root-cause | incident | pattern | milestone)
 		printf '⚠ vaultmem: this session looks to hold a durable %s; capture it (vault-capture) before you stop.\n' "$kind"
@@ -518,13 +567,13 @@ _nudge_judge() {
 	return 0
 }
 
-# Is `nudge` named in [ext.judge] hook_judges (a comma list, default empty)?
+# Is `nudge` named in [ext.jev] hooks (a comma list, default empty)?
 _nudge_hook_allowed() {
 	local s key val j oldIFS="$IFS" rc=1
 	while IFS=$'\t' read -r s key val; do
-		[ "$s" = ext.judge ] && [ "$key" = hook_judges ] && break
+		[ "$s" = ext.jev ] && [ "$key" = hooks ] && break
 		val=""
-	done <<<"$_EXT_CFG"
+	done <<<"$(_jev_cfg_rows)"
 	IFS=','
 	for j in $val; do
 		j="${j#"${j%%[![:space:]]*}"}"
@@ -1136,8 +1185,8 @@ _doctor_growth() {
 
 # Exit codes (bitwise, so they compose): 0=clean 1=config errors 2=drift/lint
 # findings (index drift and/or schema lints) 3=both.
-# --- doctor --judge: semantic index drift (judge design 8.5) ---------------------
-# STALE is a string heuristic; DRIFT asks the `index-drift` judge whether each
+# --- doctor --drift: semantic index drift (Jev design 8.5) ---------------------
+# STALE is a string heuristic; DRIFT asks the `index-drift` set whether each
 # Agent-Index row still describes its note. Informational only: nothing here
 # touches doctor's exit code, because a probabilistic lint must not break CI or
 # a hook. Any extension failure prints no DRIFT section at all.
@@ -1161,7 +1210,7 @@ _json_esc_ml() {
 # Each index row that points at an existing, non-empty note, as
 # `<note path>\t<target>\t<summary>\t<raw row>`. Same link resolution as
 # _doctor_scan (glyph-prefixed fallback); BROKEN rows are skipped.
-_doctor_judge_rows() { # $1 = vault root
+_doctor_drift_rows() { # $1 = vault root
 	local root="$1" raw t s note
 	while IFS= read -r raw; do
 		case "$raw" in "| [["*) ;; *) continue ;; esac
@@ -1179,10 +1228,10 @@ _doctor_judge_rows() { # $1 = vault root
 	done < <(_index_rows)
 }
 
-# Judge one batch (≤ DOCTOR_JUDGE_BATCH rows of _doctor_judge_rows output, in
+# Evaluate one batch (≤ DOCTOR_DRIFT_BATCH rows of _doctor_drift_rows output, in
 # $2) for vault $1. Prints `DRIFT\t<note>\t<p>\t<excerpt>` per drifted row.
 # Returns non-zero when the extension gave no usable answer.
-_doctor_judge_batch() { # $1 = vault id, $2 = rows
+_doctor_drift_batch() { # $1 = vault id, $2 = rows
 	local vid="$1" json="" i=0 note t s raw out p ex
 	while IFS=$'\t' read -r note t s raw; do
 		[ -n "$note" ] || continue
@@ -1191,15 +1240,15 @@ _doctor_judge_batch() { # $1 = vault id, $2 = rows
 		json="${json}{\"id\":\"r${i}\",\"row\":\"$(printf '%s' "$raw" | _json_esc_ml)\",\"title\":\"$(basename "$t" | _json_esc_ml)\",\"frontmatter\":\"$(_note_frontmatter "$note" | _json_esc_ml)\",\"head\":\"$(head -n 30 "$note" | _json_esc_ml)\"}"
 	done <<<"$2"
 	[ "$i" -gt 0 ] || return 0
-	out=$(printf '{"rows":[%s]}\n' "$json" | _judge index-drift "$vid" 2>/dev/null) || return 1
+	out=$(printf '{"rows":[%s]}\n' "$json" | _jev index-drift "$vid" 2>/dev/null) || return 1
 	[ -n "$out" ] || return 1
 	i=0
 	while IFS=$'\t' read -r note t s raw; do
 		[ -n "$note" ] || continue
 		i=$((i + 1))
-		p=$(printf '%s' "$out" | _judge_answer "r${i}.probability") || continue
+		p=$(printf '%s' "$out" | _jev_answer "r${i}.probability") || continue
 		[ -n "$p" ] || continue
-		if _judge_ge "$DOCTOR_JUDGE_DRIFT_AT" "$p"; then
+		if _jev_ge "$DOCTOR_DRIFT_AT" "$p"; then
 			ex=$(printf '%s\n' "$s" | awk -v cap=80 '{ if (length($0) > cap) print substr($0,1,cap-1) "…"; else print }')
 			printf 'DRIFT\t%s\t%s\t%s\n' "$t" "$p" "$ex"
 		fi
@@ -1207,47 +1256,51 @@ _doctor_judge_batch() { # $1 = vault id, $2 = rows
 }
 
 # The DRIFT section for the primary vault's Agent Index. Consent is read once
-# from `judge config`; a vault that has not consented is skipped before any
+# from `jev config`; a vault that has not consented is skipped before any
 # note is read.
-_doctor_judge() {
-	[ "$EXT_JUDGE_ENABLED" = true ] || return 0
+_doctor_drift() {
+	[ "$EXT_JEV_ENABLED" = true ] || return 0
 	[ -f "$PRIMARY_HOME" ] || return 0
 	local vid jid ok=0 rows batch="" n=0 line found="" part
 	vid=$(printf '%s\n' "$_REG" | awk -F'\t' 'NR==1{print $1; exit}')
 	[ -n "$vid" ] || return 0
 	case "$SEL" in both | "$vid") ;; *) return 0 ;; esac
 	while IFS= read -r jid; do
-		[ "$jid" = "vault.${vid}.judge=true" ] && ok=1
-	done <<<"$(cmd_judge_config 2>/dev/null)"
+		[ "$jid" = "vault.${vid}.jev=true" ] && ok=1
+	done <<<"$(cmd_jev_config 2>/dev/null)"
 	[ "$ok" = 1 ] || return 0
-	rows=$(_doctor_judge_rows "$PRIMARY")
+	rows=$(_doctor_drift_rows "$PRIMARY")
 	[ -n "$rows" ] || return 0
 	while IFS= read -r line; do
 		[ -n "$line" ] || continue
 		batch="${batch}${line}"$'\n'
 		n=$((n + 1))
-		if [ "$n" -ge "$DOCTOR_JUDGE_BATCH" ]; then
-			part=$(_doctor_judge_batch "$vid" "$batch") || return 0
+		if [ "$n" -ge "$DOCTOR_DRIFT_BATCH" ]; then
+			part=$(_doctor_drift_batch "$vid" "$batch") || return 0
 			found="${found}${part:+$part$'\n'}"
 			batch=""
 			n=0
 		fi
 	done <<<"$rows"
 	if [ "$n" -gt 0 ]; then
-		part=$(_doctor_judge_batch "$vid" "$batch") || return 0
+		part=$(_doctor_drift_batch "$vid" "$batch") || return 0
 		found="${found}${part:+$part$'\n'}"
 	fi
 	[ -n "$found" ] || return 0
-	printf '%s▸ DRIFT (judged, informational)%s\n' "$B" "$R"
+	printf '%s▸ DRIFT (informational)%s\n' "$B" "$R"
 	printf '%s' "$found"
 }
 
 cmd_doctor() {
-	local deep=0 judge=0 _a
+	local deep=0 drift=0 _a
 	for _a in "$@"; do
 		case "$_a" in
 		--deep) deep=1 ;;
-		--judge) judge=1 ;;
+		--drift) drift=1 ;;
+		--judge)
+			_deprecated "doctor --judge" "doctor --drift"
+			drift=1
+			;;
 		esac
 	done
 	local rc=0
@@ -1259,6 +1312,12 @@ cmd_doctor() {
 			printf '%s\n' "$cfg_issues" | sed 's/^/  /'
 			rc=$((rc | 1))
 		}
+		local stale_keys
+		stale_keys=$(_deprecated_config_keys "$VAULTMEM_CONFIG")
+		if [ -n "$stale_keys" ]; then
+			printf '%s▸ WARN: deprecated config keys in %s%s\n' "$B" "$VAULTMEM_CONFIG" "$R"
+			printf '%s\n' "$stale_keys" | sed 's/^/  /'
+		fi
 	fi
 	# 2) index drift on the primary vault (Agent Index row rot).
 	local drift_issues=""
@@ -1330,7 +1389,7 @@ ${deep_issues}"
 	# Vault-growth watch (informational; never affects rc). See _doctor_growth.
 	printf '%s▸ Vault growth (ripgrep tripwire)%s\n' "$B" "$R"
 	_doctor_growth
-	[ "$judge" = 1 ] && _doctor_judge
+	[ "$drift" = 1 ] && _doctor_drift
 	return "$rc"
 }
 
@@ -1603,8 +1662,8 @@ _flip_project_status() { # $1 = Project .md path, $2 = thread
 # `parked` sessions untouched > COLD_DAYS as resume-or-retire triage candidates
 # (never auto-retired — that judgment lives in the session skill).
 #
-# --- groom --judge: state assembly and annotation ------------------------------
-# All of this is advisory scaffolding for `groom --judge` (judge design 8.1).
+# --- groom --triage: state assembly and annotation ------------------------------
+# All of this is advisory scaffolding for `groom --triage` (Jev design 8.1).
 # Deterministic facts (age, line counts) are computed here and passed to the
 # model as plain text: it is weak at dates and counting, so it never derives one.
 
@@ -1643,7 +1702,7 @@ _note_frontmatter() {
 # frontmatter, ## Bookmark, ## Pinned, ## Git state, the tail of the work log,
 # and the parent Project's ## Decisions. Deterministic facts come in as text.
 # $1 = _index.md path, $2 = vault root, $3 = status label, $4 = age days, $5 = lines
-_groom_judge_state() {
+_groom_triage_state() {
 	local f="$1" root="$2" status="$3" age="$4" lines="$5" sec proj ppath
 	printf 'Session: %s\n' "$(basename "$(dirname "$f")")"
 	printf 'Flagged as: %s\n' "$status"
@@ -1674,7 +1733,7 @@ _groom_judge_state() {
 # dependency, so this is a narrow scanner, not a JSON parser: it finds the
 # "<key>" token at any depth and prints the following scalar. $1 = dotted path
 # under `answers`, e.g. `work_complete.probability` or `recommendation.choice`.
-_judge_answer() { # $1 = dotted key path; JSON on stdin
+_jev_answer() { # $1 = dotted key path; JSON on stdin
 	awk -v path="$1" '
     BEGIN{ n=split(path, want, ".") }
     { s = s $0 }
@@ -1717,27 +1776,27 @@ _judge_answer() { # $1 = dotted key path; JSON on stdin
 }
 
 # Is probability $1 at or above threshold $2? Decimal compare without bc, in awk.
-_judge_ge() { awk -v a="$1" -v b="$2" 'BEGIN{ exit !(a+0 >= b+0) }'; }
+_jev_ge() { awk -v a="$1" -v b="$2" 'BEGIN{ exit !(a+0 >= b+0) }'; }
 
-# Render the annotation column for one judged session from the extension's JSON
+# Render the annotation column for one triaged session from the extension's JSON
 # on stdin: `→ <choice> <p> · <flags>`, or `→ ?` below min_confidence. Flags are
 # the boolean question names whose probability is >= 0.85. Prints nothing when
 # the JSON carries no usable recommendation (the caller then prints today's row).
-_groom_judge_column() { # JSON on stdin
+_groom_triage_column() { # JSON on stdin
 	local json choice p flags b bp
 	json=$(cat)
-	choice=$(printf '%s' "$json" | _judge_answer recommendation.choice) || return 1
+	choice=$(printf '%s' "$json" | _jev_answer recommendation.choice) || return 1
 	[ -n "$choice" ] || return 1
-	p=$(printf '%s' "$json" | _judge_answer "recommendation.probabilities.$choice") || p=""
-	if [ -z "$p" ] || ! _judge_ge "$p" "$GROOM_JUDGE_MIN_CONFIDENCE"; then
+	p=$(printf '%s' "$json" | _jev_answer "recommendation.probabilities.$choice") || p=""
+	if [ -z "$p" ] || ! _jev_ge "$p" "$GROOM_TRIAGE_MIN_CONFIDENCE"; then
 		printf '→ ?'
 		return 0
 	fi
 	flags=""
 	for b in work_complete has_next_step blocked_external undistilled; do
-		bp=$(printf '%s' "$json" | _judge_answer "$b.probability") || continue
+		bp=$(printf '%s' "$json" | _jev_answer "$b.probability") || continue
 		[ -n "$bp" ] || continue
-		if _judge_ge "$bp" "$GROOM_JUDGE_FLAG_AT"; then
+		if _jev_ge "$bp" "$GROOM_TRIAGE_FLAG_AT"; then
 			flags="${flags}${flags:+, }${b}"
 		fi
 	done
@@ -1746,72 +1805,72 @@ _groom_judge_column() { # JSON on stdin
 	return 0
 }
 
-# Judge every flagged session in the TAB rows $1 and record the result. Fills
-# two parallel newline-lists, _GROOM_JUDGE_ANNOT (`<name>\t<column>`) for the
-# report and _GROOM_JUDGE_JSON for --format json. A vault that has not consented
-# is skipped whole, before any state is assembled: `_judge` would refuse it
+# Triage every flagged session in the TAB rows $1 and record the result. Fills
+# two parallel newline-lists, _GROOM_TRIAGE_ANNOT (`<name>\t<column>`) for the
+# report and _GROOM_TRIAGE_JSON for --format json. A vault that has not consented
+# is skipped whole, before any state is assembled: `_jev` would refuse it
 # anyway, but assembling state for a note that can never be sent is wasted work
 # and one code path away from a leak.
-_groom_judge_run() { # $1 = TAB rows
-	_GROOM_JUDGE_ANNOT=""
-	_GROOM_JUDGE_JSON=""
+_groom_triage_run() { # $1 = TAB rows
+	_GROOM_TRIAGE_ANNOT=""
+	_GROOM_TRIAGE_JSON=""
 	[ -n "$1" ] || return 0
 	local consent="" vid status name age lines f root state out rc col id jid vj
 	# One read of the consent map per run, from the same frozen contract the
 	# extension reads.
 	while IFS= read -r jid; do
 		case "$jid" in
-		vault.*.judge=true) vj="${jid#vault.}" && consent="${consent}${vj%%.judge=true} " ;;
+		vault.*.jev=true) vj="${jid#vault.}" && consent="${consent}${vj%%.jev=true} " ;;
 		esac
-	done <<<"$(cmd_judge_config 2>/dev/null)"
+	done <<<"$(cmd_jev_config 2>/dev/null)"
 	while IFS=$'\t' read -r vid status name age lines f root; do
 		[ -n "$name" ] || continue
 		case " $consent " in *" $vid "*) ;; *)
-			_groom_judge_json_add "$vid" "$name" "$status" "$age" "$lines" "" ""
+			_groom_triage_json_add "$vid" "$name" "$status" "$age" "$lines" "" ""
 			continue
 			;;
 		esac
-		state=$(_groom_judge_state "$f" "$root" "$status" "$age" "$lines")
-		out=$(printf '%s\n' "$state" | _judge groom-triage "$vid" --subject "Sessions/$name/_index.md" 2>/dev/null)
+		state=$(_groom_triage_state "$f" "$root" "$status" "$age" "$lines")
+		out=$(printf '%s\n' "$state" | _jev groom-triage "$vid" --subject "Sessions/$name/_index.md" 2>/dev/null)
 		rc=$?
 		if [ "$rc" -ne 0 ] || [ -z "$out" ]; then
 			# Any exit but 0 is "no opinion": the row prints exactly as today.
-			_groom_judge_json_add "$vid" "$name" "$status" "$age" "$lines" "" ""
+			_groom_triage_json_add "$vid" "$name" "$status" "$age" "$lines" "" ""
 			continue
 		fi
-		col=$(printf '%s' "$out" | _groom_judge_column) || col=""
-		id=$(printf '%s' "$out" | _judge_log_id) || id=""
+		col=$(printf '%s' "$out" | _groom_triage_column) || col=""
+		id=$(printf '%s' "$out" | _jev_log_id) || id=""
 		if [ -n "$col" ]; then
 			[ -n "$id" ] && col="$col [$id]"
-			_GROOM_JUDGE_ANNOT="${_GROOM_JUDGE_ANNOT}${name}"$'\t'"${col}"$'\n'
+			_GROOM_TRIAGE_ANNOT="${_GROOM_TRIAGE_ANNOT}${name}"$'\t'"${col}"$'\n'
 		fi
-		_groom_judge_json_add "$vid" "$name" "$status" "$age" "$lines" "$id" "$out"
+		_groom_triage_json_add "$vid" "$name" "$status" "$age" "$lines" "$id" "$out"
 	done <<<"$1"
-	[ "$FORMAT" = json ] && printf '[%s\n]\n' "$_GROOM_JUDGE_JSON"
+	[ "$FORMAT" = json ] && printf '[%s\n]\n' "$_GROOM_TRIAGE_JSON"
 	return 0
 }
 
 # Append one --format json element. $6 = log id, $7 = raw extension JSON; both
-# empty means "no opinion", which emits `"judge": null`.
-_groom_judge_json_add() { # vid name status age lines id json
+# empty means "no opinion", which emits `"jev": null`.
+_groom_triage_json_add() { # vid name status age lines id json
 	local ans=""
-	[ -n "$_GROOM_JUDGE_JSON" ] && _GROOM_JUDGE_JSON="${_GROOM_JUDGE_JSON},"
+	[ -n "$_GROOM_TRIAGE_JSON" ] && _GROOM_TRIAGE_JSON="${_GROOM_TRIAGE_JSON},"
 	if [ -n "$7" ]; then
-		ans=$(printf '%s' "$7" | _judge_answers_object)
+		ans=$(printf '%s' "$7" | _jev_answers_object)
 	fi
 	if [ -n "$ans" ]; then
-		_GROOM_JUDGE_JSON="${_GROOM_JUDGE_JSON}
-  {\"vault\":\"$(_json_esc "$1")\",\"session\":\"$(_json_esc "$2")\",\"status\":\"$(_json_esc "$3")\",\"age_days\":$4,\"lines\":$5,\"judge\":{\"id\":\"$(_json_esc "$6")\",\"answers\":$ans}}"
+		_GROOM_TRIAGE_JSON="${_GROOM_TRIAGE_JSON}
+  {\"vault\":\"$(_json_esc "$1")\",\"session\":\"$(_json_esc "$2")\",\"status\":\"$(_json_esc "$3")\",\"age_days\":$4,\"lines\":$5,\"jev\":{\"id\":\"$(_json_esc "$6")\",\"answers\":$ans}}"
 	else
-		_GROOM_JUDGE_JSON="${_GROOM_JUDGE_JSON}
-  {\"vault\":\"$(_json_esc "$1")\",\"session\":\"$(_json_esc "$2")\",\"status\":\"$(_json_esc "$3")\",\"age_days\":$4,\"lines\":$5,\"judge\":null}"
+		_GROOM_TRIAGE_JSON="${_GROOM_TRIAGE_JSON}
+  {\"vault\":\"$(_json_esc "$1")\",\"session\":\"$(_json_esc "$2")\",\"status\":\"$(_json_esc "$3")\",\"age_days\":$4,\"lines\":$5,\"jev\":null}"
 	fi
 }
 
 # The decision-log id from the extension's JSON on stdin (top-level "id").
-_judge_log_id() {
+_jev_log_id() {
 	awk '{ s = s $0 } END{
-    # As in _judge_answer: accept "id" only where it is a key, never where the
+    # As in _jev_answer: accept "id" only where it is a key, never where the
     # same text appears as a value.
     off = 0
     while(1){
@@ -1832,7 +1891,7 @@ _judge_log_id() {
 # The `answers` object from the extension's JSON on stdin, verbatim, so
 # --format json carries exactly what the gateway returned. Brace-matched, and
 # string-aware so a brace inside a string value cannot end it early.
-_judge_answers_object() {
+_jev_answers_object() {
 	awk '{ s = s $0 } END{
     p = index(s, "\"answers\"")
     if(p==0) exit 1
@@ -1851,18 +1910,18 @@ _judge_answers_object() {
   }'
 }
 
-# Append the judged column to each report line whose session name matches. The
+# Append the triaged column to each report line whose session name matches. The
 # report lines are `  <label>: <name> (<age>d, <project>)`, so the name is the
 # token between ": " and " (".
-_groom_judge_decorate() { # $1 = accumulated report lines
+_groom_triage_decorate() { # $1 = accumulated report lines
 	[ -n "$1" ] || return 0
-	[ -n "$_GROOM_JUDGE_ANNOT" ] || {
+	[ -n "$_GROOM_TRIAGE_ANNOT" ] || {
 		printf '%s' "$1"
 		return 0
 	}
 	# The annotation map arrives on stdin ahead of the report, separated by a
 	# lone NUL-ish sentinel line: awk -v cannot carry the embedded newlines.
-	printf '%s\n%s\n%s' "$_GROOM_JUDGE_ANNOT" '---vaultmem-annot-end---' "$1" | awk '
+	printf '%s\n%s\n%s' "$_GROOM_TRIAGE_ANNOT" '---vaultmem-annot-end---' "$1" | awk '
     BEGIN{ phase=1 }
     phase==1 && $0=="---vaultmem-annot-end---"{ phase=2; next }
     phase==1 {
@@ -1889,23 +1948,27 @@ _groom_judge_decorate() { # $1 = accumulated report lines
 # and NO file writes. Real (no-flag) behavior is unchanged; the flag only
 # swaps the two mutating calls (mv, _flip_project_status) for print statements.
 #
-# --judge: annotate each cold-parked/stale-active row with a `groom-triage`
-# judgment (section 8.1 of the judge design). Advisory only: nothing moves on a
+# --triage: annotate each cold-parked/stale-active row with a `groom-triage`
+# judgment (section 8.1 of the Jev design). Advisory only: nothing moves on a
 # judgment, and without the flag every byte of output is what it is today.
 cmd_groom() {
-	local dry=0 judge=0 a
+	local dry=0 triage=0 a
 	for a in "$@"; do
 		case "$a" in
 		--dry-run) dry=1 ;;
-		--judge) judge=1 ;;
+		--triage) triage=1 ;;
+		--judge)
+			_deprecated "groom --judge" "groom --triage"
+			triage=1
+			;;
 		esac
 	done
 	local now did=0 cold_lines="" stale_lines="" bloat_lines="" taskstale_lines=""
 	now=$(date +%s)
-	# --judge only: TAB rows <vault-id>\t<status>\t<name>\t<age>\t<lines>\t<path>\t<vault-root>
-	# for every flagged session, judged after the scan so the report keeps its
+	# --triage only: TAB rows <vault-id>\t<status>\t<name>\t<age>\t<lines>\t<path>\t<vault-root>
+	# for every flagged session, triaged after the scan so the report keeps its
 	# current shape and a judgment never influences a move.
-	local judge_rows=""
+	local triage_rows=""
 	_groom_vault() { # $1 = vault root, $2 = label, $3 = vault id
 		local root="$1/Sessions" label="$2" vid="${3:-}" arc f name st proj upd ts age lines
 		[ -d "$root" ] || return 0
@@ -1975,7 +2038,7 @@ cmd_groom() {
 					proj=$(_fm_field "$f" project)
 					cold_lines="${cold_lines}  ${label}: ${name} (${age}d, ${proj:-no project})
 "
-					[ "$judge" -eq 1 ] && judge_rows="${judge_rows}${vid}"$'\t'"cold-parked"$'\t'"${name}"$'\t'"${age}"$'\t'"$(_note_lines "$f")"$'\t'"${f}"$'\t'"$1"$'\n'
+					[ "$triage" -eq 1 ] && triage_rows="${triage_rows}${vid}"$'\t'"cold-parked"$'\t'"${name}"$'\t'"${age}"$'\t'"$(_note_lines "$f")"$'\t'"${f}"$'\t'"$1"$'\n'
 				fi
 				;;
 			active)
@@ -1989,7 +2052,7 @@ cmd_groom() {
 					proj=$(_fm_field "$f" project)
 					stale_lines="${stale_lines}  ${label}: ${name} (${age}d, ${proj:-no project})
 "
-					[ "$judge" -eq 1 ] && judge_rows="${judge_rows}${vid}"$'\t'"stale-active"$'\t'"${name}"$'\t'"${age}"$'\t'"$(_note_lines "$f")"$'\t'"${f}"$'\t'"$1"$'\n'
+					[ "$triage" -eq 1 ] && triage_rows="${triage_rows}${vid}"$'\t'"stale-active"$'\t'"${name}"$'\t'"${age}"$'\t'"$(_note_lines "$f")"$'\t'"${f}"$'\t'"$1"$'\n'
 				fi
 				;;
 			esac
@@ -2089,16 +2152,16 @@ cmd_groom() {
 		_groom_projects "$_vpath" "$_vlabel"
 		_groom_tasks "$_vpath" "$_vlabel"
 	done <<<"$_REG"
-	# --judge: ask groom-triage about each flagged session, then decorate the
+	# --triage: ask groom-triage about each flagged session, then decorate the
 	# rows. This runs after the scan and before any printing, so a judgment can
 	# only add a column: it never reaches the archive/flip logic above.
-	if [ "$judge" -eq 1 ]; then
-		_groom_judge_run "$judge_rows"
+	if [ "$triage" -eq 1 ]; then
+		_groom_triage_run "$triage_rows"
 		[ "$FORMAT" = json ] && return 0
 		# Command substitution eats the trailing newline every report line ends
 		# with; put it back so the decorated block prints exactly as before.
-		[ -n "$cold_lines" ] && cold_lines="$(_groom_judge_decorate "$cold_lines")"$'\n'
-		[ -n "$stale_lines" ] && stale_lines="$(_groom_judge_decorate "$stale_lines")"$'\n'
+		[ -n "$cold_lines" ] && cold_lines="$(_groom_triage_decorate "$cold_lines")"$'\n'
+		[ -n "$stale_lines" ] && stale_lines="$(_groom_triage_decorate "$stale_lines")"$'\n'
 	fi
 	if [ "$did" -eq 0 ]; then
 		printf 'Nothing to archive.\n'
@@ -2282,12 +2345,12 @@ cmd_search() {
 	local query="$1"
 	shift || true
 	case "$FORMAT" in cli | json | files) ;; *) die "vaultmem search: --format wants cli|json|files (got '$FORMAT')" ;; esac
-	# --rerank on the command line, else [ext.judge] rerank for the cli format
+	# --rerank on the command line, else [ext.jev] rerank for the cli format
 	# only: a script reading json/files never changes order behind its back.
 	local rr="$RERANK"
 	if [ -z "$rr" ]; then
 		rr=0
-		[ "$FORMAT" = cli ] && [ "$EXT_JUDGE_RERANK" = true ] && rr=1
+		[ "$FORMAT" = cli ] && [ "$EXT_JEV_RERANK" = true ] && rr=1
 	fi
 	if [ -n "$MIN_SCORE" ]; then
 		if [ "$rr" != 1 ]; then
@@ -2437,7 +2500,7 @@ _search_json() {
   '
 }
 
-# --- search --rerank: the judge extension's `rerank` score (judge design 8.3) ---
+# --- search --rerank: the Jev extension's `rerank` score (Jev design 8.3) ---
 # Advisory only: a score reorders content rows and nothing else. Every failure
 # returns non-zero and the caller prints plain ripgrep order, exactly as today.
 RERANK_MAX=20 # candidates per request: the extension's cap and the 8.3 budget
@@ -2460,7 +2523,7 @@ _rerank_vault_of() {
 # `F<TAB>id<TAB>vault<TAB>path` followed by up to two `M<TAB>matched line` rows.
 # Per candidate: title (first `# ` heading, else the file name), frontmatter
 # description, and head (the first 5 non-blank body lines after the frontmatter
-# and title, from the first 40 lines), the same fields `judge bench` builds.
+# and title, from the first 40 lines), the same fields `jev bench` builds.
 # One candidate per line, so a golden file diffs readably.
 _rerank_request() {
 	LC_ALL=C awk '
@@ -2518,7 +2581,7 @@ _rerank_request() {
 }
 
 # `id<TAB>score` per entry of the `scores` object in the extension's reply on
-# stdin. A narrow scanner like _judge_answer, not a JSON parser: the reply is
+# stdin. A narrow scanner like _jev_answer, not a JSON parser: the reply is
 # one flat object of id keys and numbers. No `scores` object: exit 1.
 _rerank_scores() {
 	awk '{ s = s $0 } END{
@@ -2565,15 +2628,15 @@ _rerank_order() {
 }
 
 # The reranked content rows for query $1 over roots $2..., as _rerank_order
-# prints them. The first RERANK_MAX hits from vaults with `judge = true` are the
+# prints them. The first RERANK_MAX hits from vaults with `jev = true` are the
 # candidates; a hit from any other vault is never read, let alone sent, and
 # keeps its ripgrep place below the scored rows (design 7, rule 3). Non-zero
 # when rerank is unavailable, with nothing on stdout.
 _search_rerank() {
 	local query="$1"
 	shift
-	if [ "$EXT_JUDGE_ENABLED" != true ]; then
-		_rerank_note "[ext.judge] enabled is not true"
+	if [ "$EXT_JEV_ENABLED" != true ]; then
+		_rerank_note "[ext.jev] enabled is not true"
 		return 3
 	fi
 	local files f vid i=0 n=0 id sent="" map="" vids=" " first="" alt req out rc scores
@@ -2583,7 +2646,7 @@ _search_rerank() {
 		[ -n "$f" ] || continue
 		i=$((i + 1))
 		id=""
-		if [ "$i" -le "$RERANK_MAX" ] && vid=$(_rerank_vault_of "$f") && [ "$(_vault_judge "$vid")" = true ]; then
+		if [ "$i" -le "$RERANK_MAX" ] && vid=$(_rerank_vault_of "$f") && [ "$(_vault_jev "$vid")" = true ]; then
 			n=$((n + 1))
 			id=$(printf 'c%02d' "$n")
 			sent="${sent}${id}"$'\t'"${vid}"$'\t'"${f}"$'\n'
@@ -2593,7 +2656,7 @@ _search_rerank() {
 		map="${map}${f}"$'\t'"${id}"$'\n'
 	done <<<"$files"
 	if [ "$n" = 0 ]; then
-		_rerank_note "no hit is in a vault with judge = true"
+		_rerank_note "no hit is in a vault with jev = true"
 		return 3
 	fi
 	alt=$(_search_alt "$query")
@@ -2608,17 +2671,17 @@ _search_rerank() {
 	local -a vargs=()
 	for vid in $vids; do vargs+=(--vault "$vid"); done
 	if [ "${VAULTMEM_VERBOSE:-}" = 1 ]; then
-		out=$(printf '%s\n' "$req" | _judge rerank "$first" "${vargs[@]}")
+		out=$(printf '%s\n' "$req" | _jev rerank "$first" "${vargs[@]}")
 	else
-		out=$(printf '%s\n' "$req" | _judge rerank "$first" "${vargs[@]}" 2>/dev/null)
+		out=$(printf '%s\n' "$req" | _jev rerank "$first" "${vargs[@]}" 2>/dev/null)
 	fi
 	rc=$?
 	if [ "$rc" != 0 ]; then
-		_rerank_note "judge rerank exited $rc"
+		_rerank_note "jev rerank exited $rc"
 		return 3
 	fi
 	if ! scores=$(printf '%s' "$out" | _rerank_scores); then
-		_rerank_note "judge rerank returned no scores"
+		_rerank_note "jev rerank returned no scores"
 		return 3
 	fi
 	printf '%s\n---vaultmem-rerank-files---\n%s' "$scores" "$map" | _rerank_order "$MIN_SCORE"
@@ -2903,20 +2966,20 @@ STALE_ACTIVE_DAYS="${VAULTMEM_STALE_ACTIVE_DAYS:-7}"
 # wins over the config default, same pattern as COLD_DAYS.
 BLOAT_LINES="${VAULTMEM_BLOAT_LINES:-${DEF_BLOAT_LINES:-150}}"
 
-# `groom --judge` rendering thresholds. These mirror the groom-triage judge file
-# (design 8.1) so the printed column agrees with the judge's own gating; the
-# judge file stays authoritative for the extension's exit code.
-GROOM_JUDGE_MIN_CONFIDENCE=0.6
-GROOM_JUDGE_FLAG_AT=0.85
-# `doctor --judge`: a row whose "accurately describes its note" probability is at
-# or below this prints as DRIFT. Mirrors the index-drift judge file's `no`
+# `groom --triage` rendering thresholds. These mirror the groom-triage set file
+# (design 8.1) so the printed column agrees with the set's own gating; the
+# set file stays authoritative for the extension's exit code.
+GROOM_TRIAGE_MIN_CONFIDENCE=0.6
+GROOM_TRIAGE_FLAG_AT=0.85
+# `doctor --drift`: a row whose "accurately describes its note" probability is at
+# or below this prints as DRIFT. Mirrors the index-drift set file's `no`
 # threshold. Rows per extension call are capped (irrelevant context hurts
 # accuracy; the extension rejects more than 5).
-DOCTOR_JUDGE_DRIFT_AT=0.15
-DOCTOR_JUDGE_BATCH=5
-# Filled by _groom_judge_run: `<name>\t<column>` rows and the --format json body.
-_GROOM_JUDGE_ANNOT=""
-_GROOM_JUDGE_JSON=""
+DOCTOR_DRIFT_AT=0.15
+DOCTOR_DRIFT_BATCH=5
+# Filled by _groom_triage_run: `<name>\t<column>` rows and the --format json body.
+_GROOM_TRIAGE_ANNOT=""
+_GROOM_TRIAGE_JSON=""
 
 # --- subcommand: projects (list Project notes + session counts) ----------------
 cmd_projects() {
@@ -4103,10 +4166,10 @@ cmd_init() {
 	esac
 }
 
-# --- extensions: the `judge` shim ------------------------------------------------
+# --- extensions: the `jev` shim ------------------------------------------------
 # Core opens no socket. An extension is a separate executable that owns its own
 # dependencies and network code; core only locates it, hands it two env vars, and
-# serves it the parsed config (`judge config`) so it never needs a TOML parser.
+# serves it the parsed config (`jev config`) so it never needs a TOML parser.
 
 # Absolute, symlink-resolved path of the running script. No `readlink -f`: it is
 # missing on older macOS, so walk the link chain by hand.
@@ -4152,16 +4215,16 @@ _ext_exec() {
 	VAULTMEM_BIN="$self" VAULTMEM_CONFIG="$VAULTMEM_CONFIG" "$bin" "$@"
 }
 
-# `vaultmem judge config`: the core/extension config contract, answered by core.
+# `vaultmem jev config`: the core/extension config contract, answered by core.
 # FROZEN FORMAT, one per line, values unquoted, defaults filled in:
-#   ext.judge.<key>=<value>     the nine known keys in the order below, then any
-#                               other [ext.judge] key in file order (the extension's
+#   ext.jev.<key>=<value>     the nine known keys in the order below, then any
+#                               other [ext.jev] key in file order (the extension's
 #                               own doctor rejects unknown names; core does not)
-#   vault.<id>.judge=true|false every registry vault that has a path
+#   vault.<id>.jev=true|false every registry vault that has a path
 #   vault.<id>.label=<label>    then, per vault with a path in registry order, its
 #   vault.<id>.description=<s>  label (default: the id) and description (default: empty)
-_JUDGE_KEYS="enabled model base_url zdr timeout_ms key_file log rerank hook_judges"
-_judge_default() {
+_JEV_KEYS="enabled model base_url zdr timeout_ms key_file log rerank hooks"
+_jev_default() {
 	case "$1" in
 	enabled | rerank) printf 'false' ;;
 	zdr | log) printf 'true' ;;
@@ -4171,30 +4234,50 @@ _judge_default() {
 	key_file) printf '%s' "$HOME/.config/vaultmem/ai-gateway.key" ;;
 	esac
 }
-cmd_judge_config() {
-	local k s key val found id
-	for k in $_JUDGE_KEYS; do
+# _EXT_CFG rows with the pre-jev names folded onto the current ones: section
+# ext.judge reads as ext.jev and `hook_judges` as `hooks`, so the frozen contract
+# below prints one vocabulary whichever the config uses. A current name present
+# in the file always wins.
+_jev_cfg_rows() {
+	local s key val
+	while IFS=$'\t' read -r s key val; do
+		[ "$s" = ext.jev ] && [ "$key" != hook_judges ] && printf 'ext.jev\t%s\t%s\n' "$key" "$val"
+	done <<<"$_EXT_CFG"
+	while IFS=$'\t' read -r s key val; do
+		case "$s" in ext.jev | ext.judge) ;; *) continue ;; esac
+		[ "$key" = hook_judges ] && key=hooks
+		[ "$s" = ext.jev ] && [ "$key" != hooks ] && continue
+		printf 'ext.jev\t%s\t%s\n' "$key" "$val"
+	done <<<"$_EXT_CFG"
+}
+cmd_jev_config() {
+	local k s key val found id rows
+	rows=$(_jev_cfg_rows)
+	for k in $_JEV_KEYS; do
 		found=0
 		while IFS=$'\t' read -r s key val; do
-			if [ "$s" = ext.judge ] && [ "$key" = "$k" ]; then
+			if [ "$s" = ext.jev ] && [ "$key" = "$k" ]; then
 				found=1
 				break
 			fi
-		done <<<"$_EXT_CFG"
-		[ "$found" = 1 ] || val=$(_judge_default "$k")
+		done <<<"$rows"
+		[ "$found" = 1 ] || val=$(_jev_default "$k")
 		[ "$k" = key_file ] && val=$(_expand_path "$val")
-		printf 'ext.judge.%s=%s\n' "$k" "$val"
+		printf 'ext.jev.%s=%s\n' "$k" "$val"
 	done
+	local seen=""
 	while IFS=$'\t' read -r s key val; do
-		[ "$s" = ext.judge ] || continue
-		case " $_JUDGE_KEYS " in *" $key "*) continue ;; esac
-		printf 'ext.judge.%s=%s\n' "$key" "$val"
-	done <<<"$_EXT_CFG"
+		[ "$s" = ext.jev ] || continue
+		case " $_JEV_KEYS " in *" $key "*) continue ;; esac
+		case " $seen " in *" $key "*) continue ;; esac
+		seen="$seen $key"
+		printf 'ext.jev.%s=%s\n' "$key" "$val"
+	done <<<"$rows"
 	# awk, not `read`: TAB is IFS whitespace, so `read` collapses an empty path
 	# column and a pathless vault would look like it had one.
 	while IFS= read -r id; do
 		[ -n "$id" ] || continue
-		printf 'vault.%s.judge=%s\n' "$id" "$(_vault_judge "$id")"
+		printf 'vault.%s.jev=%s\n' "$id" "$(_vault_jev "$id")"
 	done < <(printf '%s' "$_REG" | awk -F'\t' '$1 != "" && $2 != "" { print $1 }')
 	local label
 	while IFS=$'\t' read -r id label; do
@@ -4215,33 +4298,63 @@ _vault_desc() {
 	done <<<"$_REG_DESC"
 }
 
-# true|false: has vault $1 consented to egress ([vault.<id>] judge = true)?
-_vault_judge() {
+# `jev <sub>`: `config` is answered by core; `ask <name>` and every other
+# subcommand go to the extension verbatim. A bare set name (no `ask`) is the
+# pre-jev form, kept until the next breaking release; a flag is never one.
+# _quiet is the same routing with the deprecation line left to the caller, for
+# `vaultmem judge <name>`, which names both renames in one line.
+_dispatch_jev() {
+	case "${1:-}" in
+	config | ask | list | doctor | log | feedback | calibration | bench | route | dupes | rerank | index-drift | prompt | -h | --help | "" | -*) ;;
+	*) _deprecated "vaultmem jev $1" "vaultmem jev ask $1" ;;
+	esac
+	_dispatch_jev_quiet "$@"
+}
+_dispatch_jev_quiet() {
+	case "${1:-}" in
+	config) cmd_jev_config ;;
+	ask)
+		shift
+		if [ $# -eq 0 ]; then
+			printf 'vaultmem: usage: vaultmem jev ask <name> [args]\n' >&2
+			exit 64
+		fi
+		_ext_exec jev ask "$@"
+		;;
+	list | doctor | log | feedback | calibration | bench | route | dupes | rerank | index-drift | prompt | -h | --help | "" | -*)
+		_ext_exec jev "$@"
+		;;
+	*) _ext_exec jev ask "$@" ;;
+	esac
+}
+
+# true|false: has vault $1 consented to egress ([vault.<id>] jev = true)?
+_vault_jev() {
 	local jid vj
 	while IFS=$'\t' read -r jid vj; do
 		if [ "$jid" = "$1" ]; then
 			printf '%s' "$vj"
 			return 0
 		fi
-	done <<<"$_REG_JUDGE"
+	done <<<"$_REG_JEV"
 	printf 'false'
 }
 
-# Internal: ask judge $1 about the state on stdin, on behalf of vault $2; any
+# Internal: ask set $1 about the state on stdin, on behalf of vault $2; any
 # further args go to the extension verbatim. Returns 3 ("unavailable") WITHOUT
-# forking when [ext.judge] enabled is not true or the vault has not consented, so
-# a disabled judge costs an integrated command (and a hook) nothing. Callers treat
+# forking when [ext.jev] enabled is not true or the vault has not consented, so
+# a disabled Jev costs an integrated command (and a hook) nothing. Callers treat
 # anything other than 0/1/2 as "no opinion" and behave exactly as they do today.
-_judge() {
-	[ "$EXT_JUDGE_ENABLED" = true ] || return 3
+_jev() {
+	[ "$EXT_JEV_ENABLED" = true ] || return 3
 	local name="${1:-}" vid="${2:-}" jid vj ok=0
 	if [ -z "$name" ] || [ -z "$vid" ]; then return 3; fi
 	while IFS=$'\t' read -r jid vj; do
 		if [ "$jid" = "$vid" ] && [ "$vj" = true ]; then ok=1; fi
-	done <<<"$_REG_JUDGE"
+	done <<<"$_REG_JEV"
 	[ "$ok" = 1 ] || return 3
 	shift 2
-	_ext_exec judge "$name" --vault "$vid" "$@"
+	_ext_exec jev "$name" --vault "$vid" "$@"
 }
 
 # --- arg parsing ---------------------------------------------------------------
@@ -4283,15 +4396,15 @@ while [ $# -gt 0 ]; do
 		shift 2
 		;;
 	-h | --help)
-		sed -n '4,182p' "$0"
+		sed -n '4,183p' "$0"
 		exit 0
 		;;
 	*)
 		ARGS+=("$1")
 		shift
-		# Everything after `judge` belongs to the extension, verbatim: it has its
+		# Everything after `jev` belongs to the extension, verbatim: it has its
 		# own --vault/--format/-h, which the flags above would otherwise swallow.
-		case "${ARGS[0]}" in judge | _judge)
+		case "${ARGS[0]}" in jev | judge | _jev)
 			while [ $# -gt 0 ]; do
 				ARGS+=("$1")
 				shift
@@ -4311,15 +4424,15 @@ SEL=both
 # verify/nudge stay fail-quiet (the hook path); which/init/usage are
 # vault-independent or scaffold; doctor must run its config-lint even when the
 # config is too broken to register a vault (that is exactly what it exists to
-# report). judge answers "unavailable" (exit 3) on its own terms, and `judge
+# report). jev answers "unavailable" (exit 3) on its own terms, and `jev
 # config` must print its defaults with no vault at all: the extension reads it.
 case "${ARGS[0]:-}" in
-status | sessions | verify | nudge | which | init | doctor | judge | _judge | "") ;;
+status | sessions | verify | nudge | which | init | doctor | jev | judge | _jev | "") ;;
 *) [ "${REG_HAVE_PATH:-0}" = 1 ] || die "no vault configured — create $VAULTMEM_CONFIG (run 'vaultmem init --config') or set OBS_FLO/OBS_JAY (legacy)" ;;
 esac
 
 case "${ARGS[0]:-}" in
-"") sed -n '4,182p' "$0" ;; # no args → print usage
+"") sed -n '4,183p' "$0" ;; # no args → print usage
 status) cmd_status ;;
 nudge) cmd_nudge "${ARGS[@]:1}" ;;
 index) cmd_index "${ARGS[1]:-}" ;;
@@ -4345,13 +4458,20 @@ worktrees) cmd_worktrees "${ARGS[1]:-}" ;;
 cat) cmd_cat "${ARGS[@]:1}" ;;
 verify) cmd_verify "${ARGS[1]:-}" ;;
 frontier) cmd_frontier ;;
-judge)
-	if [ "${ARGS[1]:-}" = config ]; then
-		cmd_judge_config
+jev | judge)
+	# One line, never two: `vaultmem judge <name>` is renamed in one step.
+	if [ "${ARGS[0]}" = judge ]; then
+		case "${ARGS[1]:-}" in
+		config | list | doctor | log | feedback | calibration | bench | route | dupes | rerank | index-drift | prompt | ask | -* | "")
+			_deprecated "vaultmem judge" "vaultmem jev"
+			;;
+		*) _deprecated "vaultmem judge ${ARGS[1]}" "vaultmem jev ask ${ARGS[1]}" ;;
+		esac
+		_dispatch_jev_quiet "${ARGS[@]:1}"
 	else
-		_ext_exec judge "${ARGS[@]:1}"
+		_dispatch_jev "${ARGS[@]:1}"
 	fi
 	;;
-_judge) _judge "${ARGS[@]:1}" ;; # test seam for the internal helper; not a public command
+_jev) _jev "${ARGS[@]:1}" ;; # test seam for the internal helper; not a public command
 *) cmd_search "${ARGS[*]}" ;;
 esac

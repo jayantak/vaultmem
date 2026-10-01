@@ -7,7 +7,7 @@
 # Or from a clone:
 #   ./install.sh
 #   ./install.sh --skills ~/.claude/skills   # also symlink the bundled skills/
-#   ./install.sh --ext judge                 # also symlink the optional judge extension
+#   ./install.sh --ext jev                   # also symlink the optional Jev extension
 #
 # It copies the `vaultmem` script next to this file into the bin dir, checks that
 # ripgrep is present, and prints the SessionStart hook snippet. It does not touch
@@ -92,7 +92,17 @@ if [ -n "$EXT_NAME" ]; then
 		exit 2
 		;;
 	esac
+	if [ "$EXT_NAME" = judge ]; then
+		printf 'install.sh: --ext judge is deprecated; use --ext jev\n' >&2
+		EXT_NAME=jev
+	fi
 	EXT_DEST="${XDG_DATA_HOME:-$HOME/.local/share}/vaultmem/ext"
+	# A pre-jev install left ext/judge linked here. It is dead weight now, and
+	# `vaultmem jev doctor` warns about it, so clear it while we are in the dir.
+	if [ "$EXT_NAME" = jev ] && [ -L "$EXT_DEST/judge" ]; then
+		rm -f "$EXT_DEST/judge"
+		printf '✓ removed the stale ext/judge link in %s\n' "$EXT_DEST"
+	fi
 	if [ -d "$SRC_DIR/ext/$EXT_NAME" ]; then
 		mkdir -p "$EXT_DEST"
 		ln -sfn "$SRC_DIR/ext/$EXT_NAME" "$EXT_DEST/$EXT_NAME"

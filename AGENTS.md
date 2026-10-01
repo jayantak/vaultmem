@@ -20,7 +20,7 @@ database, no build step — the script *is* the artifact. This repo also ships:
   drive the memory workflow on top of the CLI.
 - `.claude-plugin/` — projects `skills/` into an installable Claude Code
   plugin/marketplace.
-- `ext/judge/` — the optional `judge` extension (`vaultmem-judge`, bash 3.2 +
+- `ext/jev/` — the optional `jev` extension (`vaultmem-jev`, bash 3.2 +
   `curl` + `jq`): typed yes/no, choice, and score answers from a remote
   evaluation model. A separate executable, never sourced by core. See
   § The extension model.
@@ -71,14 +71,14 @@ subcommand. Broad shape: search/index (`<query>`, `index`, `mocs`), the
 wikilink graph (`resolve`/`links`/`backlinks`/`neighbors`/`dangling`), the
 router (`vaults`/`path`/`which`), the lifecycle tier
 (`sessions`/`projects`/`project`/`next`/`task`/`groom`/`status`), hygiene
-(`doctor`), setup (`init`), and the extension shim (`judge`). `groom --judge`
+(`doctor`), setup (`init`), and the extension shim (`jev`). `groom --triage`
 annotates its cold-parked/stale-active rows with a `groom-triage` judgment and
 is advisory only: judging runs after the scan, so it never reaches a move.
-`nudge --judge` adds a second Stop-hook line when `capture-worthy` finds a
+`nudge` adds a second Stop-hook line when `capture-worthy` finds a
 durable decision/root cause in the transcript tail. `search --rerank` reorders
 content hits (never curated rows) by the extension's `rerank` score; any
-failure prints plain ripgrep order. `doctor --judge` adds a `DRIFT` section
-from the `index-drift` judge (Agent-Index rows that no longer describe their
+failure prints plain ripgrep order. `doctor --drift` adds a `DRIFT` section
+from the `index-drift` set (Agent-Index rows that no longer describe their
 note).
 
 **Adding usage lines? Bump the `sed` range.** The usage block is printed by a
@@ -126,15 +126,15 @@ Full wiring examples for both harnesses, and how to customize the printed
 `directive_file` line: [docs/hooks.md](docs/hooks.md). Never change
 `cmd_status`/`cmd_sessions` to error on a missing vault — that contract is
 load-bearing for every downstream hook config. `nudge` (Stop hook) holds the
-same contract, and `nudge --judge` keeps it on every judge failure path: it
+same contract, and `nudge` keeps it on every Jev failure path: it
 prints nothing extra and exits `0`.
 
 ## The extension model
 
 **Core opens no socket.** `./vaultmem` never makes a network call and never gains
 a dependency; anything that needs either lives in an extension, a separate
-executable under `ext/<name>/vaultmem-<name>`. `judge` is the only one, and
-`judge` is the only dispatch word extensions take: do not add git-style "any
+executable under `ext/<name>/vaultmem-<name>`. `jev` is the only one, and
+`jev` is the only dispatch word extensions take: do not add git-style "any
 `vaultmem-<x>` on `$PATH` is a subcommand", because search is the default
 dispatch case and that makes every query ambiguous.
 
@@ -145,29 +145,34 @@ dispatch case and that makes every query ambiguous.
   exit 3. It exports `VAULTMEM_BIN` (absolute, symlink-resolved) and
   `VAULTMEM_CONFIG`; the extension reads vault data only by calling
   `"$VAULTMEM_BIN"`, never by parsing the registry.
-- Args after `judge` pass to the extension verbatim: the arg loop stops parsing
+- Args after `jev` pass to the extension verbatim: the arg loop stops parsing
   core flags (`--vault`, `--format`, `-n`, `-h`) once the first positional is
-  `judge`.
-- `_judge <judge-name> <vault-id> [args]` is the helper integrated commands
+  `jev`.
+- `_jev <set-name> <vault-id> [args]` is the helper integrated commands
   will call (no caller yet). State on stdin. It returns 3 **without forking**
-  when `[ext.judge] enabled` is not `true` or the vault lacks `judge = true`, so
-  a disabled judge costs a hook nothing. Callers treat anything but 0/1/2 as
-  "no opinion" and print what they print today. The undocumented `_judge`
+  when `[ext.jev] enabled` is not `true` or the vault lacks `jev = true`, so
+  a disabled Jev costs a hook nothing. Callers treat anything but 0/1/2 as
+  "no opinion" and print what they print today. The undocumented `_jev`
   dispatch word exists only so bats can reach the helper.
-- **`vaultmem judge config` is a frozen contract, answered by core**, never
+- **`vaultmem jev config` is a frozen contract, answered by core**, never
   forwarded. One line each, values unquoted, defaults filled in, in this order:
-  `ext.judge.enabled`, `.model`, `.base_url`, `.zdr`, `.timeout_ms`,
-  `.key_file` (`~` expanded), `.log`, `.rerank`, `.hook_judges`, then any other
-  `[ext.judge]` key in file order, then `vault.<id>.judge=true|false` for every
+  `ext.jev.enabled`, `.model`, `.base_url`, `.zdr`, `.timeout_ms`,
+  `.key_file` (`~` expanded), `.log`, `.rerank`, `.hooks`, then any other
+  `[ext.jev]` key in file order, then `vault.<id>.jev=true|false` for every
   registry vault with a path. It must work with no config file and no vault
-  (`judge` is in the pre-dispatch allowlist). The extension's tests stub
+  (`jev` is in the pre-dispatch allowlist). The extension's tests stub
   `VAULTMEM_BIN` with a script printing this format, so changing it breaks the
   extension silently. A bats test pins it byte for byte.
 - Core lints `[ext.<name>]` for subset shape only; key names belong to the
-  extension (`vaultmem judge doctor`). `[vault.<id>] judge` must be a bare
-  boolean.
+  extension (`vaultmem jev doctor`). `[vault.<id>] jev` must be a bare boolean.
+- The pre-jev names (`vaultmem judge`, `groom/doctor/nudge --judge`,
+  `[ext.judge]`, `[vault.<id>] judge`, `hook_judges`, `calibration --judge`) are
+  accepted until the next breaking release and each print one stderr line naming the replacement.
+  Hook paths keep stdout untouched, and `doctor` reports a deprecated key as a
+  `WARN` without moving its exit code. The old user-override dir and log path are
+  not migrated; see the CHANGELOG migration table.
 
-Design and rationale: [docs/design/judge-extension.md](docs/design/judge-extension.md).
+Design and rationale: [docs/design/jev-extension.md](docs/design/jev-extension.md).
 
 ## Skills → Claude Code plugin
 
@@ -191,8 +196,8 @@ version-locked to the CLI: [docs/plugin.md](docs/plugin.md).
   `PATH` (the command above) + `./tests/bash32-lint.sh`. `BASH=/bin/bash bats …`
   does nothing: bash resets `$BASH` at startup, so the suite still runs on
   bash 5. See [docs/development.md](docs/development.md).
-- **`doctor --judge` is informational and must never affect the exit code.**
-  `DRIFT` rows print under their own heading; `doctor --judge` exits exactly
+- **`doctor --drift` is informational and must never affect the exit code.**
+  `DRIFT` rows print under their own heading; `doctor --drift` exits exactly
   what `doctor` exits, so a probabilistic lint never breaks CI or a hook.
 - **`shellcheck` disables at the top of `vaultmem` are load-bearing, not
   boilerplate** — SC2016 (backticks in the usage/help text are literal, not
@@ -226,7 +231,7 @@ version-locked to the CLI: [docs/plugin.md](docs/plugin.md).
 | SessionStart hook wiring (Claude Code + Codex), directive customization | [docs/hooks.md](docs/hooks.md) |
 | Claude Code plugin packaging, skill discovery, version sync | [docs/plugin.md](docs/plugin.md) |
 | Install paths, quickstart, full command reference, design rationale | [README.md](README.md) |
-| Judge extension: setup, egress rules, judge files, exit codes | [docs/judge.md](docs/judge.md) |
-| Judge extension design, gateway findings, build order | [docs/design/judge-extension.md](docs/design/judge-extension.md) |
+| Jev extension: setup, egress rules, set files, exit codes | [docs/jev.md](docs/jev.md) |
+| Jev extension design, gateway findings, build order | [docs/design/jev-extension.md](docs/design/jev-extension.md) |
 | Skill content itself (workflows, conventions each skill teaches) | `skills/<name>/SKILL.md` |
 | bash 3.2 floor, banned constructs, portable substitutes, test conventions | [docs/development.md](docs/development.md) |

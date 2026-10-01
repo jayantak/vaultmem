@@ -1,28 +1,28 @@
 #!/usr/bin/env bash
-# vaultmem-judge: the `judge` extension: typed decisions about vault content
+# vaultmem-jev: the `jev` extension: typed decisions about vault content
 # from an evaluation model behind Vercel AI Gateway. All of vaultmem's HTTP
 # lives here; the core script never opens a socket.
 #
 # Usage:
-#   vaultmem-judge <name> [--vault <id>] [--gate <question>] [--format json|tsv]
+#   vaultmem-jev ask <name> [--vault <id>] [--gate <question>] [--format json|tsv]
 #                         [--subject <text>]        state on stdin
-#   vaultmem-judge list                 judges available (user overrides shipped)
-#   vaultmem-judge doctor [--live]      config, key, and judge-file checks
-#   vaultmem-judge log [-n N]           tail the decision log (default 20 rows)
-#   vaultmem-judge feedback <id> right|wrong    mark a logged decision (offline)
-#   vaultmem-judge calibration [--judge <name>] [--format tsv|json]
+#   vaultmem-jev list                 sets available (user overrides shipped)
+#   vaultmem-jev doctor [--live]      config, key, and set-file checks
+#   vaultmem-jev log [-n N]           tail the decision log (default 20 rows)
+#   vaultmem-jev feedback <id> right|wrong    mark a logged decision (offline)
+#   vaultmem-jev calibration [--set <name>] [--format tsv|json]
 #                                       accuracy per confidence bucket (offline)
-#   vaultmem-judge route [--subject <text>]     vault, folder, and MOC for a
+#   vaultmem-jev route [--subject <text>]     vault, folder, and MOC for a
 #                                       summary on stdin (consenting vaults only)
-#   vaultmem-judge dupes [--vault <id>] [--subject <text>]
+#   vaultmem-jev dupes [--vault <id>] [--subject <text>]
 #                                       notes that already cover a summary on stdin
-#   vaultmem-judge rerank --vault <id> [--vault <id>...]
+#   vaultmem-jev rerank --vault <id> [--vault <id>...]
 #                                       score search candidates (JSON on stdin) 0 to 3
-#   vaultmem-judge bench [--fixture <tsv>] [--vault <id>] [-n N] [--format tsv|json]
+#   vaultmem-jev bench [--fixture <tsv>] [--vault <id>] [-n N] [--format tsv|json]
 #                                       search order vs reranked order on a fixture
-#   vaultmem-judge index-drift --vault <id>   is each Agent Index row (JSON on
+#   vaultmem-jev index-drift --vault <id>   is each Agent Index row (JSON on
 #                                       stdin, at most 5) accurate for its note
-#   vaultmem-judge prompt               UserPromptSubmit hook: one line on a
+#   vaultmem-jev prompt               UserPromptSubmit hook: one line on a
 #                                       confident "why" question, else nothing
 #
 # Exit codes (the contract core and hooks rely on):
@@ -34,16 +34,16 @@
 #   64  usage error; rerank, index-drift: malformed stdin
 #   prompt exits 0 in every case but a usage error.
 #
-# Config is never parsed here. It comes from `"$VAULTMEM_BIN" judge config`,
-# which prints `ext.judge.<key>=<value>` lines, then `vault.<id>.judge=true|false`.
+# Config is never parsed here. It comes from `"$VAULTMEM_BIN" jev config`,
+# which prints `ext.jev.<key>=<value>` lines, then `vault.<id>.jev=true|false`.
 #
 # bash 3.2 floor applies (see docs/development.md). Deps: curl, jq.
-# Reference: docs/judge.md. Design: docs/design/judge-extension.md.
+# Reference: docs/jev.md. Design: docs/design/jev-extension.md.
 set -uo pipefail
 
-PROG="vaultmem-judge"
-KNOWN_KEYS="enabled model base_url zdr timeout_ms key_file log rerank hook_judges"
-LOG_MAX_BYTES_DEFAULT=5242880 # 5 MiB; one rotated generation (judge.jsonl.1)
+PROG="vaultmem-jev"
+KNOWN_KEYS="enabled model base_url zdr timeout_ms key_file log rerank hooks"
+LOG_MAX_BYTES_DEFAULT=5242880 # 5 MiB; one rotated generation (jev.jsonl.1)
 LIVE_STATE="The build failed with exit code 1."
 
 TMPD=""
@@ -55,9 +55,9 @@ trap cleanup EXIT
 
 usage_err() {
 	printf '%s: %s\n' "$PROG" "$1" >&2
-	printf 'usage: %s <name> [--vault <id>] [--gate <question>] [--format json|tsv]\n' "$PROG" >&2
+	printf 'usage: %s ask <name> [--vault <id>] [--gate <question>] [--format json|tsv]\n' "$PROG" >&2
 	printf '       %s list | doctor [--live] | log [-n N]\n' "$PROG" >&2
-	printf '       %s feedback <id> right|wrong | calibration [--judge <name>]\n' "$PROG" >&2
+	printf '       %s feedback <id> right|wrong | calibration [--set <name>]\n' "$PROG" >&2
 	printf '       %s route [--subject <text>] | dupes [--vault <id>] [--subject <text>]\n' "$PROG" >&2
 	printf '       %s rerank --vault <id> [--vault <id>...] | bench [--fixture <tsv>] [--vault <id>] [-n N]\n' "$PROG" >&2
 	printf '       %s index-drift --vault <id> | prompt\n' "$PROG" >&2
@@ -75,7 +75,7 @@ unavailable() {
 
 mktmp() {
 	[ -n "$TMPD" ] && return 0
-	TMPD=$(mktemp -d "${TMPDIR:-/tmp}/vaultmem-judge.XXXXXX") || return 1
+	TMPD=$(mktemp -d "${TMPDIR:-/tmp}/vaultmem-jev.XXXXXX") || return 1
 	chmod 700 "$TMPD"
 }
 
@@ -93,9 +93,9 @@ self_dir() {
 	cd -P "$(dirname "$src")" && pwd
 }
 
-SHIPPED_DIR="$(self_dir)/judges"
-USER_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/vaultmem/judges"
-LOG_FILE="${XDG_STATE_HOME:-$HOME/.local/state}/vaultmem/judge.jsonl"
+SHIPPED_DIR="$(self_dir)/sets"
+USER_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/vaultmem/jev"
+LOG_FILE="${XDG_STATE_HOME:-$HOME/.local/state}/vaultmem/jev.jsonl"
 
 valid_name() {
 	case "$1" in
@@ -118,7 +118,7 @@ load_config() {
 	local bin
 	bin=$(vaultmem_bin) || return 1
 	[ -n "$bin" ] || return 1
-	CFG=$("$bin" judge config 2>/dev/null) || return 1
+	CFG=$("$bin" jev config 2>/dev/null) || return 1
 	[ -n "$CFG" ]
 }
 
@@ -128,11 +128,11 @@ cfg_raw() {
 		{ i = index($0, "="); if (i && substr($0, 1, i - 1) == k) { print substr($0, i + 1); exit } }'
 }
 
-# cfg <key> <default>: an [ext.judge] key. Core fills defaults; these are a
+# cfg <key> <default>: an [ext.jev] key. Core fills defaults; these are a
 # second line of defense, and the conservative ones (enabled=false, zdr=true).
 cfg() {
 	local v
-	v=$(cfg_raw "ext.judge.$1")
+	v=$(cfg_raw "ext.jev.$1")
 	printf '%s\n' "${v:-$2}"
 }
 
@@ -194,9 +194,9 @@ load_key() {
 	return 0
 }
 
-# --- judge files -----------------------------------------------------------------
+# --- set files -----------------------------------------------------------------
 
-judge_path() {
+set_path() {
 	if [ -f "$USER_DIR/$1.json" ]; then
 		printf '%s\n' "$USER_DIR/$1.json"
 	elif [ -f "$SHIPPED_DIR/$1.json" ]; then
@@ -206,8 +206,8 @@ judge_path() {
 	fi
 }
 
-# Prints one problem per line; empty output means the judge file is valid.
-judge_problems() {
+# Prints one problem per line; empty output means the set file is valid.
+set_problems() {
 	if ! jq -e . "$1" >/dev/null 2>&1; then
 		printf 'not valid JSON\n'
 		return 0
@@ -257,7 +257,7 @@ log_append() {
 	local dir max size
 	dir=$(dirname "$LOG_FILE")
 	mkdir -p "$dir" 2>/dev/null || return 0
-	max="${VAULTMEM_JUDGE_LOG_MAX_BYTES:-$LOG_MAX_BYTES_DEFAULT}"
+	max="${VAULTMEM_JEV_LOG_MAX_BYTES:-$LOG_MAX_BYTES_DEFAULT}"
 	case "$max" in
 	"" | *[!0-9]*) max=$LOG_MAX_BYTES_DEFAULT ;;
 	esac
@@ -304,7 +304,7 @@ gateway_post() {
 }
 
 # --- the shared request path ------------------------------------------------------
-# Every call that sends state (a named judge, `route`, `dupes`) runs the same
+# Every call that sends state (a named set, `route`, `dupes`) runs the same
 # checks, the same request, and the same log row. The caller does its own
 # consent check first; nothing here decides which vault may send.
 
@@ -345,7 +345,7 @@ fit_state() {
 	fi
 }
 
-# evaluate <judge> <vault> <subject> <state-file> <questions-file> <required> <resp-file>
+# evaluate <set> <vault> <subject> <state-file> <questions-file> <required> <resp-file>
 # POSTs one request, validates the response, and logs one row. <required> is a
 # space-separated list of question names the answers must include. An empty
 # <vault> logs the response's `vault` choice (route's multi-vault request).
@@ -402,11 +402,11 @@ evaluate() {
 	if [ -n "$err_type" ]; then
 		[ -n "$KEY" ] && err_msg="${err_msg//"$KEY"/[redacted]}"
 		if [ "$log_on" = "true" ]; then
-			log_append "$(jq -nc --arg id "$id" --arg ts "$ts" --arg judge "$name" --arg vault "$vault" \
+			log_append "$(jq -nc --arg id "$id" --arg ts "$ts" --arg set "$name" --arg vault "$vault" \
 				--arg subject "$subject" --arg model "$model" --arg sha "$sha" \
 				--argjson truncated "$TRUNCATED" --argjson latency "$LATENCY_MS" --argjson http "$HTTP_CODE" \
 				--arg etype "$err_type" --arg emsg "$err_msg" '
-				{ id: $id, ts: $ts, judge: $judge,
+				{ id: $id, ts: $ts, set: $set,
 				  vault: (if $vault == "" then null else $vault end),
 				  subject: (if $subject == "" then null else $subject end),
 				  model: $model, state_sha256: $sha, truncated: $truncated, answers: null,
@@ -418,10 +418,10 @@ evaluate() {
 	fi
 
 	if [ "$log_on" = "true" ]; then
-		log_append "$(jq -c --arg id "$id" --arg ts "$ts" --arg judge "$name" --arg vault "$vault" \
+		log_append "$(jq -c --arg id "$id" --arg ts "$ts" --arg set "$name" --arg vault "$vault" \
 			--arg subject "$subject" --arg model "$model" --arg sha "$sha" \
 			--argjson truncated "$TRUNCATED" --argjson latency "$LATENCY_MS" --argjson http "$HTTP_CODE" '
-			{ id: $id, ts: $ts, judge: $judge,
+			{ id: $id, ts: $ts, set: $set,
 			  vault: (if $vault != "" then $vault else (.answers.vault.choice // null) end),
 			  subject: (if $subject == "" then null else $subject end),
 			  model: (.model // $model), state_sha256: $sha, truncated: $truncated,
@@ -434,9 +434,9 @@ evaluate() {
 	CALL_ID="$id"
 }
 
-# consenting_vaults: registry ids with judge = true, one per line, in config order.
+# consenting_vaults: registry ids with jev = true, one per line, in config order.
 consenting_vaults() {
-	printf '%s\n' "$CFG" | awk '/^vault\.[^=]*\.judge=true$/ { s = $0; sub(/^vault\./, "", s); sub(/\.judge=true$/, "", s); print s }'
+	printf '%s\n' "$CFG" | awk '/^vault\.[^=]*\.jev=true$/ { s = $0; sub(/^vault\./, "", s); sub(/\.jev=true$/, "", s); print s }'
 }
 
 # egress_gate_vault <vault-or-empty>: the standalone consent check. Sets VAULT;
@@ -446,18 +446,18 @@ VAULT=""
 egress_gate_vault() {
 	VAULT="$1"
 	load_config || unavailable "config not available (is VAULTMEM_BIN set?)"
-	[ "$(cfg enabled false)" = "true" ] || unavailable "[ext.judge] enabled is not true"
+	[ "$(cfg enabled false)" = "true" ] || unavailable "[ext.jev] enabled is not true"
 	if [ -z "$VAULT" ]; then
 		mktmp || unavailable "cannot create a temp dir"
 		VAULT=$(resolve_vault) || unavailable "no vault id resolved; pass --vault <id>"
 	fi
-	[ "$(cfg_raw "vault.$VAULT.judge")" = "true" ] ||
-		unavailable "vault $VAULT has not consented to egress (judge = true)"
+	[ "$(cfg_raw "vault.$VAULT.jev")" = "true" ] ||
+		unavailable "vault $VAULT has not consented to egress (jev = true)"
 }
 
 # --- subcommand: <name> ----------------------------------------------------------
 
-cmd_judge() {
+cmd_jev_ask() {
 	local name="$1" vault="" gate="" format="json" subject=""
 	shift
 	while [ $# -gt 0 ]; do
@@ -475,22 +475,22 @@ cmd_judge() {
 		*) usage_err "unknown argument: $1" ;;
 		esac
 	done
-	valid_name "$name" || usage_err "invalid judge name: $name"
+	valid_name "$name" || usage_err "invalid set name: $name"
 	case "$format" in
 	json | tsv) ;;
 	*) usage_err "--format must be json or tsv" ;;
 	esac
 
 	local jfile problems gate_type
-	jfile=$(judge_path "$name") || usage_err "no such judge: $name"
+	jfile=$(set_path "$name") || usage_err "no such set: $name"
 	command -v jq >/dev/null 2>&1 || unavailable "jq is not installed"
-	problems=$(judge_problems "$jfile")
-	[ -z "$problems" ] || unavailable "judge file $jfile is invalid: $(printf '%s' "$problems" | head -n 1)"
+	problems=$(set_problems "$jfile")
+	[ -z "$problems" ] || unavailable "set file $jfile is invalid: $(printf '%s' "$problems" | head -n 1)"
 	if [ -n "$gate" ]; then
 		gate_type=$(jq -r --arg q "$gate" '.questions[$q].type // ""' "$jfile")
 		case "$gate_type" in
 		boolean | choice) ;;
-		"") usage_err "--gate: judge $name has no question named $gate" ;;
+		"") usage_err "--gate: set $name has no question named $gate" ;;
 		*) usage_err "--gate: question $gate is a $gate_type question; only boolean and choice can gate" ;;
 		esac
 	fi
@@ -506,16 +506,16 @@ cmd_judge() {
 	fit_state "$raw" "$state" "$(jq -r '.max_state_bytes // 24000' "$jfile")" "$(jq -r '.truncate // "head"' "$jfile")"
 	# --gate picks the exit code; every question is still sent, so a caller
 	# gating on one answer can read the others (nudge reads `kind`).
-	jq '.questions' "$jfile" >"$questions" || unavailable "could not read the judge's questions"
+	jq '.questions' "$jfile" >"$questions" || unavailable "could not read the set's questions"
 	evaluate "$name" "$vault" "$subject" "$state" "$questions" "$gate" "$resp"
 	local id="$CALL_ID"
 
-	# Verdict: thresholds come from the judge file. min_confidence compares the
+	# Verdict: thresholds come from the set file. min_confidence compares the
 	# top choice's probability, not the gateway's `confidence` field.
 	local verdict=""
 	if [ -n "$gate" ]; then
-		verdict=$(jq -r --arg q "$gate" --slurpfile judge "$jfile" '
-			($judge[0].thresholds[$q] // {}) as $t
+		verdict=$(jq -r --arg q "$gate" --slurpfile set "$jfile" '
+			($set[0].thresholds[$q] // {}) as $t
 			| .answers[$q] as $a
 			| if $a.type == "boolean" then
 			    (if $a.probability >= ($t.yes // 0.85) then "yes"
@@ -528,9 +528,9 @@ cmd_judge() {
 	fi
 
 	if [ "$format" = "tsv" ]; then
-		jq -r --slurpfile judge "$jfile" '
+		jq -r --slurpfile set "$jfile" '
 			.answers | to_entries[] | .key as $q | .value as $a
-			| ($judge[0].thresholds[$q] // {}) as $t
+			| ($set[0].thresholds[$q] // {}) as $t
 			| if $a.type == "boolean" then
 			    [$q, "boolean",
 			     (if $a.probability >= ($t.yes // 0.85) then "yes"
@@ -540,8 +540,8 @@ cmd_judge() {
 			  else [$q, "score", $a.score, ""] end
 			| @tsv' "$resp"
 	else
-		jq -c --arg id "$id" --arg judge "$name" --arg gate "$gate" --arg verdict "$verdict" '
-			{ id: $id, judge: $judge, answers: .answers }
+		jq -c --arg id "$id" --arg set "$name" --arg gate "$gate" --arg verdict "$verdict" '
+			{ id: $id, set: $set, answers: .answers }
 			+ (if $gate == "" then {} else { gate: { question: $gate, verdict: $verdict } } end)' "$resp"
 	fi
 
@@ -624,17 +624,17 @@ cmd_route() {
 		esac
 	done
 	local jfile problems
-	jfile=$(judge_path route) || unavailable "judge file route.json not found"
+	jfile=$(set_path route) || unavailable "set file route.json not found"
 	command -v jq >/dev/null 2>&1 || unavailable "jq is not installed"
-	problems=$(judge_problems "$jfile")
-	[ -z "$problems" ] || unavailable "judge file $jfile is invalid: $(printf '%s' "$problems" | head -n 1)"
+	problems=$(set_problems "$jfile")
+	[ -z "$problems" ] || unavailable "set file $jfile is invalid: $(printf '%s' "$problems" | head -n 1)"
 
 	# Egress gate: only consenting vaults are ever named in, or receive, a request.
 	load_config || unavailable "config not available (is VAULTMEM_BIN set?)"
-	[ "$(cfg enabled false)" = "true" ] || unavailable "[ext.judge] enabled is not true"
+	[ "$(cfg enabled false)" = "true" ] || unavailable "[ext.jev] enabled is not true"
 	local vaults nv
 	vaults=$(consenting_vaults)
-	[ -n "$vaults" ] || unavailable "no vault has consented to egress (judge = true)"
+	[ -n "$vaults" ] || unavailable "no vault has consented to egress (jev = true)"
 	nv=$(printf '%s\n' "$vaults" | grep -c .)
 	egress_ready
 
@@ -753,10 +753,10 @@ cmd_dupes() {
 		esac
 	done
 	local jfile problems
-	jfile=$(judge_path dupes) || unavailable "judge file dupes.json not found"
+	jfile=$(set_path dupes) || unavailable "set file dupes.json not found"
 	command -v jq >/dev/null 2>&1 || unavailable "jq is not installed"
-	problems=$(judge_problems "$jfile")
-	[ -z "$problems" ] || unavailable "judge file $jfile is invalid: $(printf '%s' "$problems" | head -n 1)"
+	problems=$(set_problems "$jfile")
+	[ -z "$problems" ] || unavailable "set file $jfile is invalid: $(printf '%s' "$problems" | head -n 1)"
 
 	egress_gate_vault "$vault"
 	vault="$VAULT"
@@ -853,10 +853,10 @@ cmd_rerank() {
 	done
 	[ -n "$given" ] || usage_err "rerank needs at least one --vault <id>"
 	local jfile problems
-	jfile=$(judge_path rerank) || unavailable "judge file rerank.json not found"
+	jfile=$(set_path rerank) || unavailable "set file rerank.json not found"
 	command -v jq >/dev/null 2>&1 || unavailable "jq is not installed"
-	problems=$(judge_problems "$jfile")
-	[ -z "$problems" ] || unavailable "judge file $jfile is invalid: $(printf '%s' "$problems" | head -n 1)"
+	problems=$(set_problems "$jfile")
+	[ -z "$problems" ] || unavailable "set file $jfile is invalid: $(printf '%s' "$problems" | head -n 1)"
 	mktmp || unavailable "cannot create a temp dir"
 
 	local in="$TMPD/rerank-in.json" kept="$TMPD/rerank-kept.json"
@@ -876,17 +876,17 @@ cmd_rerank() {
 	# Egress gate. A --vault counts only when it has consented; a candidate counts
 	# only when its vault is one of those.
 	load_config || unavailable "config not available (is VAULTMEM_BIN set?)"
-	[ "$(cfg enabled false)" = "true" ] || unavailable "[ext.judge] enabled is not true"
+	[ "$(cfg enabled false)" = "true" ] || unavailable "[ext.jev] enabled is not true"
 	local ok=""
 	while IFS= read -r v; do
 		[ -n "$v" ] || continue
-		[ "$(cfg_raw "vault.$v.judge")" = "true" ] || continue
+		[ "$(cfg_raw "vault.$v.jev")" = "true" ] || continue
 		case $'\n'"$ok" in
 		*$'\n'"$v"$'\n'*) ;;
 		*) ok="$ok$v"$'\n' ;;
 		esac
 	done <<<"$given"
-	[ -n "$ok" ] || unavailable "no --vault has consented to egress (judge = true)"
+	[ -n "$ok" ] || unavailable "no --vault has consented to egress (jev = true)"
 	jq --arg ok "$ok" '($ok | split("\n") | map(select(length > 0))) as $ok
 		| .candidates |= map(select(.vault as $v | any($ok[]; . == $v)))' "$in" >"$kept" ||
 		unavailable "could not filter the candidates"
@@ -1121,7 +1121,7 @@ cmd_bench() {
 # --- subcommand: index-drift -------------------------------------------------------
 
 # Does each Agent Index row still describe the note it points at? The primitive
-# under core's `doctor --judge`. Rows JSON on stdin, one boolean question per row
+# under core's `doctor --drift`. Rows JSON on stdin, one boolean question per row
 # id, `{id, answers: {<row-id>: {probability}}}` on stdout, where probability is
 # the chance the row is accurate. Core applies the `no` threshold itself.
 INDEX_DRIFT_MAX=5
@@ -1138,10 +1138,10 @@ cmd_index_drift() {
 		esac
 	done
 	local jfile problems
-	jfile=$(judge_path index-drift) || unavailable "judge file index-drift.json not found"
+	jfile=$(set_path index-drift) || unavailable "set file index-drift.json not found"
 	command -v jq >/dev/null 2>&1 || unavailable "jq is not installed"
-	problems=$(judge_problems "$jfile")
-	[ -z "$problems" ] || unavailable "judge file $jfile is invalid: $(printf '%s' "$problems" | head -n 1)"
+	problems=$(set_problems "$jfile")
+	[ -z "$problems" ] || unavailable "set file $jfile is invalid: $(printf '%s' "$problems" | head -n 1)"
 	mktmp || unavailable "cannot create a temp dir"
 
 	local in="$TMPD/drift-in.json"
@@ -1214,9 +1214,9 @@ prompt_skip() {
 	exit 0
 }
 
-# hook_judge_listed <name>: is <name> in [ext.judge] hook_judges (a comma list)?
-hook_judge_listed() {
-	case ",$(cfg hook_judges "" | tr -d '[:space:]')," in
+# hook_jev_listed <name>: is <name> in [ext.jev] hooks (a comma list)?
+hook_jev_listed() {
+	case ",$(cfg hooks "" | tr -d '[:space:]')," in
 	*,"$1",*) return 0 ;;
 	esac
 	return 1
@@ -1231,11 +1231,11 @@ cmd_prompt() {
 
 	# Gate: every check that can refuse runs before any network code.
 	load_config || prompt_skip "config not available (is VAULTMEM_BIN set?)"
-	[ "$(cfg enabled false)" = "true" ] || prompt_skip "[ext.judge] enabled is not true"
-	hook_judge_listed prompt || prompt_skip "prompt is not in [ext.judge] hook_judges"
+	[ "$(cfg enabled false)" = "true" ] || prompt_skip "[ext.jev] enabled is not true"
+	hook_jev_listed prompt || prompt_skip "prompt is not in [ext.jev] hooks"
 	vault=$(resolve_vault) || prompt_skip "no confident vault for $PWD"
-	[ "$(cfg_raw "vault.$vault.judge")" = "true" ] ||
-		prompt_skip "vault $vault has not consented to egress (judge = true)"
+	[ "$(cfg_raw "vault.$vault.jev")" = "true" ] ||
+		prompt_skip "vault $vault has not consented to egress (jev = true)"
 
 	# A JSON object is the hook payload: only its `prompt` field is sent, never
 	# the session id, paths, or anything else in it. Anything else is raw text.
@@ -1248,7 +1248,7 @@ cmd_prompt() {
 
 	local err=/dev/null rc
 	[ "${VAULTMEM_VERBOSE:-}" = "1" ] && err=/dev/stderr
-	(cmd_judge prompt --vault "$vault" --gate asks_why --subject prompt) <"$text" >/dev/null 2>"$err"
+	(cmd_jev_ask prompt --vault "$vault" --gate asks_why --subject prompt) <"$text" >/dev/null 2>"$err"
 	rc=$?
 	[ "$rc" -eq 0 ] || prompt_skip "no confident yes (exit $rc)"
 	printf '%s\n' "$PROMPT_LINE"
@@ -1322,13 +1322,13 @@ cmd_feedback() {
 	esac
 	command -v jq >/dev/null 2>&1 || unavailable "jq is not installed"
 
-	# The id must name a decision row. Feedback rows carry no `judge` field, so
-	# they can never satisfy this and feedback on feedback is rejected.
+	# The id must name a decision row. Feedback rows carry no `set` field (nor the
+	# pre-jev `judge`), so feedback on feedback is rejected.
 	local files found=""
 	files=$(log_files)
 	if [ -n "$files" ]; then
 		found=$(printf '%s\n' "$files" | tr '\n' '\0' | xargs -0 cat 2>/dev/null |
-			jq -r --arg id "$id" -s 'map(select(.id == $id and has("judge") and (.feedback | type) != "string")) | length' 2>/dev/null)
+			jq -r --arg id "$id" -s 'map(select(.id == $id and (has("set") or has("judge")) and (.feedback | type) != "string")) | length' 2>/dev/null)
 	fi
 	case "$found" in
 	"" | 0)
@@ -1347,21 +1347,25 @@ cmd_feedback() {
 
 # --- subcommand: calibration ---------------------------------------------------------
 
-# Buckets the judged probability of each decision row that has feedback, so the
+# Buckets the stated probability of each decision row that has feedback, so the
 # owner can see whether a stated 0.9 really means 0.9 on their own data.
 #
-# Which probability: the top choice answer's probability when the judge has a
+# Which probability: the top choice answer's probability when the set has a
 # choice question, else the highest boolean probability. That is the number a
-# caller acts on (`groom --judge` gates on the choice), so it is the one worth
+# caller acts on (`groom --triage` gates on the choice), so it is the one worth
 # calibrating.
 cmd_calibration() {
-	local judge_filter="" format="tsv"
+	local set_filter="" format="tsv"
 	while [ $# -gt 0 ]; do
 		case "$1" in
-		--judge | --format)
+		--set | --judge | --format)
 			[ $# -ge 2 ] || usage_err "$1 needs a value"
 			case "$1" in
-			--judge) judge_filter="$2" ;;
+			--judge)
+				printf '%s: --judge is deprecated; use --set\n' "$PROG" >&2
+				set_filter="$2"
+				;;
+			--set) set_filter="$2" ;;
 			--format) format="$2" ;;
 			esac
 			shift 2
@@ -1387,7 +1391,7 @@ cmd_calibration() {
 	# feedback for an id is the one that counts.
 	local out
 	out=$(printf '%s\n' "$files" | tr '\n' '\0' | xargs -0 cat 2>/dev/null | jq -s -r \
-		--arg judge "$judge_filter" --arg format "$format" '
+		--arg set "$set_filter" --arg format "$format" '
 		def prob:
 		  .answers // {} | to_entries
 		  | ((map(select(.value.type == "choice"))
@@ -1403,9 +1407,10 @@ cmd_calibration() {
 		  else null end;
 
 		# Later rows overwrite earlier ones, so the newest feedback for an id wins.
-		(reduce (.[] | select(has("judge")) | select($judge == "" or .judge == $judge)) as $d
+		(reduce (.[] | (.set //= .judge) | select(.set != null)
+		         | select($set == "" or .set == $set)) as $d
 		 ({}; .[$d.id] = $d)) as $decisions
-		| (reduce (.[] | select(has("judge") | not)
+		| (reduce (.[] | select((has("set") or has("judge")) | not)
 		           | select(.feedback == "right" or .feedback == "wrong")) as $f
 		   ({}; .[$f.id] = $f)) as $feedback
 		| [ $feedback | to_entries[]
@@ -1436,6 +1441,26 @@ cmd_calibration() {
 DOC_FAIL=0
 doc_ok() { printf 'ok     %s\n' "$1"; }
 doc_note() { printf 'note   %s\n' "$1"; }
+# Advisory: never touches DOC_FAIL, so a leftover pre-jev install cannot fail a
+# doctor run or a CI job.
+doc_warn() { printf 'WARN   %s\n' "$1"; }
+
+# A pre-jev install can leave ext/judge beside (or instead of) ext/jev in any of
+# the three resolution roots. Resolution order is unchanged; this only says so.
+doctor_stale_ext() {
+	local root
+	for root in \
+		"${VAULTMEM_EXT_DIR:-}" \
+		"${XDG_DATA_HOME:-$HOME/.local/share}/vaultmem/ext" \
+		"$(self_dir)/.."; do
+		[ -n "$root" ] || continue
+		if [ -e "$root/judge" ] && [ ! -e "$root/jev" ]; then
+			doc_warn "$root/judge is the pre-jev extension dir and $root/jev does not exist; re-run ./install.sh --ext jev"
+		elif [ -e "$root/judge" ]; then
+			doc_warn "$root/judge is a stale pre-jev extension dir; remove it (./install.sh --ext jev clears the symlink form)"
+		fi
+	done
+}
 doc_err() {
 	local msg="$1"
 	[ -n "$KEY" ] && msg="${msg//"$KEY"/[redacted]}"
@@ -1453,6 +1478,8 @@ cmd_doctor() {
 		shift
 	done
 
+	doctor_stale_ext
+
 	local tool
 	for tool in curl jq; do
 		if command -v "$tool" >/dev/null 2>&1; then doc_ok "$tool found"; else doc_err "$tool is not installed"; fi
@@ -1461,11 +1488,11 @@ cmd_doctor() {
 
 	local enabled=false
 	if load_config; then
-		doc_ok "config read from \`$(vaultmem_bin) judge config\`"
+		doc_ok "config read from \`$(vaultmem_bin) jev config\`"
 		doctor_config
 		enabled=$(cfg enabled false)
 	else
-		doc_err "config not available: \`vaultmem judge config\` failed (is VAULTMEM_BIN set?)"
+		doc_err "config not available: \`vaultmem jev config\` failed (is VAULTMEM_BIN set?)"
 	fi
 
 	# A missing key only matters once the extension is switched on. A key file
@@ -1483,20 +1510,20 @@ cmd_doctor() {
 	for f in "$SHIPPED_DIR"/*.json "$USER_DIR"/*.json; do
 		[ -f "$f" ] || continue
 		count=$((count + 1))
-		problems=$(judge_problems "$f")
+		problems=$(set_problems "$f")
 		if [ -z "$problems" ]; then
-			doc_ok "judge file $f"
+			doc_ok "set file $f"
 		else
-			while IFS= read -r problem; do doc_err "judge file $f: $problem"; done <<<"$problems"
+			while IFS= read -r problem; do doc_err "set file $f: $problem"; done <<<"$problems"
 		fi
 	done
-	[ "$count" -gt 0 ] || doc_err "no judge files found in $SHIPPED_DIR"
+	[ "$count" -gt 0 ] || doc_err "no set files found in $SHIPPED_DIR"
 
 	if [ "$live" = "true" ]; then
 		if [ "$DOC_FAIL" -ne 0 ]; then
 			doc_err "--live skipped: fix the errors above first"
 		elif [ "$enabled" != "true" ]; then
-			doc_err "--live needs [ext.judge] enabled = true"
+			doc_err "--live needs [ext.jev] enabled = true"
 		else
 			doctor_live
 		fi
@@ -1504,63 +1531,63 @@ cmd_doctor() {
 	exit "$DOC_FAIL"
 }
 
-# Validates [ext.judge] key names and value shapes. Core lint checks TOML shape
+# Validates [ext.jev] key names and value shapes. Core lint checks TOML shape
 # only; key names are this extension's to own.
 doctor_config() {
 	local line key val known
 	while IFS= read -r line; do
 		case "$line" in
-		ext.judge.*=*) ;;
+		ext.jev.*=*) ;;
 		*) continue ;;
 		esac
 		key="${line%%=*}"
-		key="${key#ext.judge.}"
+		key="${key#ext.jev.}"
 		val="${line#*=}"
 		known=false
 		case " $KNOWN_KEYS " in
 		*" $key "*) known=true ;;
 		esac
 		if [ "$known" != "true" ]; then
-			doc_err "[ext.judge] unknown key: $key"
+			doc_err "[ext.jev] unknown key: $key"
 			continue
 		fi
 		case "$key" in
 		enabled | zdr | log | rerank)
 			case "$val" in
 			true | false) ;;
-			*) doc_err "[ext.judge] $key must be true or false (got: $val)" ;;
+			*) doc_err "[ext.jev] $key must be true or false (got: $val)" ;;
 			esac
 			;;
 		timeout_ms)
 			case "$val" in
-			"" | *[!0-9]* | 0) doc_err "[ext.judge] timeout_ms must be a positive integer (got: $val)" ;;
+			"" | *[!0-9]* | 0) doc_err "[ext.jev] timeout_ms must be a positive integer (got: $val)" ;;
 			esac
 			;;
 		base_url)
-			base_url_ok "$val" || doc_err "[ext.judge] base_url must be https, or http on a loopback host (got: $val)"
+			base_url_ok "$val" || doc_err "[ext.jev] base_url must be https, or http on a loopback host (got: $val)"
 			;;
 		model | key_file)
-			[ -n "$val" ] || doc_err "[ext.judge] $key must not be empty"
+			[ -n "$val" ] || doc_err "[ext.jev] $key must not be empty"
 			;;
-		hook_judges)
+		hooks)
 			case "$val" in
-			*[!A-Za-z0-9._,-]*) doc_err "[ext.judge] hook_judges must be a comma list of judge names (got: $val)" ;;
+			*[!A-Za-z0-9._,-]*) doc_err "[ext.jev] hooks must be a comma list of set names (got: $val)" ;;
 			esac
 			;;
 		esac
 	done <<<"$CFG"
-	[ "$DOC_FAIL" -eq 0 ] && doc_ok "[ext.judge] keys valid (enabled=$(cfg enabled false), zdr=$(cfg zdr true))"
+	[ "$DOC_FAIL" -eq 0 ] && doc_ok "[ext.jev] keys valid (enabled=$(cfg enabled false), zdr=$(cfg zdr true))"
 	local consenting
-	consenting=$(printf '%s\n' "$CFG" | awk -F= '/^vault\..*\.judge=true$/ { sub(/^vault\./, "", $1); sub(/\.judge$/, "", $1); printf "%s%s", s, $1; s = "," }')
-	doc_note "vaults with judge = true: ${consenting:-none}"
+	consenting=$(printf '%s\n' "$CFG" | awk -F= '/^vault\..*\.jev=true$/ { sub(/^vault\./, "", $1); sub(/\.jev$/, "", $1); printf "%s%s", s, $1; s = "," }')
+	doc_note "vaults with jev = true: ${consenting:-none}"
 }
 
 # One 1-question call with a fixed synthetic state. No vault content is sent,
 # so no vault consent is involved; `enabled` and a key are still required.
 doctor_live() {
 	local jfile zdr body resp released
-	jfile=$(judge_path smoke) || {
-		doc_err "--live: smoke judge file not found"
+	jfile=$(set_path smoke) || {
+		doc_err "--live: smoke set file not found"
 		return
 	}
 	mktmp || {
@@ -1571,9 +1598,9 @@ doctor_live() {
 	resp="$TMPD/live-resp.json"
 	zdr=$(cfg zdr true)
 	[ "$zdr" = "false" ] || zdr=true
-	jq -n --arg state "$LIVE_STATE" --slurpfile judge "$jfile" \
+	jq -n --arg state "$LIVE_STATE" --slurpfile set "$jfile" \
 		--arg model "$(cfg model "typesafe-ai/jev")" --argjson zdr "$zdr" '
-		{ model: $model, state: $state, questions: $judge[0].questions }
+		{ model: $model, state: $state, questions: $set[0].questions }
 		+ (if $zdr then { providerOptions: { gateway: { zeroDataRetention: true } } } else {} end)
 		' >"$body"
 	gateway_post "$body" "$resp"
@@ -1593,7 +1620,7 @@ doctor_live() {
 
 # --- dispatch --------------------------------------------------------------------
 
-[ $# -gt 0 ] || usage_err "missing judge name or subcommand"
+[ $# -gt 0 ] || usage_err "missing set name or subcommand"
 case "$1" in
 -h | --help)
 	sed -n '2,41p' "$0" | sed 's/^# \{0,1\}//'
@@ -1643,6 +1670,11 @@ prompt)
 	shift
 	cmd_prompt "$@"
 	;;
+ask)
+	shift
+	[ $# -gt 0 ] || usage_err "ask needs a set name"
+	cmd_jev_ask "$@"
+	;;
 -*) usage_err "unknown option: $1" ;;
-*) cmd_judge "$@" ;;
+*) cmd_jev_ask "$@" ;; # the pre-jev bare-name form, kept until the next breaking release
 esac

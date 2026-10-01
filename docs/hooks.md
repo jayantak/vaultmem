@@ -224,7 +224,10 @@ stamp; only later calls compare against it and can produce a nudge. If you also
 want the stamp anchored at the true start of the session rather than the first
 Stop, add the same `vaultmem nudge` command to your SessionStart hooks too —
 planting the stamp there is harmless (it is a no-op once the stamp already
-exists later in the same run).
+exists later in the same run). Jev is not consulted there: `nudge` reads the
+payload's `hook_event_name` and asks `capture-worthy` only on `Stop` (or on no
+`hook_event_name` at all, for a caller piping bare JSON), so a SessionStart
+wiring never sends a transcript and never prints a "before you stop" line.
 
 ### What the Stop hook receives on stdin
 
@@ -243,7 +246,7 @@ Confirmed 2026-09-22 against each harness's hooks reference:
   `turn_id`, `permission_mode`, plus Stop's own `stop_hook_active` and
   `last_assistant_message` (`string | null`).
 
-The transcript line shapes `nudge --judge` reads were checked against local
+The transcript line shapes `nudge` reads were checked against local
 transcripts from both harnesses, not against a published spec (neither
 documents it as a stable format):
 
@@ -251,65 +254,51 @@ documents it as a stable format):
   `content` as an array of `{"type":"text","text":"…"}` blocks.
 - Codex: `{"type":"response_item","payload":{"type":"message","role":"user"|"assistant","content":[{"type":"input_text"|"output_text","text":"…"}]}}`.
 
-### `nudge --judge`: ask the judge before you stop
+### `nudge`: ask Jev before you stop
 
-With the optional [judge extension](judge.md), `vaultmem nudge --judge` also
+With the optional [Jev extension](jev.md), `vaultmem nudge` also
 catches the case the heuristic cannot see: durable knowledge (a decision, root
 cause, incident, pattern, or milestone) surfaced in the conversation and no note
 was written at all. It reads the hook's stdin JSON, takes the newest
 user/assistant text turns from `transcript_path` (at most 24000 bytes; tool
 calls, tool results, thinking, and subagent turns are left out), appends
 `last_assistant_message` if the transcript lags it, and asks the
-`capture-worthy` judge. A confident yes prints a second line:
+`capture-worthy` set. A confident yes prints a second line:
 
 ```
 ⚠ vaultmem: this session looks to hold a durable root-cause; capture it (vault-capture) before you stop.
 ```
 
-```jsonc
-// ~/.claude/settings.json → "hooks"
-{
-  "hooks": {
-    "Stop": [
-      {
-        "hooks": [
-          {
-            "type": "command",
-            "command": "command -v vaultmem >/dev/null && vaultmem nudge --judge"
-          }
-        ]
-      }
-    ]
-  }
-}
-```
+The Stop wiring above is the whole of it: no extra flag, no second hook.
 
-The judge runs only when **all three** consent preconditions hold, and a
-session `_index.md` was not updated since the stamp:
+Jev runs only when **all four** preconditions hold, and a session `_index.md`
+was not updated since the stamp:
 
-1. The extension is installed and `[ext.judge] enabled = true`.
-2. `nudge` is named in `[ext.judge] hook_judges` (default empty: nothing runs
+1. The payload is a `Stop` payload: `hook_event_name` is `Stop`, or absent (a
+   caller piping bare JSON). A SessionStart wiring never reaches Jev.
+2. The extension is installed and `[ext.jev] enabled = true`.
+3. `nudge` is named in `[ext.jev] hooks` (default empty: nothing runs
    inside a hook until you name it).
-3. `vaultmem which` routes `$PWD` to a vault **confidently** (a `match_owners`
-   or `match_paths` rule, not the fallback), and that vault sets `judge = true`.
+4. `vaultmem which` routes `$PWD` to a vault **confidently** (a `match_owners`
+   or `match_paths` rule, not the fallback), and that vault sets `jev = true`.
 
-**When all three hold, the transcript tail leaves the machine**: it is sent to
+**When all four hold, the transcript tail leaves the machine**: it is sent to
 the remote evaluation model through the extension. Leave `nudge` out of
-`hook_judges`, or keep `judge = false` on a vault, to keep it local.
+`hooks`, or keep `jev = false` on a vault, to keep it local.
 
-The heuristic line runs first and prints exactly as it does without `--judge`.
-Every judge failure (preconditions not met, stdin not JSON, no
+The heuristic line runs first and prints exactly as it does with Jev off.
+Every Jev failure (preconditions not met, stdin not JSON, no
 `transcript_path`, extension missing, timeout, a `no` or abstain answer) prints
 nothing extra and exits `0`. The extension enforces `timeout_ms`; core adds no
-timer of its own. `nudge` without `--judge` never reads stdin and never runs the
-extension.
+timer of its own. With `nudge` left out of `hooks`, `nudge` never reads stdin and
+never runs the extension.
 
-## UserPromptSubmit: `vaultmem judge prompt`
+## UserPromptSubmit: `vaultmem jev prompt`
 
-With the optional [judge extension](judge.md#recall-reflex-gate-prompt),
-`vaultmem judge prompt` backs the "check the vault before you re-derive" reflex
+With the optional [Jev extension](jev.md#recall-reflex-gate-prompt),
+`vaultmem jev prompt` backs the "check the vault before you re-derive" reflex
 with a check on every prompt. When the prompt asks about a past decision, a
-root cause, or why something is built the way it is, and the judge is
+root cause, or why something is built the way it is, and Jev is
 confident, it prints one line the harness adds to the agent's context:
 
 ```
@@ -325,7 +314,7 @@ vaultmem: this looks like a "why" question; run `vaultmem <query>` before re-der
         "hooks": [
           {
             "type": "command",
-            "command": "command -v vaultmem >/dev/null && vaultmem judge prompt"
+            "command": "command -v vaultmem >/dev/null && vaultmem jev prompt"
           }
         ]
       }
@@ -336,15 +325,15 @@ vaultmem: this looks like a "why" question; run `vaultmem <query>` before re-der
 
 It sends anything only when **all three** preconditions hold:
 
-1. The extension is installed and `[ext.judge] enabled = true`.
-2. `prompt` is named in `[ext.judge] hook_judges` (default empty). This entry
+1. The extension is installed and `[ext.jev] enabled = true`.
+2. `prompt` is named in `[ext.jev] hooks` (default empty). This entry
    is separate from `nudge`: naming one does not enable the other.
 3. `vaultmem which` routes `$PWD` to a vault **confidently** (a `match_owners`
-   or `match_paths` rule, not the fallback), and that vault sets `judge = true`.
+   or `match_paths` rule, not the fallback), and that vault sets `jev = true`.
 
 **When all three hold, every prompt you type leaves the machine**: it is sent
 to the remote evaluation model through the extension. Leave `prompt` out of
-`hook_judges`, or keep `judge = false` on the vault, to keep prompts local.
+`hooks`, or keep `jev = false` on the vault, to keep prompts local.
 
 Every other outcome prints nothing and exits `0`: a precondition not met, an
 empty prompt, a `no` or abstain answer, a timeout, an HTTP error, a bad
@@ -365,9 +354,9 @@ user's input text that Claude Code is about to process". The common fields
 added as context that Claude can see and act on"; exit 2 "blocks prompt
 processing and erases the prompt".
 
-`judge prompt` sends only the `prompt` field. The session id, paths, and every
+`jev prompt` sends only the `prompt` field. The session id, paths, and every
 other field stay local. Stdin that is not a JSON object is sent as raw text, so
-the command also works from a script: `printf '%s' "why X?" | vaultmem judge prompt`.
+the command also works from a script: `printf '%s' "why X?" | vaultmem jev prompt`.
 
 **Codex** ([developers.openai.com/codex/hooks](https://developers.openai.com/codex/hooks),
 which redirects to learn.chatgpt.com/docs/hooks), confirmed the same day: its
