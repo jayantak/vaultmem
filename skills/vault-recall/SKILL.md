@@ -62,8 +62,8 @@ reliable:
 
 - **Terms are ANDed; keep queries short.** Every term must appear in the note,
   so each word you add narrows the result set. Search *keywords*, not a sentence
-  — `herdr monitor` finds the note, `how do I monitor a run with herdr` demands
-  all seven words and finds nothing. Two or three distinctive terms is the sweet
+  — `tunnel idle` finds the note, `why does the db tunnel go idle so fast`
+  demands all nine words and finds nothing. Two or three distinctive terms is the sweet
   spot. For an exact phrase, quote it inside the shell quotes: `'"dry run"'`.
 - **You are the query expander.** One hopeful query is not a search. Run 2–3
   deliberate variants — the exact term, a synonym, an adjacent concept
@@ -172,10 +172,10 @@ with prior notes — a person's name, project name, system name, debug pattern,
 4. **Route by candidate count and depth:**
    - **0 candidates** → tell the user nothing relevant is in the vault, proceed without it. (If the topic clearly *should* have been written down, that is a capture gap — see `vault-capture`.)
    - **1-2 candidates with focused content** → read inline (`vaultmem cat`, section-scoped where possible) and synthesize directly.
-   - **3+ candidates OR cross-cutting synthesis** → use a delegated explorer when available, with the candidate paths and a focused question. Otherwise, inspect only the most relevant notes directly.
+   - **3+ candidates OR cross-cutting synthesis** → use a delegated reader when available, with the candidate paths and a focused question. Otherwise, inspect only the most relevant notes directly.
 5. **Cite the notes used** so the user can open them in Obsidian.
 
-### When to dispatch the Explore subagent
+### When to dispatch a reader subagent
 
 Use it any time you'd otherwise be reading 3+ notes, or any task that requires
 synthesizing across notes (e.g. "summarize what I know about distributed
@@ -183,13 +183,16 @@ systems"). For one long note, prefer `vaultmem cat --section` over a subagent.
 Pattern:
 
 ```
-Ask an explorer to read these vault notes:
+Ask a reader to read these vault notes:
 - <path1>
 - <path2>
 - <path3>
 
 Answer: <focused question>. Quote the notes you used.
 ```
+
+The reader synthesizes, so give it a general-purpose subagent on a mid-tier
+model (Claude Code: `general-purpose`, not `Explore`, which only locates).
 
 ## Frugality rules
 
