@@ -62,8 +62,8 @@ reliable:
 
 - **Terms are ANDed; keep queries short.** Every term must appear in the note,
   so each word you add narrows the result set. Search *keywords*, not a sentence
-  — `herdr monitor` finds the note, `how do I monitor a run with herdr` demands
-  all seven words and finds nothing. Two or three distinctive terms is the sweet
+  — `tunnel idle` finds the note, `why does the db tunnel go idle so fast`
+  demands all nine words and finds nothing. Two or three distinctive terms is the sweet
   spot. For an exact phrase, quote it inside the shell quotes: `'"dry run"'`.
 - **You are the query expander.** One hopeful query is not a search. Run 2–3
   deliberate variants — the exact term, a synonym, an adjacent concept
