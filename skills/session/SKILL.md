@@ -321,8 +321,9 @@ finished unit.
 **Resume-time verification fans out; it never runs inline.** When the next
 step requires re-establishing facts against a repo — verifying a ticket's
 claims, grep sweeps, multi-file reads, `git show` archaeology — delegate the
-whole read phase to one read-only subagent (Explore / general-purpose) carrying
-the claim list and repo paths; only verdicts with file:line evidence return.
+whole read phase to one read-only general-purpose subagent carrying the claim
+list and repo paths; only verdicts with file:line evidence return. Verdicts are
+judgment, so not a locate-only agent (Claude Code: not `Explore`).
 The main context keeps the judgment work (rulings, ticket patches, logging).
 Inline verification is the top context burner on resume (measured: 125k of a
 200k window on a single step). Same rule mid-session for any bulk read phase.
